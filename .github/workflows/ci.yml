@@ -33,3 +33,15 @@ jobs:
         with:
           toolchain: stable
       - run: bash integration-tests/preflight-fail-closed.sh
+
+  cgroup-runner:
+    name: Linux cgroup 원자적 실행
+    needs: cgroup-preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - run: bash integration-tests/cgroup-runner-smoke.sh

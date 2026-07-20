@@ -1,5 +1,5 @@
 [workspace]
-members = ["daemon"]
+members = ["daemon", "test-fixtures"]
 resolver = "2"
 
 [workspace.package]

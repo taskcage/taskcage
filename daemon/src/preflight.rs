@@ -50,6 +50,28 @@ pub struct CapabilityReport {
     pub atomic_entry_supported: bool,
 }
 
+/// 모든 필수 검사를 실제로 통과했음을 나타내는 값이다.
+///
+/// 필드는 외부에 공개하지 않아 단순한 성공 보고서를 직접 만들어 실행 권한처럼 사용할 수
+/// 없다. 작업 실행기는 이 값을 넘겨받아야만 cgroup을 만들 수 있다.
+#[derive(Debug)]
+pub struct VerifiedEnvironment {
+    report: CapabilityReport,
+    #[cfg(target_os = "linux")]
+    paths: CgroupPaths,
+}
+
+impl VerifiedEnvironment {
+    pub fn report(&self) -> &CapabilityReport {
+        &self.report
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn into_paths(self) -> CgroupPaths {
+        self.paths
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum PreflightError {
     #[error(transparent)]
@@ -97,7 +119,7 @@ pub enum PreflightError {
 
 /// 실제 환경 검사와 단위 시험용 가짜 검사를 같은 실행 차단 경로에 연결한다.
 pub trait CapabilityProbe {
-    fn check(&self) -> Result<CapabilityReport, PreflightError>;
+    fn check(&self) -> Result<VerifiedEnvironment, PreflightError>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -120,7 +142,7 @@ impl SystemProbe {
 }
 
 impl CapabilityProbe for SystemProbe {
-    fn check(&self) -> Result<CapabilityReport, PreflightError> {
+    fn check(&self) -> Result<VerifiedEnvironment, PreflightError> {
         #[cfg(target_os = "linux")]
         {
             check_linux(self.root_override.as_deref())
@@ -140,14 +162,14 @@ impl CapabilityProbe for SystemProbe {
 pub fn with_verified_environment<P, F, T>(probe: &P, action: F) -> Result<T, PreflightError>
 where
     P: CapabilityProbe,
-    F: FnOnce(CapabilityReport) -> T,
+    F: FnOnce(VerifiedEnvironment) -> T,
 {
-    let report = probe.check()?;
-    Ok(action(report))
+    let environment = probe.check()?;
+    Ok(action(environment))
 }
 
 #[cfg(target_os = "linux")]
-fn check_linux(root_override: Option<&Path>) -> Result<CapabilityReport, PreflightError> {
+fn check_linux(root_override: Option<&Path>) -> Result<VerifiedEnvironment, PreflightError> {
     let paths = CgroupPaths::resolve(root_override)?;
     ensure_cgroup2_filesystem(paths.root())?;
     let controllers = read_words(&paths.root().join("cgroup.controllers"))?;
@@ -160,7 +182,7 @@ fn check_linux(root_override: Option<&Path>) -> Result<CapabilityReport, Preflig
     let original_subtree = read_words(&paths.root().join("cgroup.subtree_control"))?;
     let mut moved_to_manager = false;
 
-    let result: Result<CapabilityReport, PreflightError> = (|| {
+    let result: Result<VerifiedEnvironment, PreflightError> = (|| {
         require_regular_file(
             "manager 프로세스 이동",
             &paths.manager().join("cgroup.procs"),
@@ -179,15 +201,18 @@ fn check_linux(root_override: Option<&Path>) -> Result<CapabilityReport, Preflig
         probe_atomic_entry(manager_directory.as_raw_fd())?;
         enable_required_controllers(paths.root())?;
 
-        Ok(CapabilityReport {
-            delegated_root: paths.root().to_path_buf(),
-            manager_cgroup: paths.manager().to_path_buf(),
-            controllers,
-            cgroup_kill: true,
-            event_and_stat_files: true,
-            delegated_root_writable: true,
-            manager_membership_verified: true,
-            atomic_entry_supported: true,
+        Ok(VerifiedEnvironment {
+            report: CapabilityReport {
+                delegated_root: paths.root().to_path_buf(),
+                manager_cgroup: paths.manager().to_path_buf(),
+                controllers,
+                cgroup_kill: true,
+                event_and_stat_files: true,
+                delegated_root_writable: true,
+                manager_membership_verified: true,
+                atomic_entry_supported: true,
+            },
+            paths: paths.clone(),
         })
     })();
 
@@ -467,20 +492,25 @@ mod tests {
     fn action_runs_only_after_a_successful_report() {
         struct PassingProbe;
         impl CapabilityProbe for PassingProbe {
-            fn check(&self) -> Result<CapabilityReport, PreflightError> {
-                Ok(CapabilityReport {
-                    delegated_root: PathBuf::from("/delegated"),
-                    manager_cgroup: PathBuf::from("/delegated/manager"),
-                    controllers: BTreeSet::from([
-                        "cpu".to_owned(),
-                        "memory".to_owned(),
-                        "pids".to_owned(),
-                    ]),
-                    cgroup_kill: true,
-                    event_and_stat_files: true,
-                    delegated_root_writable: true,
-                    manager_membership_verified: true,
-                    atomic_entry_supported: true,
+            fn check(&self) -> Result<VerifiedEnvironment, PreflightError> {
+                let root = PathBuf::from("/delegated");
+                Ok(VerifiedEnvironment {
+                    report: CapabilityReport {
+                        delegated_root: root.clone(),
+                        manager_cgroup: root.join("manager"),
+                        controllers: BTreeSet::from([
+                            "cpu".to_owned(),
+                            "memory".to_owned(),
+                            "pids".to_owned(),
+                        ]),
+                        cgroup_kill: true,
+                        event_and_stat_files: true,
+                        delegated_root_writable: true,
+                        manager_membership_verified: true,
+                        atomic_entry_supported: true,
+                    },
+                    #[cfg(target_os = "linux")]
+                    paths: CgroupPaths::for_test(root),
                 })
             }
         }
