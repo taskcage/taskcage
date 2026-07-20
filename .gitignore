@@ -1,0 +1,30 @@
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# Go
+bin/
+coverage.out
+*.test
+
+# Rust
+target/
+
+# Gradle and Java
+.gradle/
+**/build/
+*.class
+
+# TaskCage runtime
+.taskcage/
+*.pid
+*.sock
+*.log
+
+# Local environment
+.env
+.env.*
+!.env.example

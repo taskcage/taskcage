@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "crates/taskcage-launcher",
+    "crates/taskcage-fixtures",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/taskcage/taskcage"
+rust-version = "1.85"

@@ -1,0 +1,20 @@
+[Unit]
+Description=TaskCage Linux job manager
+Documentation=https://github.com/taskcage/taskcage
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/taskcage/taskcaged --socket=/run/taskcage/taskcaged.sock --cgroup-root=auto --launcher=/usr/libexec/taskcage/taskcage-launcher
+Restart=on-failure
+RestartSec=1s
+RuntimeDirectory=taskcage
+RuntimeDirectoryMode=0750
+Delegate=yes
+NoNewPrivileges=yes
+
+# The package or operator must set User= and Group= to the same application
+# account for the single-user MVP deployment model.
+
+[Install]
+WantedBy=multi-user.target
