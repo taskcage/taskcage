@@ -9,7 +9,7 @@ Active documents elaborate that decision:
 - [`ARCHITECTURE.md`](ARCHITECTURE.md): Rust daemon design and Linux invariants
 - [`PROTOCOL.md`](PROTOCOL.md): Rust daemon and Java SDK wire contract
 - [`MVP-ROADMAP.md`](MVP-ROADMAP.md): two-person delivery plan
-- [`adr/`](adr/): decision history
+- [`decisions/`](decisions/): decision history
 
 If an active document conflicts with the root README, the README wins and the
 conflicting document must be corrected. Files under [`archive/`](archive/) are

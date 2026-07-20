@@ -34,4 +34,4 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: current
-      - run: gradle -p sdk/java test --no-daemon
+      - run: gradle -p java-sdk test --no-daemon
