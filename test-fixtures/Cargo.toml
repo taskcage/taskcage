@@ -8,3 +8,7 @@ rust-version.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[[bin]]
+name = "ghost-tree"
+path = "src/bin/ghost_tree.rs"

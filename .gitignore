@@ -6,7 +6,7 @@
 *.swp
 
 # Build outputs
-bin/
+/bin/
 
 # Rust
 target/

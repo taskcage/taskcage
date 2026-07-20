@@ -20,3 +20,31 @@ The capability is mandatory for the contest MVP. Unsupported kernels or permissi
 - Kernel, permission and syscall capability checks become part of preflight.
 - Compatibility is narrower, which is acceptable for the pinned Ubuntu MVP target.
 - A future compatibility fallback would require a separately reviewed design and must preserve the same guarantee.
+
+## Implementation guardrails
+
+- Resolve and validate the delegated cgroup root before target creation.
+- Prepare executable path, argv, environment and file-descriptor state in the
+  parent before `clone3`.
+- Use a close-on-exec error pipe so the parent can distinguish successful
+  `execve` from child setup failure.
+- Restrict the child-side path to async-signal-safe syscalls and terminate with
+  `_exit` on failure.
+- Set a parent-death signal and verify that the expected parent is still alive.
+- Never add a post-start `cgroup.procs` move as an automatic fallback.
+
+## Verification
+
+- Unit-test argv preparation, wait-status decoding and cgroup parsers.
+- Run `integration-tests/cgroup-smoke.sh` inside a transient systemd service
+  with `Delegate=yes`.
+- Use the bounded `ghost-tree` fixture to prove that descendants are killed
+  after the leader exits.
+- Require `cgroup.events` to report `populated 0` before directory removal.
+
+## Remaining risks
+
+- The post-`clone3` child path requires focused unsafe-code review.
+- Kernel, systemd and delegated-controller availability vary by distribution.
+- The first smoke slice inherits stdout and stderr; bounded capture is a later
+  lifecycle milestone.
