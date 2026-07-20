@@ -1,0 +1,14 @@
+[package]
+name = "taskcage-fixtures"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ghost-tree"
+path = "src/bin/ghost_tree.rs"

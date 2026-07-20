@@ -28,3 +28,21 @@ bash integration-tests/preflight-fail-closed.sh
 
 Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 없으면 종료 코드 77로
 건너뛴다. GitHub Actions의 Ubuntu 24.04 작업에서는 건너뛰지 않고 통과해야 한다.
+
+## 작업별 제한과 원자적 실행
+
+`cgroup-runner-smoke.sh`는 실제 위임 서비스 안에서 다음 내용을 확인한다.
+
+1. 메모리, 프로세스 수와 CPU 상한을 작업 cgroup에 쓰고 다시 읽는다.
+2. target을 `clone3(CLONE_INTO_CGROUP)`로 생성 순간부터 작업 cgroup 안에 둔다.
+3. 정상 종료와 0이 아닌 종료 상태를 결과에 남긴다.
+4. 대표 프로세스가 먼저 끝난 뒤 남은 자식과 손자를 `cgroup.kill`로 정리한다.
+5. 벽시계 제한을 넘긴 작업을 전체 종료한다.
+6. 없는 실행 파일과 작업 디렉터리 오류가 제한 없는 실행으로 이어지지 않는다.
+7. `populated 0` 확인 뒤에만 통계와 정리 완료 결과를 반환한다.
+
+실행 방법:
+
+```bash
+bash integration-tests/cgroup-runner-smoke.sh
+```

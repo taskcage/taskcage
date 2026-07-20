@@ -6,7 +6,8 @@ mod unix_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use taskcaged::preflight::{
-        CapabilityProbe, CapabilityReport, PreflightError, SystemProbe, with_verified_environment,
+        CapabilityProbe, PreflightError, SystemProbe, VerifiedEnvironment,
+        with_verified_environment,
     };
 
     static MARKER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -20,7 +21,7 @@ mod unix_tests {
     struct FailingProbe(SimulatedFailure);
 
     impl CapabilityProbe for FailingProbe {
-        fn check(&self) -> Result<CapabilityReport, PreflightError> {
+        fn check(&self) -> Result<VerifiedEnvironment, PreflightError> {
             match self.0 {
                 SimulatedFailure::MissingController => Err(PreflightError::MissingController {
                     controller: "pids".to_owned(),
