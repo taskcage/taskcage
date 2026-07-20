@@ -9,20 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  go:
-    name: Go
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version: stable
-          check-latest: true
-      - run: go test ./...
-      - run: go vet ./...
-
   rust:
-    name: Rust
+    name: Rust daemon
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

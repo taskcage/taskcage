@@ -5,7 +5,7 @@ After=local-fs.target
 
 [Service]
 Type=simple
-ExecStart=/usr/libexec/taskcage/taskcaged --socket=/run/taskcage/taskcaged.sock --cgroup-root=auto --launcher=/usr/libexec/taskcage/taskcage-launcher
+ExecStart=/usr/libexec/taskcage/taskcaged --socket=/run/taskcage/taskcaged.sock --cgroup-root=auto
 Restart=on-failure
 RestartSec=1s
 RuntimeDirectory=taskcage

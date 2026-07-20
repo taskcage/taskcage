@@ -1,6 +1,6 @@
 # ADR 0001: Go daemon and Rust launcher
 
-- Status: Accepted
+- Status: Superseded by ADR 0003
 - Date: 2026-07-20
 
 ## Context
@@ -22,3 +22,9 @@ TaskCage needs a long-lived Linux control plane for cgroup lifecycle, scheduling
 - Three language toolchains increase CI and release work.
 - The strict component boundary prevents duplicated policy and keeps the Rust portion reviewable.
 - The daemon becomes an MVP requirement rather than a post-MVP agent.
+
+## Supersession
+
+The repository README was adopted as the final product decision on 2026-07-20.
+It selects a single Rust `taskcaged` daemon, so this split-language proposal is
+retained only as decision history.

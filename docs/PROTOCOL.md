@@ -93,7 +93,7 @@ Initial reason values:
 - `BACKEND_UNAVAILABLE`
 - `UNKNOWN`
 
-Byte output is base64 encoded in v1 so Java and Go share one deterministic JSON contract. Output is drained concurrently and bounded before encoding.
+Byte output is base64 encoded in v1 so Java and Rust share one deterministic JSON contract. Output is drained concurrently and bounded before encoding.
 
 ## 4. Cancellation
 
@@ -114,4 +114,4 @@ Explicit reconnectable cancel messages and result replay are deferred until prot
 - Additive fields may be ignored only when explicitly documented as optional.
 - A required field never changes meaning within protocol v1.
 - Enum values unknown to a client must map to an SDK `UNKNOWN` representation rather than causing output loss.
-- Protocol changes require fixture vectors shared by Go and Java tests.
+- Protocol changes require fixture vectors shared by Rust and Java tests.

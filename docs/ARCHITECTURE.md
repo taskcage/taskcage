@@ -1,224 +1,225 @@
 # TaskCage MVP Architecture
 
+> Authority: the repository root [`README.md`](../README.md). This document
+> elaborates the final Rust-daemon decision and may not override it.
+
 ## 1. Decision summary
 
-TaskCage is a local Linux job-management program and Java SDK composed of three language boundaries.
+TaskCage has one native Linux management program and a Java integration layer.
 
-| Component | Language | Responsibility |
+| Component | Technology | Responsibility |
 |---|---|---|
-| `taskcaged` | Go | systemd delegation, UDS server, admission control, cgroup lifecycle, monitoring, classification, recovery |
-| `taskcage-launcher` | Rust | minimal pre-exec boundary, parent-death signal, shell-free target `exec` |
-| TaskCage SDK | Java 21 | public API, local protocol client, Spring Boot integration, Micrometer bridge |
+| `taskcaged` | Rust, systemd | UDS, admission control, cgroup lifecycle, atomic process creation, monitoring, classification and recovery |
+| TaskCage API | Java 21 | command, resource budget and execution-result types |
+| TaskCage client | Java 21 | versioned UDS protocol transport |
+| Spring Boot starter | Java 21 | auto-configuration, properties and minimal metrics |
 
-Go owns all policy and cgroup semantics. Rust must remain intentionally small and must not duplicate scheduling, monitoring or classification logic. Java does not write to cgroupfs in the daemon-backed MVP.
+There is no Go daemon and no separate launcher in the final MVP structure.
+The Rust daemon creates the target directly inside its prepared cgroup.
 
 ## 2. System view
 
 ```text
 Spring application
     |
-    | TaskCage.run(command, budget)
+    | taskCage.execute(command, budget)
     v
 Java SDK
     |
     | versioned length-prefixed JSON over Unix Domain Socket
     v
-taskcaged (Go, outside all job cgroups)
+taskcaged (Rust, systemd service)
     |
-    +--> Admission Controller
-    |       |- global concurrency limit
-    |       |- bounded FIFO queue
-    |       `- queue timeout
-    |
-    +--> Cgroup Manager
-    |       |- create job leaf
-    |       |- apply memory/cpu/pids limits
-    |       |- read kernel evidence
-    |       `- kill, verify empty, delete
-    |
-    +--> Executor
-    |       `- clone3(CLONE_INTO_CGROUP)
-    |                  |
-    |                  v
-    |          taskcage-launcher (Rust)
-    |                  `- exec target argv
-    |
-    +--> Output and Event Monitor
-    |
-    `--> Classifier --> ExecutionResult --> Java SDK
+    +--> Preflight and peer authorization
+    +--> Bounded FIFO admission queue
+    +--> Delegated cgroup v2 manager
+    +--> clone3(CLONE_INTO_CGROUP) + execve target
+    +--> Output, time and kernel-event monitor
+    `--> Classifier and cleanup --> ExecutionResult
 ```
 
 ## 3. Delegated cgroup layout
 
-The MVP uses one systemd service account and one delegated cgroup subtree.
+The MVP uses one systemd service account and one delegated subtree.
 
 ```text
 taskcaged.service                  delegated root
-├── manager                       taskcaged moves itself here
+├── manager                       daemon moves itself here
 └── jobs                          controller-owning internal node
-    ├── job-<id>                  leaf: launcher and target process tree
+    ├── job-<id>                  target process tree leaf
     └── job-<id>
 ```
 
-Startup order is important.
+Startup order:
 
 1. systemd starts `taskcaged` with `Delegate=yes`.
-2. The daemon discovers its service cgroup from `/proc/self/cgroup` unless an explicit test root is configured.
-3. It creates `manager`, moves its own PID there and verifies the move.
-4. It creates `jobs` and enables `+memory +cpu +pids` in the correct parent `cgroup.subtree_control`.
-5. It verifies that it is the single writer for the delegated subtree.
-6. It scans stale `job-*` leaves, kills any populated group and removes empty groups before accepting clients.
+2. The daemon resolves its own cgroup from `/proc/self/cgroup`.
+3. It creates `manager`, moves itself there and verifies membership.
+4. It creates `jobs` and enables the required controllers in the correct
+   parent `cgroup.subtree_control`.
+5. It checks cgroup v2, `cpu`, `memory`, `pids`, `cgroup.kill`, permissions and
+   atomic process-entry support.
+6. It kills and removes stale `job-*` groups before accepting requests.
 
-TaskCage never creates or modifies cgroups outside this resolved and canonicalized root.
+TaskCage never writes outside its canonical delegated root and remains the
+single writer for that subtree.
 
-## 4. Atomic process start
+## 4. Rust daemon modules
 
-The Go daemon eliminates the post-start attach race with `clone3(CLONE_INTO_CGROUP)`.
+| Module | Scope |
+|---|---|
+| `protocol` | frame codec, request validation, response encoding and version rules |
+| `scheduler` | maximum active jobs, bounded FIFO queue, queue timeout and permit ownership |
+| `cgroup` | root discovery, controller setup, job leaves, limits, evidence and removal |
+| `executor` | pipe preparation, `clone3`, pidfd where supported and shell-free `execve` |
+| `monitor` | stdout/stderr drain, monotonic timers, event snapshots and termination trigger |
+| `classifier` | deterministic status and termination-reason priority |
+| `recovery` | startup scavenging and shutdown cleanup |
 
-1. Create `jobs/job-<id>` as an empty leaf cgroup.
-2. Write and read back `memory.max`, `memory.swap.max`, `memory.oom.group`, `cpu.max` and `pids.max` as supported.
-3. Capture baseline values from `memory.events.local`, `pids.events` and `cpu.stat`.
-4. Open the job cgroup directory and retain its file descriptor.
-5. Configure Go `exec.Cmd.SysProcAttr` with `UseCgroupFD`, `CgroupFD` and `PidFD`.
-6. Start `taskcage-launcher -- <target> <args...>` directly inside the job cgroup.
-7. The Rust launcher sets a parent-death signal and replaces itself with the target using a shell-free `exec`.
-8. The target and every descendant inherit membership in the job cgroup.
+Policy stays in the parent daemon. The child path between `clone3` and
+`execve` must not parse configuration, allocate memory, acquire locks or emit
+structured logs.
 
-There is no fallback that starts the target first and moves its PID afterward. If the kernel, filesystem or permissions cannot provide atomic entry, preflight returns `UNSUPPORTED` and the target is not executed.
+## 5. Atomic target creation
 
-The Rust launcher briefly contributes to job accounting before `exec`, but it has no runtime threads, network stack or long-lived heap and is replaced by the target in the same process. The Go runtime always stays outside the job cgroup.
+Starting a process and later moving its PID into `cgroup.procs` creates a race.
+The final MVP instead uses the following sequence:
 
-## 5. Job lifecycle
+1. Create an empty `jobs/job-<id>` leaf.
+2. Apply and read back supported limits.
+3. Capture baseline kernel-event counters.
+4. Open the job cgroup directory and prepare argv, environment, working
+   directory, pipes and the child error channel.
+5. Call `clone3` with `CLONE_INTO_CGROUP` and request a pidfd where supported.
+6. In the child, set parent-death behavior, install prepared file descriptors,
+   change directory and call shell-free `execve`.
+7. In the parent, close child-only descriptors and begin monitoring.
+
+The target and all descendants begin inside the job cgroup. Unsupported
+kernels or permissions return `UNSUPPORTED`; there is no post-start move
+fallback.
+
+## 6. Job lifecycle
 
 ```text
 RECEIVED
    |
    v
-QUEUED -- queue full/timeout --> REJECTED
+QUEUED -- capacity/queue timeout --> REJECTED
    |
    v
-PREPARING -- preflight/start error --> INTERNAL_ERROR or UNSUPPORTED
+PREPARING -- preflight/start error --> UNSUPPORTED or INTERNAL_ERROR
    |
    v
-RUNNING -- limit/timeout/cancel --> KILLING
+RUNNING -- timeout/limit/cancel --> KILLING
    |                                  |
-   | normal exit                      v
+   | target exit                      v
    +----------------------------> COLLECTING
                                       |
                                       v
                                    CLEANUP
                                       |
                                       v
-                                   RESULT
+                                    RESULT
 ```
 
-The execution permit is released only after cleanup reaches an empty cgroup or records an explicit cleanup failure. Permit ownership belongs to one lifecycle object and is released exactly once.
+One lifecycle object owns the execution permit. It releases the permit exactly
+once, only after the job cgroup is empty or cleanup failure is explicitly
+recorded.
 
-## 6. Limits and evidence
+## 7. Limits and evidence
 
-| User budget | Kernel or daemon mechanism | Evidence |
+| Budget | Mechanism | Evidence |
 |---|---|---|
+| CPU quota | `cpu.max` | `cpu.stat` |
 | memory | `memory.max` | `memory.events.local`, `memory.peak` |
-| swap | `memory.swap.max` when supported | capability report and configured value |
-| CPU rate | `cpu.max` | `cpu.stat` |
-| process count | `pids.max` | `pids.events`, `pids.peak` when supported |
-| wall time | Go monotonic timer | daemon watchdog state |
-| output size | concurrent bounded stdout/stderr drain | collector state and byte counters |
-| concurrency | daemon admission controller | active and queued counters |
+| process count | `pids.max` | `pids.events`, `pids.peak` when available |
+| wall time | monotonic Rust timer | watchdog state |
+| output size | simultaneous bounded stream drains | byte counters and truncation state |
+| concurrency | daemon scheduler | active and queued counters |
 
-Event files are read before execution and after termination. Classification uses counter deltas, not exit-code guesses.
+Event files are read before execution and after termination. Classification
+uses counter deltas rather than exit-code guesses.
 
-Initial result-priority order:
+Initial reason priority:
 
-1. explicit caller cancellation
+1. caller cancellation
 2. queue capacity or queue timeout
 3. wall timeout
-4. output limit watchdog
+4. output limit
 5. memory OOM event delta
-6. PID limit event delta
-7. normal or non-zero target exit
-8. target signal or unknown failure
+6. PID-limit event delta
+7. normal or non-zero exit
+8. signal or unknown failure
 
-## 7. Termination and cleanup
+## 8. Termination and cleanup
 
-For timeout, cancellation or policy violation, the daemon performs the following sequence.
+For cancellation, timeout or a policy violation, the daemon:
 
-1. Record the watchdog or caller state that initiated termination.
-2. Write `1` to the job's `cgroup.kill`.
-3. Wait for `cgroup.events` to report `populated 0` within a bounded cleanup timeout.
-4. Collect final kernel evidence and usage statistics.
-5. Delete the empty job cgroup.
-6. Return `ExecutionResult` and release the admission permit.
+1. records the first terminal trigger;
+2. writes `1` to the job's `cgroup.kill`;
+3. waits within a bounded cleanup timeout for `cgroup.events` to report
+   `populated 0`;
+4. collects final counters and usage;
+5. removes the empty cgroup;
+6. returns the result and releases the scheduler permit.
 
-Killing only the launcher PID, target PID, process group or `ProcessHandle.descendants()` is never treated as successful cleanup.
+Killing only the leader PID, process group or a point-in-time descendant list
+is not successful TaskCage cleanup.
 
-## 8. Daemon crash recovery
+## 9. Crash recovery
 
-- `taskcage-launcher` configures a parent-death signal so the target leader is killed if `taskcaged` dies.
-- systemd supervises and restarts `taskcaged` on failure.
-- startup scavenging treats every stale populated `job-*` group as unowned and invokes `cgroup.kill` before deletion.
-- job metadata is written atomically outside the job leaf before target start and removed only after cleanup.
-- the MVP may return an interrupted result to the Java caller after a daemon crash; cross-restart result replay is post-MVP.
+- systemd restarts `taskcaged` after failure.
+- The target child receives a parent-death signal as defense in depth.
+- Startup scavenging treats every stale populated `job-*` as unowned, invokes
+  `cgroup.kill`, waits for emptiness and removes it.
+- Cross-restart result replay is outside protocol v1.
 
-The parent-death signal is defense in depth. Process-tree cleanup is proven by cgroup state, not by the signal alone.
+Cleanup is proven by cgroup state, not by the parent-death signal alone.
 
-## 9. Local protocol and trust model
+## 10. Protocol and trust model
 
-- The daemon listens on `/run/taskcage/taskcaged.sock`.
-- One connection carries one synchronous job request and final result.
-- The protocol is versioned and length-prefixed to avoid newline and partial-read ambiguity.
-- Socket file permissions and `SO_PEERCRED` restrict the MVP to the configured application account or group.
-- Closing the connection before a result is interpreted as caller cancellation unless the job is already terminal.
-- Commands are argv arrays. Shell command strings are not accepted.
-- Working directories are canonicalized and validated against configured roots when that policy is enabled.
+- Socket: `/run/taskcage/taskcaged.sock`
+- Framing: four-byte big-endian length followed by UTF-8 JSON
+- One connection per synchronous job in protocol v1
+- Commands are argv arrays; shell command strings are rejected
+- Socket permissions and Linux peer credentials restrict the caller
+- Frame size, budget ceilings and working-directory policy are daemon-owned
+- Closing an active connection is interpreted as caller cancellation
 
 See [`PROTOCOL.md`](PROTOCOL.md) for the wire contract.
 
-## 10. Security boundary
+## 11. Security boundary
 
-TaskCage limits resource consumption and cleans process trees. It does not isolate filesystem access, network access, system calls or kernel attack surface. The MVP does not use namespaces, seccomp, AppArmor or SELinux policy generation and must not be described as a security sandbox.
+TaskCage controls resource use and process-tree cleanup. It does not isolate
+filesystem access, network access, system calls or kernel attack surface. The
+MVP must not be described as a security sandbox.
 
-## 11. Dependency policy
-
-### Go
-
-- Prefer the standard library for UDS, JSON, timers, output collection and concurrency.
-- Use `golang.org/x/sys/unix` only for Linux primitives not exposed by the standard library.
-- Evaluate `github.com/containerd/cgroups/v3/cgroup2` for lifecycle helpers, while retaining direct TaskCage reads for kernel evidence and capability detection.
-- Avoid gRPC, web frameworks and configuration frameworks in the MVP.
-
-### Rust
-
-- Use stable Rust edition 2024.
-- Use `rustix` for Linux process controls and file-descriptor-safe syscall wrappers.
-- Keep launcher dependencies minimal and produce a static musl release binary for the supported architecture.
-- Do not move policy parsing, cgroup management or monitoring into the launcher.
-
-### Java
-
-- Use JDK 21 Unix Domain Socket APIs directly.
-- Keep `taskcage-api` independent of Spring.
-- Keep protocol transport in `taskcage-client`.
-- Add Spring Boot auto-configuration only in `taskcage-spring-boot-starter`.
+Namespaces, seccomp, AppArmor, SELinux and untrusted-code execution are outside
+the final MVP scope.
 
 ## 12. Compatibility target
 
-The contest MVP pins one Ubuntu LTS x86-64 environment. Runtime preflight checks capabilities instead of trusting version strings:
+The contest release pins one Ubuntu LTS x86-64 environment first. Runtime
+preflight checks capabilities instead of trusting version strings:
 
-- unified cgroup v2 mount
+- unified cgroup v2
 - delegated writable subtree
-- `memory`, `cpu` and `pids` controllers
-- `clone3(CLONE_INTO_CGROUP)` through Go `UseCgroupFD`
+- `cpu`, `memory` and `pids` controllers
+- `clone3(CLONE_INTO_CGROUP)`
 - `cgroup.kill`
-- required statistic and event files
+- required statistics and event files
 
-Broader distributions, ARM64 and a non-atomic shim fallback are post-MVP work.
+Ubuntu 22.04/24.04 expansion and ARM64 are follow-up compatibility work after
+the pinned environment passes all gates.
 
-## 13. Primary references
+## 13. Non-negotiable invariants
 
-- [Linux cgroup v2](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html)
-- [systemd cgroup delegation](https://systemd.io/CGROUP_DELEGATION/)
-- [Linux `clone3` and `CLONE_INTO_CGROUP`](https://www.man7.org/linux/man-pages/man2/clone3.2.html)
-- [Go Linux process implementation and `UseCgroupFD`](https://go.dev/src/syscall/exec_linux.go)
-- [Rust `rustix` process APIs](https://docs.rs/rustix/latest/rustix/process/)
-- [Java 21 Unix Domain Socket API](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/net/UnixDomainSocketAddress.html)
+- A target never runs outside its configured job cgroup.
+- Unsupported protection fails closed before target execution.
+- Every command is executed without a shell.
+- Every terminal path attempts whole-cgroup cleanup.
+- Cleanup success requires an empty cgroup.
+- Kernel evidence takes precedence over ambiguous exit codes.
+- Queue permits are returned exactly once after cleanup.
+- The root README wins over conflicting design documents.

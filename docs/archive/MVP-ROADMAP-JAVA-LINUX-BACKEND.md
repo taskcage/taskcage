@@ -1,6 +1,6 @@
 # TaskCage OSS 대회 MVP 로드맵 — 2인 팀 (보관본)
 
-> 이 문서는 Java 내부 cgroup backend와 native shim을 전제로 한 이전 계획이다. 현재 구현 기준은 Go `taskcaged`, Rust `taskcage-launcher`, Java SDK 구조이며, 활성 로드맵은 [`../MVP-ROADMAP.md`](../MVP-ROADMAP.md)다.
+> 이 문서는 Java 내부 cgroup backend와 native shim을 전제로 한 이전 계획이다. 현재 구현 기준은 Rust 단일 `taskcaged` daemon과 Java SDK 구조이며, 활성 로드맵은 [`../MVP-ROADMAP.md`](../MVP-ROADMAP.md)다.
 
 ## 1. 로드맵 기준
 

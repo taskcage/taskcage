@@ -5,10 +5,8 @@
 *.iml
 *.swp
 
-# Go
+# Build outputs
 bin/
-coverage.out
-*.test
 
 # Rust
 target/

@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "crates/taskcage-launcher",
+    "crates/taskcaged",
     "crates/taskcage-fixtures",
 ]
 resolver = "2"

@@ -9,7 +9,7 @@ Starting a target and then writing its PID to `cgroup.procs` allows the target t
 
 ## Decision
 
-The Go daemon opens the prepared cgroup v2 directory and starts the Rust launcher with `syscall.SysProcAttr.UseCgroupFD` and `CgroupFD`. Go uses `clone3(CLONE_INTO_CGROUP)` so the launcher begins life in the job cgroup and then `exec`s the target.
+The Rust daemon opens the prepared cgroup v2 directory and creates the target with `clone3(CLONE_INTO_CGROUP)`. The child begins life in the job cgroup and executes the target without a shell. Arguments, environment strings and file-descriptor actions are prepared in the parent before `clone3`; the child-side path is kept allocation-free and async-signal-safe until `execve`.
 
 The capability is mandatory for the contest MVP. Unsupported kernels or permissions fail closed; there is no post-start attach fallback.
 
@@ -17,6 +17,6 @@ The capability is mandatory for the contest MVP. Unsupported kernels or permissi
 
 - The target never executes outside the resource-controlled job cgroup.
 - The previous READY/GO attach barrier is unnecessary.
-- Kernel and Go runtime capability checks become part of preflight.
+- Kernel, permission and syscall capability checks become part of preflight.
 - Compatibility is narrower, which is acceptable for the pinned Ubuntu MVP target.
 - A future compatibility fallback would require a separately reviewed design and must preserve the same guarantee.
