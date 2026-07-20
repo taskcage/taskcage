@@ -1,1 +1,1 @@
-//! Concurrent output draining, timers, kernel-event snapshots and cleanup.
+//! 표준 출력과 오류 출력을 막힘없이 읽고, 제한 시간과 커널 사건을 기록하고, 작업을 정리한다.

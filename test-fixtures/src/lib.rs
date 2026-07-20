@@ -1,5 +1,5 @@
-//! Safe, bounded Linux fixtures for TaskCage integration tests.
+//! TaskCage 통합 테스트에서 사용하는, 스스로 상한을 지키는 안전한 Linux 시험 프로그램이다.
 //!
-//! The Ghost Process, Memory Hog and Safe Fork Storm binaries are added during
-//! the first two MVP milestones. Every fixture must enforce its own safety cap
-//! so an accidental uncaged run cannot exhaust the development host.
+//! 자식 프로세스를 남기는 프로그램, 메모리를 많이 쓰는 프로그램, 제한된 수만큼 프로세스를
+//! 만드는 프로그램을 단계적으로 추가한다. 실수로 cgroup 밖에서 실행해도 개발 장비를
+//! 소진하지 않도록 모든 시험 프로그램이 자체 상한을 가져야 한다.

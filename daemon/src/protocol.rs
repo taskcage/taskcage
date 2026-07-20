@@ -1,4 +1,4 @@
-//! Versioned length-prefixed JSON messages exchanged with the Java SDK.
+//! Java SDK와 주고받을 길이와 판번호가 포함된 JSON 메시지를 정의한다.
 
 use serde::{Deserialize, Serialize};
 

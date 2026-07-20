@@ -13,8 +13,8 @@ fn main() {
     }
 }
 
-// This fixture intentionally abandons a bounded child so TaskCage can prove
-// whole-cgroup cleanup after the leader exits.
+// 대표 프로세스가 먼저 끝난 뒤에도 제한된 자식 프로세스를 일부러 남긴다.
+// TaskCage가 대표 PID만이 아니라 작업 cgroup 전체를 정리하는지 확인하기 위한 동작이다.
 #[allow(clippy::zombie_processes)]
 fn parent() {
     let executable = env::current_exe().expect("resolve ghost fixture executable");
@@ -26,7 +26,7 @@ fn parent() {
     thread::sleep(Duration::from_millis(200));
 }
 
-// The child intentionally keeps a bounded descendant alive until cgroup.kill.
+// 자식은 손자 프로세스를 하나 만들고, cgroup 전체 종료 신호가 올 때까지 둘 다 기다린다.
 #[allow(clippy::zombie_processes)]
 fn child() {
     let executable = env::current_exe().expect("resolve ghost fixture executable");

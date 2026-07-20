@@ -1,3 +1,5 @@
+//! 명령행 인자를 읽어 작업 설정을 만들고 TaskCage 데몬 기능을 호출하는 시작점이다.
+
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::num::{NonZeroU32, NonZeroU64};
@@ -39,6 +41,7 @@ async fn main() -> taskcaged::Result<()> {
 }
 
 fn parse_run_once(args: Vec<OsString>) -> taskcaged::Result<RunOnceConfig> {
+    // 옵션을 생략해도 무제한으로 실행되지 않도록 보수적인 기본값을 먼저 넣는다.
     let mut cgroup_root = None;
     let mut memory_bytes = DEFAULT_MEMORY_BYTES;
     let mut max_processes = DEFAULT_MAX_PROCESSES;
@@ -53,6 +56,7 @@ fn parse_run_once(args: Vec<OsString>) -> taskcaged::Result<RunOnceConfig> {
     while index < args.len() {
         let argument = &args[index];
         if argument == OsStr::new("--") {
+            // `--` 뒤의 값은 TaskCage 옵션으로 해석하지 않고 실행 파일과 인자로 그대로 넘긴다.
             let command = args[index + 1..].to_vec();
             if command.is_empty() {
                 return Err(Error::InvalidArgument(
@@ -77,6 +81,7 @@ fn parse_run_once(args: Vec<OsString>) -> taskcaged::Result<RunOnceConfig> {
             });
         }
 
+        // TaskCage 옵션은 항상 이름과 값 한 쌍으로 읽는다.
         let name = argument.to_str().ok_or_else(|| {
             Error::InvalidArgument(format!("option name is not UTF-8: {argument:?}"))
         })?;
@@ -141,6 +146,7 @@ fn nonzero_u32(name: &str, value: u32) -> taskcaged::Result<NonZeroU32> {
 }
 
 fn generate_job_id() -> String {
+    // 같은 데몬에서 빠르게 작업이 이어져도 겹치기 어렵도록 PID와 현재 시각을 함께 사용한다.
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

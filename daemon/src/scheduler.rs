@@ -1,1 +1,1 @@
-//! Global concurrency, bounded FIFO queue and queue-timeout ownership.
+//! 전체 동시 실행 수와 크기가 제한된 선입선출 대기열, 대기 시간 초과를 관리한다.

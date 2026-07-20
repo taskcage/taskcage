@@ -1,4 +1,8 @@
-//! Delegated cgroup v2 discovery, limit application, evidence and cleanup.
+//! 위임받은 cgroup v2 영역을 찾고, 작업별 제한을 적용하고, 실행 결과를 수집하고,
+//! 작업이 끝난 뒤 남은 프로세스와 cgroup을 정리한다.
+//!
+//! 데몬 자신은 `manager` 하위로 옮기고 실제 작업은 `jobs/job-...` 하위에 둔다.
+//! 이렇게 나누어야 상위 cgroup에 필요한 제어기를 켤 수 있고 작업별 정리도 쉬워진다.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -40,20 +44,27 @@ pub enum CgroupError {
 }
 
 #[derive(Debug, Clone, Copy)]
+/// 한 주기 안에서 CPU를 얼마나 오래 사용할 수 있는지 나타낸다.
 pub struct CpuLimit {
+    /// 한 주기 동안 허용할 CPU 사용 시간이다.
     pub quota_micros: NonZeroU64,
+    /// CPU 사용량을 다시 계산하는 주기의 길이다.
     pub period_micros: NonZeroU64,
 }
 
 #[derive(Debug, Clone, Copy)]
+/// 새 작업 cgroup에 적용할 자원 상한이다.
 pub struct CgroupLimits {
+    /// 작업 전체가 사용할 수 있는 최대 메모리 크기다.
     pub memory_max_bytes: NonZeroU64,
+    /// 작업이 동시에 만들 수 있는 프로세스 수다.
     pub max_processes: NonZeroU32,
     pub cpu: CpuLimit,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// 커널이 누적해서 기록하는 메모리 부족과 프로세스 제한 사건이다.
 pub struct KernelEvents {
     pub memory_oom: u64,
     pub memory_oom_kill: u64,
@@ -61,6 +72,10 @@ pub struct KernelEvents {
 }
 
 impl KernelEvents {
+    /// 작업 시작 전 값과 현재 값의 차이만 구한다.
+    ///
+    /// 커널 수치는 계속 누적되므로 현재 값만 보면 이번 작업에서 생긴 사건인지 알 수 없다.
+    /// 수치가 예상과 다르게 작아져도 음수가 되지 않도록 포화 뺄셈을 사용한다.
     pub fn delta_from(&self, baseline: &Self) -> Self {
         Self {
             memory_oom: self.memory_oom.saturating_sub(baseline.memory_oom),
@@ -74,6 +89,7 @@ impl KernelEvents {
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
+/// 작업이 사용한 자원과 제한 초과 사건을 호출자에게 돌려줄 형태로 모은 값이다.
 pub struct JobStats {
     pub cpu_usage_micros: u64,
     pub memory_current_bytes: u64,
@@ -84,12 +100,14 @@ pub struct JobStats {
 }
 
 #[derive(Debug)]
+/// 위임받은 cgroup 영역과 작업을 만들 위치를 관리한다.
 pub struct CgroupManager {
     root: PathBuf,
     jobs: PathBuf,
 }
 
 impl CgroupManager {
+    /// 현재 데몬이 속한 cgroup을 읽어 systemd가 위임한 실제 경로를 찾는다.
     pub fn discover_and_initialize() -> Result<Self, CgroupError> {
         let membership = read_to_string(Path::new(SELF_CGROUP), "read self cgroup")?;
         let relative = parse_unified_membership(&membership)?;
@@ -99,9 +117,11 @@ impl CgroupManager {
 
     pub fn initialize(root: impl AsRef<Path>) -> Result<Self, CgroupError> {
         let supplied_root = root.as_ref();
+        // `..`이나 심볼릭 링크가 섞인 경로를 그대로 사용하지 않고 실제 경로 하나로 고정한다.
         let root = fs::canonicalize(supplied_root)
             .map_err(|source| io_error("canonicalize cgroup root", supplied_root, source))?;
 
+        // 이름만 비슷한 일반 디렉터리를 잘못 제어하지 않도록 cgroup v2 파일 시스템인지 확인한다.
         ensure_cgroup2_filesystem(&root)?;
         require_regular_file(&root.join("cgroup.controllers"), "cgroup v2")?;
         require_regular_file(&root.join("cgroup.procs"), "cgroup process file")?;
@@ -114,11 +134,14 @@ impl CgroupManager {
         create_dir_if_missing(&manager)?;
         create_dir_if_missing(&jobs)?;
 
+        // cgroup v2는 프로세스가 들어 있는 cgroup에서 하위 제어기를 켤 수 없다.
+        // 따라서 데몬을 `manager`로 먼저 옮긴 다음 상위 영역의 제어기를 활성화한다.
         write_control(
             &manager.join("cgroup.procs"),
             &format!("{}\n", std::process::id()),
         )?;
         enable_required_controllers(&root)?;
+        // `jobs` 아래에 실제 작업 cgroup을 만들 수 있도록 같은 제어기를 한 단계 더 내려준다.
         enable_required_controllers(&jobs)?;
 
         Ok(Self { root, jobs })
@@ -129,17 +152,21 @@ impl CgroupManager {
     }
 
     pub fn create_job(&self, job_id: &str, limits: CgroupLimits) -> Result<JobCgroup, CgroupError> {
+        // 작업 식별자가 경로 구분자를 포함하면 지정된 영역 밖으로 벗어날 수 있으므로 먼저 막는다.
         validate_job_id(job_id)?;
         let path = self.jobs.join(format!("job-{job_id}"));
         fs::create_dir(&path).map_err(|source| io_error("create job cgroup", &path, source))?;
 
         let configured = (|| {
+            // 제한값은 쓰는 데 성공한 것만으로 충분하지 않다. 커널이 받아들인 값을 다시 읽어
+            // 요청한 값과 같은지 확인하고, 다르면 보호되지 않은 작업을 시작하지 않는다.
             write_and_verify(
                 &path.join("memory.max"),
                 &limits.memory_max_bytes.get().to_string(),
             )?;
             let oom_group = path.join("memory.oom.group");
             if oom_group.exists() {
+                // 메모리가 부족할 때 일부 프로세스만 남지 않도록 작업 cgroup 전체를 한 단위로 다룬다.
                 write_and_verify(&oom_group, "1")?;
             }
             write_and_verify(
@@ -155,8 +182,10 @@ impl CgroupManager {
                 ),
             )?;
             require_regular_file(&path.join("cgroup.kill"), "cgroup.kill")?;
+            // 이 디렉터리 파일 설명자는 `clone3`에 넘겨 새 프로세스를 처음부터 이 cgroup 안에 둔다.
             let directory =
                 File::open(&path).map_err(|source| io_error("open job cgroup", &path, source))?;
+            // 사건 수치는 누적값이므로 작업 시작 전 값을 저장해 두었다가 종료 시 차이를 구한다.
             let baseline = read_kernel_events(&path)?;
             Ok((directory, baseline))
         })();
@@ -170,6 +199,7 @@ impl CgroupManager {
                 cleaned: false,
             }),
             Err(error) => {
+                // 설정 도중 하나라도 실패하면 덜 만들어진 cgroup을 남기지 않는다.
                 let _ = fs::remove_dir(&path);
                 Err(error)
             }
@@ -178,6 +208,7 @@ impl CgroupManager {
 }
 
 #[derive(Debug)]
+/// 실행 중인 작업 하나에 대응하는 cgroup이다.
 pub struct JobCgroup {
     job_id: String,
     path: PathBuf,
@@ -199,11 +230,13 @@ impl JobCgroup {
         self.directory.as_raw_fd()
     }
 
+    /// 작업 또는 그 자식 cgroup에 프로세스가 하나라도 남아 있는지 확인한다.
     pub fn is_populated(&self) -> Result<bool, CgroupError> {
         let events = read_flat_keys(&self.path.join("cgroup.events"))?;
         Ok(events.get("populated").copied().unwrap_or(0) != 0)
     }
 
+    /// 시작한 프로세스가 실제로 이 작업 cgroup에 들어왔는지 확인한다.
     pub fn contains_pid(&self, pid: libc::pid_t) -> Result<bool, CgroupError> {
         let processes = read_to_string(&self.path.join("cgroup.procs"), "read job processes")?;
         Ok(processes
@@ -212,10 +245,12 @@ impl JobCgroup {
             .any(|value| value == pid))
     }
 
+    /// 대표 프로세스 하나가 아니라 이 cgroup 아래의 모든 프로세스를 종료한다.
     pub fn kill_all(&self) -> Result<(), CgroupError> {
         write_control(&self.path.join("cgroup.kill"), "1\n")
     }
 
+    /// 커널이 모든 프로세스를 정리했다고 알릴 때까지 짧게 반복해서 확인한다.
     pub async fn wait_empty(&self, timeout: Duration) -> Result<(), CgroupError> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -232,6 +267,7 @@ impl JobCgroup {
         }
     }
 
+    /// cgroup을 지우기 전에 커널이 기록한 최종 자원 사용량을 모은다.
     pub fn stats(&self) -> Result<JobStats, CgroupError> {
         let cpu = read_flat_keys(&self.path.join("cpu.stat"))?;
         let current_events = read_kernel_events(&self.path)?;
@@ -251,11 +287,13 @@ impl JobCgroup {
         })
     }
 
+    /// 남은 프로세스를 끝내고 통계를 읽은 뒤 작업 cgroup을 제거한다.
     pub async fn finish(mut self, timeout: Duration) -> Result<JobStats, CgroupError> {
         if self.is_populated()? {
             self.kill_all()?;
         }
         self.wait_empty(timeout).await?;
+        // 디렉터리를 지우면 통계 파일도 사라지므로 반드시 먼저 읽는다.
         let stats = self.stats()?;
         fs::remove_dir(&self.path)
             .map_err(|source| io_error("remove job cgroup", &self.path, source))?;
@@ -269,12 +307,15 @@ impl Drop for JobCgroup {
         if self.cleaned || !self.path.exists() {
             return;
         }
+        // 정상 정리 경로가 오류로 중단되어도 프로세스를 남기지 않도록 마지막 방어선을 둔다.
+        // `Drop`에서는 오류를 돌려줄 곳이 없으므로 가능한 정리만 시도한다.
         let _ = write_control(&self.path.join("cgroup.kill"), "1\n");
         let _ = fs::remove_dir(&self.path);
     }
 }
 
 fn parse_unified_membership(contents: &str) -> Result<PathBuf, CgroupError> {
+    // cgroup v2의 `/proc/self/cgroup` 항목은 `0::<경로>` 형태다.
     let mut paths = contents.lines().filter_map(|line| line.strip_prefix("0::"));
     let path = paths.next().ok_or_else(|| {
         CgroupError::Unsupported("/proc/self/cgroup has no unified v2 entry".to_owned())
@@ -303,6 +344,7 @@ fn validate_job_id(job_id: &str) -> Result<(), CgroupError> {
 fn enable_required_controllers(path: &Path) -> Result<(), CgroupError> {
     let available = read_word_set(&path.join("cgroup.controllers"))?;
     ensure_controllers(&available, path)?;
+    // 앞에 `+`를 붙이면 이 cgroup의 자식들이 해당 제어기를 사용할 수 있게 된다.
     write_control(&path.join("cgroup.subtree_control"), "+cpu +memory +pids\n")?;
     let enabled = read_word_set(&path.join("cgroup.subtree_control"))?;
     ensure_controllers(&enabled, path)
@@ -388,6 +430,7 @@ fn read_to_string(path: &Path, operation: &'static str) -> Result<String, Cgroup
 
 fn write_and_verify(path: &Path, value: &str) -> Result<(), CgroupError> {
     write_control(path, &format!("{value}\n"))?;
+    // 커널 제어 파일은 일반 파일과 달라 쓰기 성공만으로 적용 여부를 단정할 수 없다.
     let actual = read_to_string(path, "verify cgroup value")?;
     if actual.trim() == value {
         Ok(())
@@ -430,6 +473,8 @@ fn require_regular_file(path: &Path, capability: &str) -> Result<(), CgroupError
 
 #[cfg(target_os = "linux")]
 fn ensure_cgroup2_filesystem(path: &Path) -> Result<(), CgroupError> {
+    // cgroup v2 파일 시스템은 커널이 정한 고유 번호를 가진다.
+    // `statfs`로 그 번호를 확인해 잘못된 경로에 제어 파일을 만들지 않도록 한다.
     const CGROUP2_SUPER_MAGIC: i128 = 0x6367_7270;
     let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| CgroupError::Unsupported("cgroup root contains a NUL byte".to_owned()))?;
