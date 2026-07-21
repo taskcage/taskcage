@@ -28,6 +28,10 @@ cargo build --workspace
 taskcage_bin="$(pwd)/target/debug/taskcaged"
 ghost_bin="$(pwd)/target/debug/ghost-tree"
 output_flood_bin="$(pwd)/target/debug/output-flood"
+true_bin="$(type -P true)"
+false_bin="$(type -P false)"
+env_bin="$(type -P env)"
+sleep_bin="$(type -P sleep)"
 unit_sequence=0
 taskcage_limits=(
   --memory-bytes 67108864
@@ -62,7 +66,7 @@ normal_output="$(run_delegated normal run-once \
   "${taskcage_output_limits[@]}" \
   --timeout-ms 5000 \
   --working-directory "$(pwd)" \
-  -- "$(command -v true)")"
+  -- "${true_bin}")"
 grep -q '"exitCode": 0' <<<"${normal_output}"
 grep -q '"cleanupComplete": true' <<<"${normal_output}"
 
@@ -72,7 +76,7 @@ nonzero_output="$(run_delegated nonzero run-once \
   "${taskcage_output_limits[@]}" \
   --timeout-ms 5000 \
   --working-directory "$(pwd)" \
-  -- "$(command -v false)")"
+  -- "${false_bin}")"
 grep -q '"exitCode": 1' <<<"${nonzero_output}"
 grep -q '"cleanupComplete": true' <<<"${nonzero_output}"
 
@@ -84,7 +88,7 @@ environment_output="$(run_delegated environment run-once \
   --timeout-ms 5000 \
   --working-directory "$(pwd)" \
   --env TASKCAGE_TEST=explicit \
-  -- "$(command -v env)")"
+  -- "${env_bin}")"
 grep -q 'TASKCAGE_TEST=explicit' <<<"${environment_output}"
 if grep -q 'PATH=' <<<"${environment_output}"; then
   echo "FAIL: target이 daemon PATH를 상속했습니다" >&2
@@ -144,7 +148,7 @@ timeout_output="$(run_delegated timeout run-once \
   "${taskcage_output_limits[@]}" \
   --timeout-ms 200 \
   --working-directory "$(pwd)" \
-  -- "$(command -v sleep)" 30)"
+  -- "${sleep_bin}" 30)"
 grep -q '"timedOut": true' <<<"${timeout_output}"
 grep -q '"cleanupComplete": true' <<<"${timeout_output}"
 
@@ -165,7 +169,7 @@ if run_delegated bad-cwd run-once \
   "${taskcage_output_limits[@]}" \
   --timeout-ms 5000 \
   --working-directory /definitely/missing/taskcage-directory \
-  -- "$(command -v true)"; then
+  -- "${true_bin}"; then
   echo "FAIL: 없는 작업 디렉터리를 성공으로 처리했습니다" >&2
   exit 1
 fi
