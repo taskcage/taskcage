@@ -3,11 +3,12 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use taskcaged::cgroup::{CgroupLimits, CpuLimit};
+use taskcaged::output::CaptureLimits;
 use taskcaged::{Error, RunOnceConfig};
 use tracing_subscriber::EnvFilter;
 
@@ -51,6 +52,8 @@ fn parse_run_once(args: Vec<OsString>) -> taskcaged::Result<RunOnceConfig> {
     let mut cpu_quota_micros = None;
     let mut cpu_period_micros = None;
     let mut timeout_millis = None;
+    let mut stdout_tail_bytes = None;
+    let mut stderr_tail_bytes = None;
     let mut cleanup_millis = DEFAULT_CLEANUP_MILLIS;
     let mut working_directory: Option<PathBuf> = None;
     let mut environment = BTreeMap::new();
@@ -99,6 +102,16 @@ fn parse_run_once(args: Vec<OsString>) -> taskcaged::Result<RunOnceConfig> {
                 },
                 wall_timeout: Duration::from_millis(required_option("timeout-ms", timeout_millis)?),
                 cleanup_timeout: Duration::from_millis(cleanup_millis),
+                capture_limits: CaptureLimits::new(
+                    nonzero_usize(
+                        "stdout-tail-bytes",
+                        required_option("stdout-tail-bytes", stdout_tail_bytes)?,
+                    )?,
+                    nonzero_usize(
+                        "stderr-tail-bytes",
+                        required_option("stderr-tail-bytes", stderr_tail_bytes)?,
+                    )?,
+                ),
                 working_directory,
                 environment,
                 command,
@@ -121,6 +134,8 @@ fn parse_run_once(args: Vec<OsString>) -> taskcaged::Result<RunOnceConfig> {
             "--cpu-quota-us" => cpu_quota_micros = Some(parse_number(name, value)?),
             "--cpu-period-us" => cpu_period_micros = Some(parse_number(name, value)?),
             "--timeout-ms" => timeout_millis = Some(parse_number(name, value)?),
+            "--stdout-tail-bytes" => stdout_tail_bytes = Some(parse_number(name, value)?),
+            "--stderr-tail-bytes" => stderr_tail_bytes = Some(parse_number(name, value)?),
             "--cleanup-timeout-ms" => cleanup_millis = parse_number(name, value)?,
             "--working-directory" => working_directory = Some(PathBuf::from(value)),
             "--env" => {
@@ -197,6 +212,11 @@ fn nonzero_u32(name: &str, value: u32) -> taskcaged::Result<NonZeroU32> {
         .ok_or_else(|| Error::InvalidArgument(format!("{name} 값은 0보다 커야 합니다")))
 }
 
+fn nonzero_usize(name: &str, value: usize) -> taskcaged::Result<NonZeroUsize> {
+    NonZeroUsize::new(value)
+        .ok_or_else(|| Error::InvalidArgument(format!("{name} 값은 0보다 커야 합니다")))
+}
+
 fn generate_job_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -224,6 +244,10 @@ mod tests {
             OsString::from("10000"),
             OsString::from("--timeout-ms"),
             OsString::from("1000"),
+            OsString::from("--stdout-tail-bytes"),
+            OsString::from("64"),
+            OsString::from("--stderr-tail-bytes"),
+            OsString::from("64"),
             OsString::from("--working-directory"),
             working_directory.into_os_string(),
             OsString::from("--"),
@@ -249,6 +273,10 @@ mod tests {
             OsString::from("10000"),
             OsString::from("--timeout-ms"),
             OsString::from("1000"),
+            OsString::from("--stdout-tail-bytes"),
+            OsString::from("64"),
+            OsString::from("--stderr-tail-bytes"),
+            OsString::from("64"),
             OsString::from("--working-directory"),
             working_directory.into_os_string(),
             OsString::from("--"),
@@ -256,6 +284,39 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.to_string().contains("0보다 커야"));
+    }
+
+    #[test]
+    fn zero_output_limit_is_rejected() {
+        let working_directory = std::env::temp_dir();
+        let program = working_directory.join("echo");
+        let error = parse_run_once(vec![
+            OsString::from("--memory-bytes"),
+            OsString::from("1024"),
+            OsString::from("--pids"),
+            OsString::from("2"),
+            OsString::from("--cpu-quota-us"),
+            OsString::from("1000"),
+            OsString::from("--cpu-period-us"),
+            OsString::from("10000"),
+            OsString::from("--timeout-ms"),
+            OsString::from("1000"),
+            OsString::from("--stdout-tail-bytes"),
+            OsString::from("0"),
+            OsString::from("--stderr-tail-bytes"),
+            OsString::from("64"),
+            OsString::from("--working-directory"),
+            working_directory.into_os_string(),
+            OsString::from("--"),
+            program.into_os_string(),
+        ])
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("stdout-tail-bytes 값은 0보다 커야")
+        );
     }
 
     #[test]
@@ -297,6 +358,10 @@ mod tests {
             OsString::from("10000"),
             OsString::from("--timeout-ms"),
             OsString::from("1000"),
+            OsString::from("--stdout-tail-bytes"),
+            OsString::from("64"),
+            OsString::from("--stderr-tail-bytes"),
+            OsString::from("64"),
             OsString::from("--working-directory"),
             working_directory.into_os_string(),
             OsString::from("--env"),

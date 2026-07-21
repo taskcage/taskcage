@@ -27,12 +27,21 @@ fi
 cargo build --workspace
 taskcage_bin="$(pwd)/target/debug/taskcaged"
 ghost_bin="$(pwd)/target/debug/ghost-tree"
+output_flood_bin="$(pwd)/target/debug/output-flood"
+true_bin="$(type -P true)"
+false_bin="$(type -P false)"
+env_bin="$(type -P env)"
+sleep_bin="$(type -P sleep)"
 unit_sequence=0
 taskcage_limits=(
   --memory-bytes 67108864
   --pids 8
   --cpu-quota-us 50000
   --cpu-period-us 100000
+)
+taskcage_output_limits=(
+  --stdout-tail-bytes 64
+  --stderr-tail-bytes 64
 )
 
 run_delegated() {
@@ -54,18 +63,20 @@ run_delegated() {
 normal_output="$(run_delegated normal run-once \
   --job-id normal \
   "${taskcage_limits[@]}" \
+  "${taskcage_output_limits[@]}" \
   --timeout-ms 5000 \
   --working-directory "$(pwd)" \
-  -- "$(command -v true)")"
+  -- "${true_bin}")"
 grep -q '"exitCode": 0' <<<"${normal_output}"
 grep -q '"cleanupComplete": true' <<<"${normal_output}"
 
 nonzero_output="$(run_delegated nonzero run-once \
   --job-id nonzero \
   "${taskcage_limits[@]}" \
+  "${taskcage_output_limits[@]}" \
   --timeout-ms 5000 \
   --working-directory "$(pwd)" \
-  -- "$(command -v false)")"
+  -- "${false_bin}")"
 grep -q '"exitCode": 1' <<<"${nonzero_output}"
 grep -q '"cleanupComplete": true' <<<"${nonzero_output}"
 
@@ -73,12 +84,13 @@ grep -q '"cleanupComplete": true' <<<"${nonzero_output}"
 environment_output="$(run_delegated environment run-once \
   --job-id environment \
   "${taskcage_limits[@]}" \
+  "${taskcage_output_limits[@]}" \
   --timeout-ms 5000 \
   --working-directory "$(pwd)" \
   --env TASKCAGE_TEST=explicit \
-  -- "$(command -v env)")"
-grep -q '^TASKCAGE_TEST=explicit$' <<<"${environment_output}"
-if grep -q '^PATH=' <<<"${environment_output}"; then
+  -- "${env_bin}")"
+grep -q 'TASKCAGE_TEST=explicit' <<<"${environment_output}"
+if grep -q 'PATH=' <<<"${environment_output}"; then
   echo "FAIL: target이 daemon PATH를 상속했습니다" >&2
   exit 1
 fi
@@ -87,19 +99,56 @@ fi
 ghost_output="$(run_delegated ghost run-once \
   --job-id ghost \
   "${taskcage_limits[@]}" \
+  "${taskcage_output_limits[@]}" \
   --timeout-ms 5000 \
   --working-directory "$(pwd)" \
   -- "${ghost_bin}")"
 grep -q '"membershipVerified": true' <<<"${ghost_output}"
 grep -q '"cleanupComplete": true' <<<"${ghost_output}"
 
+# 두 stream을 동시에 끝까지 drain하며 각 stream의 마지막 raw bytes만 독립적으로 남긴다.
+flood_both_output="$(run_delegated flood-both run-once \
+  --job-id flood-both \
+  "${taskcage_limits[@]}" \
+  "${taskcage_output_limits[@]}" \
+  --timeout-ms 10000 \
+  --working-directory "$(pwd)" \
+  -- "${output_flood_bin}" both)"
+grep -q 'STDOUT-END' <<<"${flood_both_output}"
+grep -q 'STDERR-END' <<<"${flood_both_output}"
+grep -q '"stdoutTruncated": true' <<<"${flood_both_output}"
+grep -q '"stderrTruncated": true' <<<"${flood_both_output}"
+
+flood_stdout_output="$(run_delegated flood-stdout run-once \
+  --job-id flood-stdout \
+  "${taskcage_limits[@]}" \
+  "${taskcage_output_limits[@]}" \
+  --timeout-ms 10000 \
+  --working-directory "$(pwd)" \
+  -- "${output_flood_bin}" stdout)"
+grep -q 'STDOUT-END' <<<"${flood_stdout_output}"
+grep -q '"stdoutTruncated": true' <<<"${flood_stdout_output}"
+grep -q '"stderrTruncated": false' <<<"${flood_stdout_output}"
+
+flood_stderr_output="$(run_delegated flood-stderr run-once \
+  --job-id flood-stderr \
+  "${taskcage_limits[@]}" \
+  "${taskcage_output_limits[@]}" \
+  --timeout-ms 10000 \
+  --working-directory "$(pwd)" \
+  -- "${output_flood_bin}" stderr)"
+grep -q 'STDERR-END' <<<"${flood_stderr_output}"
+grep -q '"stdoutTruncated": false' <<<"${flood_stderr_output}"
+grep -q '"stderrTruncated": true' <<<"${flood_stderr_output}"
+
 # 벽시계 제한을 넘기면 대표 PID가 아니라 작업 cgroup 전체를 끝낸다.
 timeout_output="$(run_delegated timeout run-once \
   --job-id timeout \
   "${taskcage_limits[@]}" \
+  "${taskcage_output_limits[@]}" \
   --timeout-ms 200 \
   --working-directory "$(pwd)" \
-  -- "$(command -v sleep)" 30)"
+  -- "${sleep_bin}" 30)"
 grep -q '"timedOut": true' <<<"${timeout_output}"
 grep -q '"cleanupComplete": true' <<<"${timeout_output}"
 
@@ -107,6 +156,7 @@ grep -q '"cleanupComplete": true' <<<"${timeout_output}"
 if run_delegated missing run-once \
   --job-id missing \
   "${taskcage_limits[@]}" \
+  "${taskcage_output_limits[@]}" \
   --timeout-ms 5000 \
   --working-directory "$(pwd)" \
   -- /definitely/missing/taskcage-target; then
@@ -116,9 +166,10 @@ fi
 if run_delegated bad-cwd run-once \
   --job-id bad-cwd \
   "${taskcage_limits[@]}" \
+  "${taskcage_output_limits[@]}" \
   --timeout-ms 5000 \
   --working-directory /definitely/missing/taskcage-directory \
-  -- "$(command -v true)"; then
+  -- "${true_bin}"; then
   echo "FAIL: 없는 작업 디렉터리를 성공으로 처리했습니다" >&2
   exit 1
 fi
