@@ -1,5 +1,6 @@
 //! TaskCage Rust 데몬의 사전 검사와 작업 실행 생명주기를 제공한다.
 
+pub mod capability;
 pub mod cgroup;
 pub mod codec;
 #[cfg(target_os = "linux")]
