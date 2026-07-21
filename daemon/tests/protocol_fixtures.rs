@@ -8,6 +8,7 @@ use taskcaged::codec::{decode_json, encode_json_frame};
 use taskcaged::protocol::{
     ErrorCode, Request, Response, TaskPayload, TaskState, TerminationReason,
 };
+use taskcaged::resource_budget::ResourceBudget;
 
 const REQUEST_FIXTURES: [&str; 1] = ["submit-task-valid.json"];
 const RESPONSE_FIXTURES: [&str; 5] = [
@@ -107,6 +108,27 @@ fn submit_fixture_preserves_command_and_required_budgets() {
     assert_eq!(payload.limits.wall_time_limit_ms, 120_000);
     assert_eq!(payload.output.stdout_tail_max_bytes, 65_536);
     assert_eq!(payload.output.stderr_tail_max_bytes, 65_536);
+}
+
+#[test]
+fn submit_fixture_converts_to_execution_budget_without_loss() {
+    let request: Request = decode_json(&fixture_bytes("submit-task-valid.json")).unwrap();
+    let Request::SubmitTask { payload, .. } = request else {
+        panic!("submit fixture must contain submitTask");
+    };
+    let expected_limits = payload.limits.clone();
+
+    let budget = ResourceBudget::try_from_protocol(payload.limits, payload.output).unwrap();
+    let cgroup = budget.cgroup_limits();
+
+    assert_eq!(cgroup.cpu.quota_micros.get(), 100_000);
+    assert_eq!(cgroup.cpu.period_micros.get(), 100_000);
+    assert_eq!(cgroup.memory_max_bytes.get(), 536_870_912);
+    assert_eq!(cgroup.max_processes.get(), 32);
+    assert_eq!(budget.wall_timeout(), std::time::Duration::from_secs(120));
+    assert_eq!(budget.stdout_tail_max_bytes(), 65_536);
+    assert_eq!(budget.stderr_tail_max_bytes(), 65_536);
+    assert_eq!(budget.effective_limits(), &expected_limits);
 }
 
 #[test]

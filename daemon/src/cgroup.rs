@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::io;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -97,7 +97,7 @@ pub struct CpuLimit {
 /// 작업 cgroup 하나에 적용할 자원 상한이다.
 pub struct CgroupLimits {
     pub memory_max_bytes: NonZeroU64,
-    pub max_processes: NonZeroU32,
+    pub max_processes: NonZeroU64,
     pub cpu: CpuLimit,
 }
 
@@ -337,39 +337,23 @@ impl CgroupManager {
     }
 
     pub fn create_job(&self, job_id: &str, limits: CgroupLimits) -> Result<JobCgroup, CgroupError> {
+        self.create_job_with(job_id, limits, configure_job)
+    }
+
+    fn create_job_with<F>(
+        &self,
+        job_id: &str,
+        limits: CgroupLimits,
+        configure: F,
+    ) -> Result<JobCgroup, CgroupError>
+    where
+        F: FnOnce(&Path, CgroupLimits) -> Result<(File, KernelEvents), CgroupError>,
+    {
         let path = self.paths.new_job_path(job_id)?;
         fs::create_dir(&path)
             .map_err(|source| cgroup_io_error("작업 cgroup 만들기", &path, source))?;
 
-        let configured = (|| {
-            // 커널 제어 파일은 쓰기 성공만으로 적용됐다고 단정하지 않고 다시 읽어 확인한다.
-            write_and_verify(
-                &path.join("memory.max"),
-                &limits.memory_max_bytes.get().to_string(),
-            )?;
-            let oom_group = path.join("memory.oom.group");
-            if oom_group.exists() {
-                write_and_verify(&oom_group, "1")?;
-            }
-            write_and_verify(
-                &path.join("pids.max"),
-                &limits.max_processes.get().to_string(),
-            )?;
-            write_and_verify(
-                &path.join("cpu.max"),
-                &format!(
-                    "{} {}",
-                    limits.cpu.quota_micros.get(),
-                    limits.cpu.period_micros.get()
-                ),
-            )?;
-            require_regular_file(&path.join("cgroup.kill"), "작업 전체 종료")?;
-            require_regular_file(&path.join("cgroup.events"), "작업 상태")?;
-            let directory = File::open(&path)
-                .map_err(|source| cgroup_io_error("작업 cgroup 열기", &path, source))?;
-            let baseline = read_kernel_events(&path)?;
-            Ok((directory, baseline))
-        })();
+        let configured = configure(&path, limits);
 
         match configured {
             Ok((directory, baseline)) => Ok(JobCgroup {
@@ -391,6 +375,37 @@ impl CgroupManager {
             }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_job(path: &Path, limits: CgroupLimits) -> Result<(File, KernelEvents), CgroupError> {
+    // 커널 제어 파일은 쓰기 성공만으로 적용됐다고 단정하지 않고 다시 읽어 확인한다.
+    write_and_verify(
+        &path.join("memory.max"),
+        &limits.memory_max_bytes.get().to_string(),
+    )?;
+    let oom_group = path.join("memory.oom.group");
+    if oom_group.exists() {
+        write_and_verify(&oom_group, "1")?;
+    }
+    write_and_verify(
+        &path.join("pids.max"),
+        &limits.max_processes.get().to_string(),
+    )?;
+    write_and_verify(
+        &path.join("cpu.max"),
+        &format!(
+            "{} {}",
+            limits.cpu.quota_micros.get(),
+            limits.cpu.period_micros.get()
+        ),
+    )?;
+    require_regular_file(&path.join("cgroup.kill"), "작업 전체 종료")?;
+    require_regular_file(&path.join("cgroup.events"), "작업 상태")?;
+    let directory =
+        File::open(path).map_err(|source| cgroup_io_error("작업 cgroup 열기", path, source))?;
+    let baseline = read_kernel_events(path)?;
+    Ok((directory, baseline))
 }
 
 #[cfg(target_os = "linux")]
@@ -737,5 +752,69 @@ mod tests {
         assert_eq!(delta.memory_oom, 3);
         assert_eq!(delta.memory_oom_kill, 1);
         assert_eq!(delta.pids_max, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn write_and_verify_detects_a_read_back_mismatch() {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "taskcage-cgroup-value-test-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::write(&path, "999\n").unwrap();
+
+        let error = write_and_verify(&path, "1").unwrap_err();
+
+        assert!(matches!(error, CgroupError::ValueMismatch { .. }));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn partial_configuration_failure_removes_job_before_target_start() {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "taskcage-cgroup-rollback-test-{}-{sequence}",
+            std::process::id()
+        ));
+        let jobs = root.join("jobs");
+        fs::create_dir_all(&jobs).unwrap();
+        let manager = CgroupManager {
+            paths: CgroupPaths {
+                mount: root.clone(),
+                root: root.clone(),
+                manager: root.join("manager"),
+                jobs: jobs.clone(),
+            },
+        };
+        let limits = CgroupLimits {
+            memory_max_bytes: NonZeroU64::new(1).unwrap(),
+            max_processes: NonZeroU64::new(1).unwrap(),
+            cpu: CpuLimit {
+                quota_micros: NonZeroU64::new(1).unwrap(),
+                period_micros: NonZeroU64::new(1).unwrap(),
+            },
+        };
+        let configured_limits = std::cell::Cell::new(0);
+        let target_starts = std::cell::Cell::new(0);
+
+        let result = manager
+            .create_job_with("partial", limits, |path, _| {
+                configured_limits.set(1);
+                Err::<(File, KernelEvents), _>(CgroupError::ValueMismatch {
+                    path: path.join("pids.max"),
+                    expected: "1".to_owned(),
+                    actual: "2".to_owned(),
+                })
+            })
+            .map(|_| target_starts.set(target_starts.get() + 1));
+
+        assert!(matches!(result, Err(CgroupError::ValueMismatch { .. })));
+        assert_eq!(configured_limits.get(), 1);
+        assert_eq!(target_starts.get(), 0);
+        assert!(!jobs.join("job-partial").exists());
+        fs::remove_dir(&jobs).unwrap();
+        fs::remove_dir(&root).unwrap();
     }
 }

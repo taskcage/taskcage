@@ -173,12 +173,12 @@ impl SpawnedProcess {
     }
 
     pub async fn wait_for(&self, timeout: Duration) -> Result<WaitOutcome, ExecutorError> {
-        let deadline = Instant::now() + timeout;
+        let started_at = Instant::now();
         loop {
             if let Some(status) = wait_nohang(self.pid)? {
                 return Ok(WaitOutcome::Exited(status));
             }
-            if Instant::now() >= deadline {
+            if timeout_elapsed(started_at, timeout) {
                 return Ok(WaitOutcome::TimedOut);
             }
             sleep(Duration::from_millis(10)).await;
@@ -323,6 +323,10 @@ impl Drop for OutputReaders {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
     }
+}
+
+fn timeout_elapsed(started_at: Instant, timeout: Duration) -> bool {
+    started_at.elapsed() >= timeout
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -817,5 +821,15 @@ mod tests {
             output.write_all(&chunk)?;
         }
         output.write_all(marker)
+    }
+
+    #[test]
+    fn huge_timeout_does_not_overflow_a_monotonic_deadline() {
+        let started_at = Instant::now();
+
+        assert!(!timeout_elapsed(
+            started_at,
+            Duration::from_millis(u64::MAX)
+        ));
     }
 }
