@@ -70,6 +70,29 @@ impl VerifiedEnvironment {
     pub(crate) fn into_paths(self) -> CgroupPaths {
         self.paths
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        let root = PathBuf::from("/delegated");
+        Self {
+            report: CapabilityReport {
+                delegated_root: root.clone(),
+                manager_cgroup: root.join("manager"),
+                controllers: BTreeSet::from([
+                    "cpu".to_owned(),
+                    "memory".to_owned(),
+                    "pids".to_owned(),
+                ]),
+                cgroup_kill: true,
+                event_and_stat_files: true,
+                delegated_root_writable: true,
+                manager_membership_verified: true,
+                atomic_entry_supported: true,
+            },
+            #[cfg(target_os = "linux")]
+            paths: CgroupPaths::for_test(root),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -493,25 +516,7 @@ mod tests {
         struct PassingProbe;
         impl CapabilityProbe for PassingProbe {
             fn check(&self) -> Result<VerifiedEnvironment, PreflightError> {
-                let root = PathBuf::from("/delegated");
-                Ok(VerifiedEnvironment {
-                    report: CapabilityReport {
-                        delegated_root: root.clone(),
-                        manager_cgroup: root.join("manager"),
-                        controllers: BTreeSet::from([
-                            "cpu".to_owned(),
-                            "memory".to_owned(),
-                            "pids".to_owned(),
-                        ]),
-                        cgroup_kill: true,
-                        event_and_stat_files: true,
-                        delegated_root_writable: true,
-                        manager_membership_verified: true,
-                        atomic_entry_supported: true,
-                    },
-                    #[cfg(target_os = "linux")]
-                    paths: CgroupPaths::for_test(root),
-                })
+                Ok(VerifiedEnvironment::for_test())
             }
         }
 
