@@ -1,6 +1,6 @@
 # TaskCage Java SDK
 
-TaskCage Java SDK는 Linux 호스트의 `taskcaged` 데몬에 Unix domain socket으로 연결해, 신뢰된 외부 명령을 제한된 작업으로 실행하는 Java 21+ 라이브러리다.
+TaskCage Java SDK는 Linux 호스트의 `taskcaged` 데몬에 Unix domain socket으로 연결해, 신뢰된 외부 명령을 제한된 작업으로 실행하는 Java 17+ 라이브러리다.
 
 Java 애플리케이션 개발자는 cgroup, Rust, UDS 프레임을 직접 다루지 않는다. 명령, 자원 예산, 실행 결과만 Java 타입으로 다룬다.
 
@@ -152,7 +152,7 @@ java-sdk/
 
 ## MVP 구현 순서
 
-1. Gradle Java 21 라이브러리와 공개 value type을 만든다.
+1. Gradle Java 17 라이브러리와 공개 value type을 만든다.
 2. length-prefixed UDS transport와 Protocol v1 JSON codec을 구현한다.
 3. `capabilities()`와 `submit()`을 구현하고 protocol fixture로 직렬화·역직렬화를 검증한다.
 4. `Task.status()`, `Task.await()`, `Task.cancel()`과 polling을 구현한다.

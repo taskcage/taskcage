@@ -26,7 +26,7 @@ class TaskCageClientIntegrationTest {
             assertTrue(capabilities.cgroupV2Ready());
 
             server.awaitRequests(Duration.ofSeconds(2));
-            JsonNode request = server.requests().getFirst();
+            JsonNode request = server.requests().get(0);
             assertEquals(1, request.path("protocolVersion").asInt());
             assertEquals("getCapabilities", request.path("type").asText());
             assertTrue(request.path("payload").isObject());

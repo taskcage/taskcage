@@ -38,7 +38,9 @@ public final class FakeTaskCageServer implements AutoCloseable {
         this.server.bind(UnixDomainSocketAddress.of(socketPath));
         this.handlers = List.copyOf(handlers);
         this.handled = new CountDownLatch(handlers.size());
-        this.thread = Thread.ofPlatform().name("fake-taskcage-server").start(this::serve);
+        this.thread = new Thread(this::serve, "fake-taskcage-server");
+        this.thread.setDaemon(true);
+        this.thread.start();
     }
 
     public static FakeTaskCageServer start(Function<JsonNode, JsonNode> handler) throws IOException {
@@ -73,7 +75,7 @@ public final class FakeTaskCageServer implements AutoCloseable {
     public void close() throws IOException {
         server.close();
         try {
-            thread.join(Duration.ofSeconds(2));
+            thread.join(Duration.ofSeconds(2).toMillis());
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             throw new IOException("interrupted while closing fake daemon", exception);

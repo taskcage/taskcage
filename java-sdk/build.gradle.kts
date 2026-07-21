@@ -7,8 +7,12 @@ version = "0.1.0-SNAPSHOT"
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
+        languageVersion = JavaLanguageVersion.of(17)
     }
+}
+
+tasks.withType<JavaCompile>().configureEach {
+    options.release = 17
 }
 
 repositories {
