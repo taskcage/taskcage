@@ -32,7 +32,7 @@ PDF·OCR·이미지·영상 변환, 브라우저 자동화, 컴파일처럼 실�
 TaskCage는 Linux cgroup v2를 이용해 작업마다 자원을 제한하고, 작업이 만든 프로세스 트리를 하나의 단위로 관리합니다.
 
 - CPU, 메모리, 프로세스 수, 벽시계 실행 시간을 작업별로 제한
-- 전역 동시 실행 수와 대기열 관리
+- 전역 동시 실행 수 관리와 실행 슬롯 초과 시 즉시 거절
 - 시간 초과, 취소, 오류, 제한 초과 시 작업 cgroup 전체 종료
 - exit code, signal, 종료 원인, CPU·메모리 사용량을 Java SDK에 반환
 - 데몬 재시작 뒤 남은 작업 cgroup을 정리하는 복구 절차 제공
@@ -46,7 +46,7 @@ Java 애플리케이션
           └─ taskcaged (Rust 데몬)
               ├─ 작업별 cgroup v2 생성 및 제한 설정
               ├─ 외부 프로그램 실행과 stdout/stderr 수집
-              ├─ 동시 실행·대기열·시간 초과 관리
+              ├─ 동시 실행 제한·시간 초과 관리
               ├─ 자원 통계와 종료 원인 판정
               └─ 작업 cgroup 전체 정리
 ```
@@ -82,18 +82,18 @@ Java 애플리케이션
 - 메모리 상한: `memory.max`
 - 프로세스 수 상한: `pids.max`
 - 벽시계 실행 시간: 데몬 타이머
-- stdout/stderr 및 요청 프레임 크기 상한
-- 전역 최대 실행 수, 제한된 FIFO 대기열, 대기 시간 제한
+- stdout/stderr tail 및 요청 프레임 크기 상한
+- 전역 최대 실행 수, 실행 슬롯 소진 시 즉시 거절
 
 ### 결과와 종료 원인
 
 SDK는 다음 정보를 받습니다.
 
-- 정상 종료, 실행 실패, 사용자 취소, 대기열 거절, timeout, 출력 제한 초과
+- 정상 종료, 실행 실패, 사용자 취소, 실행 슬롯 소진, timeout
 - cgroup 이벤트에 근거한 메모리 OOM 및 PID 제한 초과
 - exit code 또는 종료 signal
-- `queueTime`, 실제 `wallTime`, CPU 사용량, 최대 메모리 사용량
-- 제한된 stdout/stderr 또는 그에 대한 참조
+- 실제 `wallTime`, CPU 사용량, 최대 메모리 사용량
+- 제한된 stdout/stderr tail과 잘림 여부
 
 단일 exit code만으로 OOM이나 timeout을 추측하지 않습니다. 실행 전후의 `memory.events.local`, `pids.events`, `cpu.stat` 등 커널 통계를 함께 사용해 종료 원인을 판정합니다.
 
@@ -116,6 +116,11 @@ if (result.terminationReason() == TerminationReason.TIMEOUT) {
 ```
 
 공개 API의 최종 타입명과 enum은 Rust 데몬·Java SDK가 공유하는 프로토콜 fixture와 함께 확정합니다.
+
+## 설계 문서
+
+- [MVP API 명세](docs/api-mvp.md): UDS 프로토콜, 요청·응답, 오류 코드와 공유 fixture 계약
+- [직접 cgroup v2 제어 결정](docs/decisions/0001-direct-cgroup-v2-without-systemd.md): systemd 없이 구현하는 이유와 운영 원칙
 
 ## 지원 범위
 
