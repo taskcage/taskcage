@@ -1,8 +1,22 @@
 # TaskCage
 
-> Linux에서 무거운 외부 프로그램을 **작업 단위로 실행·제한·관찰·정리**하는 Rust 기반 관리 프로그램과 Java SDK
+> Linux 호스트에서 신뢰된 무거운 외부 프로그램을 **작업 단위로 실행·제한·관찰·정리**하는 Rust 기반 관리 프로그램과 Maven Central 배포 Java SDK
 
 > **Status:** 초기 설계 단계입니다. 아래 아키텍처와 API는 구현 과정에서 조정될 수 있습니다.
+
+## 대상 사용자
+
+TaskCage의 첫 사용자는 Linux 호스트에서 Java 애플리케이션을 운영하면서 PDF·OCR·이미지·영상 변환, 브라우저 자동화, 컴파일 같은 신뢰된 외부 명령을 호출하는 개발자다.
+
+이 사용자는 cgroup·Unix domain socket·Rust 데몬을 직접 다루지 않고, Maven Central에서 SDK를 의존성으로 추가해 외부 명령의 자원 예산과 결과만 Java API로 다룬다.
+
+```kotlin
+dependencies {
+    implementation("io.github.taskcage:taskcage-java-sdk:<version>")
+}
+```
+
+Spring Boot는 지원 가능한 통합 대상이지만 SDK의 전제가 아니다. 기본 SDK는 Java 21+ 일반 애플리케이션에서 동작해야 한다.
 
 ## 왜 필요한가
 
@@ -29,7 +43,7 @@ TaskCage는 Linux cgroup v2를 이용해 작업마다 자원을 제한하고, �
 Java 애플리케이션
   └─ TaskCage Java SDK
       └─ Unix domain socket
-          └─ taskcaged (Rust / systemd 서비스)
+          └─ taskcaged (Rust 데몬)
               ├─ 작업별 cgroup v2 생성 및 제한 설정
               ├─ 외부 프로그램 실행과 stdout/stderr 수집
               ├─ 동시 실행·대기열·시간 초과 관리
@@ -42,8 +56,8 @@ Java 애플리케이션
 | 영역 | 결정 | 이유 |
 |---|---|---|
 | 관리 프로그램 | Rust 단일 데몬 (`taskcaged`) | Linux 프로세스·cgroup API를 직접 다루면서 작은 단일 바이너리로 배포 |
-| 실행 환경 | systemd 서비스 | 관리 프로그램과 Java 애플리케이션의 권한을 분리 |
-| SDK | Java 21+ | Spring Boot 애플리케이션에서 자연스럽게 사용 |
+| cgroup 관리 | Rust 데몬이 cgroup v2를 직접 제어 | systemd·DBus 의존 없이 작업별 제한·정리와 통계를 일관되게 관리 |
+| SDK | Java 21+ 일반 Java 라이브러리 | Maven·Gradle 기반 애플리케이션에서 프레임워크 의존 없이 사용 |
 | SDK 통신 | Unix domain socket | 같은 서버 안에서 빠르고, 소켓 파일 권한으로 호출자 제어 가능 |
 | 프로토콜 | 버전이 있는 length-prefixed JSON | 스트림의 부분 읽기, 메시지 크기 제한, 버전 불일치를 명확하게 처리 |
 | 자원 관리 | cgroup v2 | CPU·메모리·PID 제한과 작업 전체 정리에 적합 |
@@ -109,7 +123,7 @@ if (result.terminationReason() == TerminationReason.TIMEOUT) {
 
 - Linux cgroup v2 환경
 - Ubuntu LTS 한 버전과 x86-64 조합을 먼저 검증한 뒤 Ubuntu 22.04/24.04 및 ARM64로 확대 검토
-- Java 21 이상 및 Spring Boot 기반 애플리케이션
+- Java 21 이상 애플리케이션
 - PDF·OCR·이미지·영상 변환, 브라우저 자동화, 컴파일 등 신뢰된 외부 프로그램
 
 시작 시 cgroup v2, `cpu`·`memory`·`pids` controller, `cgroup.kill`, 필요한 쓰기 권한, 원자적 cgroup 진입 가능 여부를 검사합니다.
@@ -124,8 +138,17 @@ CLI, Python SDK, Docker·Kubernetes 지원은 초기 기능과 실제 사용 사
 
 1. Rust 데몬: cgroup 생성·제한·원자적 시작·정리·통계 수집과 UDS 프로토콜
 2. Linux 통합 테스트: ghost process, memory hog, 안전한 fork 폭주 fixture를 반복 검증
-3. Java SDK와 Spring Boot starter: 타입 안전한 API, 예외 모델, 예제 애플리케이션
+3. Java SDK: Gradle 기반 라이브러리, 타입 안전한 API·예외 모델·예제 애플리케이션, Maven Central 배포 준비
 4. 운영성 강화: 재시작 복구, 진단 명령, 구조화 로그, 메트릭과 대기열 정책
+
+## Java SDK 배포 계획
+
+1. `java-sdk/`에 Java 21+ 라이브러리를 구현하고 Gradle에서 테스트·패키징한다.
+2. `TaskCageClient`, `Command`, `ResourceBudget`, `ExecutionResult`를 프레임워크 독립적인 공개 API로 제공한다.
+3. Maven Central에 `io.github.taskcage:taskcage-java-sdk` artifact를 배포한다.
+4. Gradle Kotlin DSL, Gradle Groovy DSL, Maven 사용 예제를 README와 별도 예제 프로젝트로 제공한다.
+
+Spring Boot starter는 실제 수요가 확인된 후 별도 artifact로 검토한다.
 
 ## 기여
 
