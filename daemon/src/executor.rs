@@ -12,11 +12,16 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 use std::ptr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use thiserror::Error;
 use tokio::time::sleep;
+
+use crate::output::{BoundedTail, CaptureLimits, CapturedOutput, CapturedStream};
 
 const CLONE_INTO_CGROUP: u64 = 0x0002_0000_0000;
 
@@ -49,7 +54,19 @@ pub enum ExecutorError {
     #[error("환경 변수 이름은 비어 있거나 '=' 문자를 포함할 수 없습니다: {0:?}")]
     InvalidEnvironmentKey(OsString),
     #[error("실행 오류 전달용 관을 만들지 못했습니다")]
-    Pipe(#[source] io::Error),
+    ExecPipe(#[source] io::Error),
+    #[error("{stream} 출력 관을 준비하지 못했습니다")]
+    OutputPipe {
+        stream: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{stream} 출력 reader thread를 시작하지 못했습니다")]
+    OutputReaderStart {
+        stream: &'static str,
+        #[source]
+        source: io::Error,
+    },
     #[error("clone3로 작업 cgroup 안에 프로세스를 만들지 못했습니다")]
     Clone(#[source] io::Error),
     #[error("target execve가 실패했습니다: errno {0}")]
@@ -58,6 +75,16 @@ pub enum ExecutorError {
     Wait(#[source] io::Error),
     #[error("자식이 잘못된 실행 오류 값을 보냈습니다")]
     InvalidExecPayload,
+    #[error("{stream} 출력을 읽지 못했습니다")]
+    OutputRead {
+        stream: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{stream} 출력 reader thread가 panic으로 종료됐습니다")]
+    OutputReaderPanicked { stream: &'static str },
+    #[error("출력 reader가 {0:?} 안에 종료되지 않았습니다")]
+    OutputReaderTimeout(Duration),
 }
 
 #[derive(Debug)]
@@ -134,9 +161,10 @@ impl PreparedCommand {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct SpawnedProcess {
     pid: libc::pid_t,
+    output_readers: OutputReaders,
 }
 
 impl SpawnedProcess {
@@ -166,6 +194,135 @@ impl SpawnedProcess {
             ))),
         }
     }
+
+    pub async fn finish_output(
+        self,
+        timeout_duration: Duration,
+    ) -> Result<CapturedOutput, ExecutorError> {
+        self.output_readers.collect(timeout_duration).await
+    }
+}
+
+#[derive(Debug)]
+struct PreparedOutputReader {
+    descriptor: OwnedFd,
+    limit: std::num::NonZeroUsize,
+}
+
+impl PreparedOutputReader {
+    fn new(
+        descriptor: OwnedFd,
+        limit: std::num::NonZeroUsize,
+        stream: &'static str,
+    ) -> Result<Self, ExecutorError> {
+        set_nonblocking(descriptor.as_raw_fd())
+            .map_err(|source| ExecutorError::OutputPipe { stream, source })?;
+        Ok(Self { descriptor, limit })
+    }
+
+    fn start(
+        self,
+        stream: &'static str,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<thread::JoinHandle<Result<CapturedStream, io::Error>>, ExecutorError> {
+        thread::Builder::new()
+            .name(format!("taskcage-{stream}-reader"))
+            .spawn(move || drain_output(self.descriptor, self.limit, &cancelled))
+            .map_err(|source| ExecutorError::OutputReaderStart { stream, source })
+    }
+}
+
+#[derive(Debug)]
+struct OutputReaders {
+    cancelled: Arc<AtomicBool>,
+    stdout: Option<thread::JoinHandle<Result<CapturedStream, io::Error>>>,
+    stderr: Option<thread::JoinHandle<Result<CapturedStream, io::Error>>>,
+}
+
+impl OutputReaders {
+    fn start(
+        stdout: PreparedOutputReader,
+        stderr: PreparedOutputReader,
+    ) -> Result<Self, ExecutorError> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stdout = stdout.start("stdout", Arc::clone(&cancelled))?;
+        let stderr = match stderr.start("stderr", Arc::clone(&cancelled)) {
+            Ok(stderr) => stderr,
+            Err(error) => {
+                cancelled.store(true, Ordering::Release);
+                let _ = stdout.join();
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            cancelled,
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+        })
+    }
+
+    async fn collect(
+        mut self,
+        timeout_duration: Duration,
+    ) -> Result<CapturedOutput, ExecutorError> {
+        let deadline = Instant::now() + timeout_duration;
+        let timed_out = loop {
+            let stdout_finished = self
+                .stdout
+                .as_ref()
+                .expect("stdout reader가 존재합니다")
+                .is_finished();
+            let stderr_finished = self
+                .stderr
+                .as_ref()
+                .expect("stderr reader가 존재합니다")
+                .is_finished();
+            if stdout_finished && stderr_finished {
+                break false;
+            }
+            if Instant::now() >= deadline {
+                self.cancelled.store(true, Ordering::Release);
+                break true;
+            }
+            sleep(Duration::from_millis(10)).await;
+        };
+
+        // reader는 nonblocking read와 50 ms poll만 사용하므로 취소 뒤 join이 제한 없이
+        // 막히지 않는다. 반환 전에 반드시 join해서 thread와 FD를 남기지 않는다.
+        let stdout_result = self
+            .stdout
+            .take()
+            .expect("stdout reader가 존재합니다")
+            .join();
+        let stderr_result = self
+            .stderr
+            .take()
+            .expect("stderr reader가 존재합니다")
+            .join();
+        if timed_out {
+            return Err(ExecutorError::OutputReaderTimeout(timeout_duration));
+        }
+
+        let stdout = join_output_reader("stdout", stdout_result)?;
+        let stderr = join_output_reader("stderr", stderr_result)?;
+        Ok(CapturedOutput { stdout, stderr })
+    }
+
+    fn cancel_and_join(mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        if let Some(stdout) = self.stdout.take() {
+            let _ = stdout.join();
+        }
+        if let Some(stderr) = self.stderr.take() {
+            let _ = stderr.join();
+        }
+    }
+}
+
+impl Drop for OutputReaders {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -184,8 +341,30 @@ pub struct ProcessExit {
 pub fn spawn_in_cgroup(
     command: &PreparedCommand,
     cgroup_fd: RawFd,
+    capture_limits: CaptureLimits,
 ) -> Result<SpawnedProcess, ExecutorError> {
-    let (read_end, write_end) = pipe_cloexec()?;
+    let (exec_read_end, exec_write_end) = pipe_cloexec().map_err(ExecutorError::ExecPipe)?;
+    let (stdout_read_end, stdout_write_end) =
+        pipe_cloexec().map_err(|source| ExecutorError::OutputPipe {
+            stream: "stdout",
+            source,
+        })?;
+    let (stderr_read_end, stderr_write_end) =
+        pipe_cloexec().map_err(|source| ExecutorError::OutputPipe {
+            stream: "stderr",
+            source,
+        })?;
+    let stdout_reader = PreparedOutputReader::new(
+        stdout_read_end,
+        capture_limits.stdout_tail_max_bytes(),
+        "stdout",
+    )?;
+    let stderr_reader = PreparedOutputReader::new(
+        stderr_read_end,
+        capture_limits.stderr_tail_max_bytes(),
+        "stderr",
+    )?;
+    let output_readers = OutputReaders::start(stdout_reader, stderr_reader)?;
     let parent_pid = unsafe { libc::getpid() };
     let args = CloneArgs {
         flags: CLONE_INTO_CGROUP,
@@ -203,44 +382,71 @@ pub fn spawn_in_cgroup(
         )
     };
     if result == -1 {
-        return Err(ExecutorError::Clone(io::Error::last_os_error()));
+        let error = io::Error::last_os_error();
+        output_readers.cancel_and_join();
+        return Err(ExecutorError::Clone(error));
     }
     if result == 0 {
         child_exec(
             command,
-            read_end.as_raw_fd(),
-            write_end.as_raw_fd(),
+            exec_read_end.as_raw_fd(),
+            exec_write_end.as_raw_fd(),
+            stdout_write_end.as_raw_fd(),
+            stderr_write_end.as_raw_fd(),
             parent_pid,
         );
     }
 
-    drop(write_end);
+    drop(exec_write_end);
+    drop(stdout_write_end);
+    drop(stderr_write_end);
     let pid = result as libc::pid_t;
     let mut payload = Vec::with_capacity(size_of::<i32>());
-    if let Err(error) = File::from(read_end).read_to_end(&mut payload) {
+    if let Err(error) = File::from(exec_read_end).read_to_end(&mut payload) {
         // 오류 통로를 읽지 못해도 직접 만든 자식을 좀비로 남기지 않는다. 작업 cgroup의
         // 다른 프로세스는 호출자가 이어서 전체 종료한다.
         unsafe { libc::kill(pid, libc::SIGKILL) };
         let _ = wait_blocking(pid);
-        return Err(ExecutorError::Pipe(error));
+        output_readers.cancel_and_join();
+        return Err(ExecutorError::ExecPipe(error));
     }
     if payload.is_empty() {
-        Ok(SpawnedProcess { pid })
+        Ok(SpawnedProcess {
+            pid,
+            output_readers,
+        })
     } else if payload.len() == size_of::<i32>() {
         let errno = i32::from_ne_bytes(payload.try_into().expect("길이를 먼저 확인했습니다"));
         let _ = wait_blocking(pid);
+        output_readers.cancel_and_join();
         Err(ExecutorError::Exec(errno))
     } else {
         let _ = wait_blocking(pid);
+        output_readers.cancel_and_join();
         Err(ExecutorError::InvalidExecPayload)
     }
 }
 
-fn pipe_cloexec() -> Result<(OwnedFd, OwnedFd), ExecutorError> {
+fn pipe_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut descriptors = [-1; 2];
     let result = unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) };
     if result == -1 {
-        return Err(ExecutorError::Pipe(io::Error::last_os_error()));
+        return Err(io::Error::last_os_error());
+    }
+    for descriptor in &mut descriptors {
+        if *descriptor <= libc::STDERR_FILENO {
+            let replacement = unsafe { libc::fcntl(*descriptor, libc::F_DUPFD_CLOEXEC, 3) };
+            if replacement == -1 {
+                let error = io::Error::last_os_error();
+                unsafe {
+                    libc::close(descriptors[0]);
+                    libc::close(descriptors[1]);
+                }
+                return Err(error);
+            }
+            unsafe { libc::close(*descriptor) };
+            *descriptor = replacement;
+        }
     }
     let read_end = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
     let write_end = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
@@ -251,11 +457,21 @@ fn child_exec(
     command: &PreparedCommand,
     read_fd: RawFd,
     write_fd: RawFd,
+    stdout_fd: RawFd,
+    stderr_fd: RawFd,
     expected_parent: libc::pid_t,
 ) -> ! {
     // 이 아래의 자식 경로는 할당, 잠금, 로그 없이 낮은 수준의 시스템 호출만 사용한다.
     unsafe {
         libc::close(read_fd);
+        if libc::dup2(stdout_fd, libc::STDOUT_FILENO) == -1 {
+            write_errno_and_exit(write_fd, current_errno_or(libc::EBADF));
+        }
+        if libc::dup2(stderr_fd, libc::STDERR_FILENO) == -1 {
+            write_errno_and_exit(write_fd, current_errno_or(libc::EBADF));
+        }
+        libc::close(stdout_fd);
+        libc::close(stderr_fd);
         if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1
             || libc::getppid() != expected_parent
         {
@@ -270,6 +486,84 @@ fn child_exec(
             command.environment_pointers.as_ptr(),
         );
         write_errno_and_exit(write_fd, current_errno_or(libc::ENOEXEC));
+    }
+}
+
+fn set_nonblocking(descriptor: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn drain_output(
+    descriptor: OwnedFd,
+    limit: std::num::NonZeroUsize,
+    cancelled: &AtomicBool,
+) -> Result<CapturedStream, io::Error> {
+    let mut tail = BoundedTail::new(limit);
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(tail.finish());
+        }
+        let mut ready = libc::pollfd {
+            fd: descriptor.as_raw_fd(),
+            events: libc::POLLIN | libc::POLLHUP,
+            revents: 0,
+        };
+        let poll_result = unsafe { libc::poll(&mut ready, 1, 50) };
+        if poll_result == -1 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if poll_result == 0 {
+            continue;
+        }
+        loop {
+            if cancelled.load(Ordering::Acquire) {
+                return Ok(tail.finish());
+            }
+            let read = unsafe {
+                libc::read(
+                    descriptor.as_raw_fd(),
+                    buffer.as_mut_ptr().cast::<libc::c_void>(),
+                    buffer.len(),
+                )
+            };
+            if read == -1 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    break;
+                }
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if read == 0 {
+                return Ok(tail.finish());
+            }
+            tail.push(&buffer[..read as usize]);
+        }
+    }
+}
+
+fn join_output_reader(
+    stream: &'static str,
+    result: thread::Result<Result<CapturedStream, io::Error>>,
+) -> Result<CapturedStream, ExecutorError> {
+    match result {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(source)) => Err(ExecutorError::OutputRead { stream, source }),
+        Err(_) => Err(ExecutorError::OutputReaderPanicked { stream }),
     }
 }
 
@@ -343,6 +637,8 @@ fn os_string_to_cstring(value: OsString) -> Result<CString, ExecutorError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::num::NonZeroUsize;
 
     #[test]
     fn prepares_shell_free_argv() {
@@ -419,5 +715,82 @@ mod tests {
             decode_wait_status(libc::SIGKILL).signal,
             Some(libc::SIGKILL)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drains_large_stdout_and_stderr_concurrently() {
+        let (stdout_read, stdout_write) = pipe_cloexec().unwrap();
+        let (stderr_read, stderr_write) = pipe_cloexec().unwrap();
+        let readers = OutputReaders::start(
+            PreparedOutputReader::new(stdout_read, NonZeroUsize::new(32).unwrap(), "stdout")
+                .unwrap(),
+            PreparedOutputReader::new(stderr_read, NonZeroUsize::new(32).unwrap(), "stderr")
+                .unwrap(),
+        )
+        .unwrap();
+
+        let stdout = thread::spawn(move || write_test_flood(stdout_write, b'O', b"STDOUT-END\n"));
+        let stderr = thread::spawn(move || write_test_flood(stderr_write, b'E', b"STDERR-END\n"));
+        stdout.join().unwrap().unwrap();
+        stderr.join().unwrap().unwrap();
+
+        let output = readers.collect(Duration::from_secs(2)).await.unwrap();
+        assert!(output.stdout.raw_tail().ends_with(b"STDOUT-END\n"));
+        assert!(output.stderr.raw_tail().ends_with(b"STDERR-END\n"));
+        assert_eq!(output.stdout.raw_tail().len(), 32);
+        assert_eq!(output.stderr.raw_tail().len(), 32);
+        assert!(output.stdout.truncated());
+        assert!(output.stderr.truncated());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reader_timeout_cancels_threads_with_open_writers() {
+        let (stdout_read, stdout_write) = pipe_cloexec().unwrap();
+        let (stderr_read, stderr_write) = pipe_cloexec().unwrap();
+        let readers = OutputReaders::start(
+            PreparedOutputReader::new(stdout_read, NonZeroUsize::new(8).unwrap(), "stdout")
+                .unwrap(),
+            PreparedOutputReader::new(stderr_read, NonZeroUsize::new(8).unwrap(), "stderr")
+                .unwrap(),
+        )
+        .unwrap();
+
+        let error = readers
+            .collect(Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ExecutorError::OutputReaderTimeout(_)));
+        drop(stdout_write);
+        drop(stderr_write);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reader_descriptors_close_after_collection() {
+        let (stdout_read, stdout_write) = pipe_cloexec().unwrap();
+        let (stderr_read, stderr_write) = pipe_cloexec().unwrap();
+        let stdout_fd = stdout_read.as_raw_fd();
+        let stderr_fd = stderr_read.as_raw_fd();
+        let readers = OutputReaders::start(
+            PreparedOutputReader::new(stdout_read, NonZeroUsize::new(8).unwrap(), "stdout")
+                .unwrap(),
+            PreparedOutputReader::new(stderr_read, NonZeroUsize::new(8).unwrap(), "stderr")
+                .unwrap(),
+        )
+        .unwrap();
+        drop(stdout_write);
+        drop(stderr_write);
+
+        readers.collect(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(unsafe { libc::fcntl(stdout_fd, libc::F_GETFD) }, -1);
+        assert_eq!(unsafe { libc::fcntl(stderr_fd, libc::F_GETFD) }, -1);
+    }
+
+    fn write_test_flood(descriptor: OwnedFd, byte: u8, marker: &[u8]) -> io::Result<()> {
+        let mut output = File::from(descriptor);
+        let chunk = [byte; 8 * 1024];
+        for _ in 0..256 {
+            output.write_all(&chunk)?;
+        }
+        output.write_all(marker)
     }
 }

@@ -4,6 +4,7 @@ pub mod cgroup;
 pub mod codec;
 #[cfg(target_os = "linux")]
 mod executor;
+pub mod output;
 pub mod preflight;
 pub mod protocol;
 
@@ -19,7 +20,9 @@ use cgroup::{CgroupError, CgroupLimits, JobStats};
 use cgroup::{CgroupManager, JobCgroup};
 #[cfg(target_os = "linux")]
 use executor::{ExecutorError, PreparedCommand, SpawnedProcess, WaitOutcome, spawn_in_cgroup};
+use output::CaptureLimits;
 use preflight::{CapabilityProbe, CapabilityReport, PreflightError, SystemProbe};
+use protocol::TaskOutput;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -58,6 +61,7 @@ pub struct RunOnceConfig {
     pub limits: CgroupLimits,
     pub wall_timeout: Duration,
     pub cleanup_timeout: Duration,
+    pub capture_limits: CaptureLimits,
     pub working_directory: PathBuf,
     /// target에 명시적으로 전달할 환경이다. daemon process 환경은 자동으로 합치지 않는다.
     pub environment: BTreeMap<OsString, OsString>,
@@ -76,6 +80,7 @@ pub struct RunOnceReport {
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
     pub stats: JobStats,
+    pub output: TaskOutput,
     pub cleanup_complete: bool,
 }
 
@@ -106,6 +111,7 @@ pub async fn run_once(config: RunOnceConfig) -> Result<RunOnceReport> {
         limits,
         wall_timeout,
         cleanup_timeout,
+        capture_limits,
         working_directory,
         environment,
         command,
@@ -122,7 +128,7 @@ pub async fn run_once(config: RunOnceConfig) -> Result<RunOnceReport> {
 
     let job = manager.create_job(&job_id, limits)?;
     tracing::info!(job_id = job.id(), path = %job.path().display(), "작업 cgroup을 만들었습니다");
-    let process = match spawn_in_cgroup(&prepared, job.raw_fd()) {
+    let process = match spawn_in_cgroup(&prepared, job.raw_fd(), capture_limits) {
         Ok(process) => process,
         Err(error) => {
             return Err(
@@ -130,6 +136,7 @@ pub async fn run_once(config: RunOnceConfig) -> Result<RunOnceReport> {
             );
         }
     };
+    let pid = process.pid();
     tracing::info!(job_id = %job_id, pid = process.pid(), "target을 작업 cgroup 안에서 시작했습니다");
 
     let membership_verified = match job.contains_pid(process.pid()) {
@@ -189,16 +196,34 @@ pub async fn run_once(config: RunOnceConfig) -> Result<RunOnceReport> {
         }
     };
 
-    // 대표 프로세스가 정상 종료했어도 남은 자식과 손자는 cgroup 전체 종료로 정리한다.
-    let stats = job.finish(cleanup_timeout).await?;
+    // 대표 프로세스가 정상 종료했어도 남은 자식과 손자를 먼저 cgroup 전체 종료한다.
+    // 그래야 후손이 출력 FD를 들고 있어도 EOF를 무기한 기다리지 않는다.
+    let finish_result = job.finish(cleanup_timeout).await;
+    let output_result = process.finish_output(cleanup_timeout).await;
+    let stats = match finish_result {
+        Ok(stats) => stats,
+        Err(error) => {
+            let cleanup_errors = output_result
+                .err()
+                .map(|output_error| vec![output_error.to_string()])
+                .unwrap_or_default();
+            return Err(Error::RunFailed {
+                stage: "작업 cgroup 정리",
+                cause: error.to_string(),
+                cleanup_errors,
+            });
+        }
+    };
+    let output = output_result?.into_task_output();
     Ok(RunOnceReport {
         job_id,
-        pid: process.pid(),
+        pid,
         membership_verified,
         timed_out,
         exit_code: exit.exit_code,
         signal: exit.signal,
         stats,
+        output,
         cleanup_complete: true,
     })
 }
@@ -239,6 +264,9 @@ async fn cleanup_running_job(
         cleanup_errors.push(error.to_string());
     }
     if let Err(error) = job.finish(timeout).await {
+        cleanup_errors.push(error.to_string());
+    }
+    if let Err(error) = process.finish_output(timeout).await {
         cleanup_errors.push(error.to_string());
     }
     Error::RunFailed {
