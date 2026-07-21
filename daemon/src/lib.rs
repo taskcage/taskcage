@@ -4,6 +4,7 @@ pub mod cgroup;
 #[cfg(target_os = "linux")]
 mod executor;
 pub mod preflight;
+pub mod protocol;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
