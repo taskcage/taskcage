@@ -770,6 +770,8 @@ mod tests {
         let (stderr_read, stderr_write) = pipe_cloexec().unwrap();
         let stdout_fd = stdout_read.as_raw_fd();
         let stderr_fd = stderr_read.as_raw_fd();
+        let stdout_identity = descriptor_identity(stdout_fd).unwrap();
+        let stderr_identity = descriptor_identity(stderr_fd).unwrap();
         let readers = OutputReaders::start(
             PreparedOutputReader::new(stdout_read, NonZeroUsize::new(8).unwrap(), "stdout")
                 .unwrap(),
@@ -781,8 +783,31 @@ mod tests {
         drop(stderr_write);
 
         readers.collect(Duration::from_secs(1)).await.unwrap();
-        assert_eq!(unsafe { libc::fcntl(stdout_fd, libc::F_GETFD) }, -1);
-        assert_eq!(unsafe { libc::fcntl(stderr_fd, libc::F_GETFD) }, -1);
+        assert_descriptor_released(stdout_fd, stdout_identity);
+        assert_descriptor_released(stderr_fd, stderr_identity);
+    }
+
+    fn descriptor_identity(descriptor: RawFd) -> io::Result<(libc::dev_t, libc::ino_t)> {
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(descriptor, metadata.as_mut_ptr()) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let metadata = unsafe { metadata.assume_init() };
+        Ok((metadata.st_dev, metadata.st_ino))
+    }
+
+    fn assert_descriptor_released(
+        descriptor: RawFd,
+        original_identity: (libc::dev_t, libc::ino_t),
+    ) {
+        match descriptor_identity(descriptor) {
+            Err(error) if error.raw_os_error() == Some(libc::EBADF) => {}
+            Ok(current_identity) => assert_ne!(
+                current_identity, original_identity,
+                "원래 output pipe descriptor가 아직 열려 있습니다"
+            ),
+            Err(error) => panic!("output pipe descriptor 상태를 확인하지 못했습니다: {error}"),
+        }
     }
 
     fn write_test_flood(descriptor: OwnedFd, byte: u8, marker: &[u8]) -> io::Result<()> {
