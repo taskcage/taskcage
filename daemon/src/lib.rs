@@ -5,6 +5,9 @@ pub mod cgroup;
 pub mod codec;
 #[cfg(target_os = "linux")]
 mod executor;
+// 다음 task handler가 사용할 내부 경계이며 이번 단계에서는 공개 handler를 만들지 않는다.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod lifecycle;
 pub mod output;
 pub mod preflight;
 pub mod protocol;

@@ -60,6 +60,25 @@ impl CapturedOutput {
             stderr_truncated: stderr.truncated,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        stdout_tail: Vec<u8>,
+        stdout_truncated: bool,
+        stderr_tail: Vec<u8>,
+        stderr_truncated: bool,
+    ) -> Self {
+        Self {
+            stdout: CapturedStream {
+                tail: stdout_tail,
+                truncated: stdout_truncated,
+            },
+            stderr: CapturedStream {
+                tail: stderr_tail,
+                truncated: stderr_truncated,
+            },
+        }
+    }
 }
 
 fn decode_lossy(bytes: Vec<u8>) -> String {
