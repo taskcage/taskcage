@@ -88,7 +88,10 @@ fn parse_run_once(args: Vec<OsString>) -> taskcaged::Result<RunOnceConfig> {
                         "memory-bytes",
                         required_option("memory-bytes", memory_bytes)?,
                     )?,
-                    max_processes: nonzero_u32("pids", required_option("pids", max_processes)?)?,
+                    max_processes: NonZeroU64::from(nonzero_u32(
+                        "pids",
+                        required_option("pids", max_processes)?,
+                    )?),
                     cpu: CpuLimit {
                         quota_micros: nonzero_u64(
                             "cpu-quota-us",

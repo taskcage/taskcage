@@ -8,6 +8,7 @@ mod executor;
 pub mod output;
 pub mod preflight;
 pub mod protocol;
+pub mod resource_budget;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
