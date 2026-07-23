@@ -1,0 +1,24 @@
+{
+  "protocolVersion": 1,
+  "requestId": "77777777-7777-7777-7777-777777777777",
+  "type": "task",
+  "payload": {
+    "taskId": "33333333-3333-3333-3333-333333333333",
+    "state": "FINISHED",
+    "terminationReason": "EXECUTION_FAILED",
+    "process": { "exitCode": null, "signal": null },
+    "timing": {
+      "submittedAt": "2026-07-20T09:00:00Z",
+      "startedAt": "2026-07-20T09:00:00Z",
+      "finishedAt": "2026-07-20T09:00:00Z",
+      "wallTimeMs": 12
+    },
+    "usage": { "cpuTimeMicros": 0, "memoryPeakBytes": 0 },
+    "output": {
+      "stdoutTail": "",
+      "stderrTail": "",
+      "stdoutTruncated": false,
+      "stderrTruncated": false
+    }
+  }
+}
