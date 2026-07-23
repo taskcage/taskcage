@@ -1,0 +1,585 @@
+//! 검증된 자원 예산으로 atomic runner를 실행하고 단일 task lifecycle을 완료한다.
+
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use crate::cgroup::{CgroupError, CgroupManager, JobCgroup, JobStats};
+use crate::executor::{
+    ExecFailure, PreparedCommand, ProcessExit, SpawnOutcome, SpawnedProcess, WaitOutcome,
+    spawn_in_cgroup,
+};
+use crate::lifecycle::{
+    ControlTrigger, ControlTriggers, ExecutionEvidence, ProcessEvidence, SingleTaskLifecycle,
+    TerminalTriggerLatch,
+};
+use crate::output::{CaptureLimits, CapturedOutput};
+use crate::preflight::VerifiedEnvironment;
+use crate::protocol::{CommandSpec, TaskPayload};
+use crate::resource_budget::ResourceBudget;
+use crate::{Error, Result};
+
+#[derive(Debug)]
+/// wire 검증이 끝난 작업을 실행 코어에 넘기는 내부 입력이다.
+pub struct TaskRunConfig {
+    pub task_id: String,
+    pub submitted_at: String,
+    pub started_at: String,
+    pub started_monotonic: Instant,
+    pub cleanup_timeout: Duration,
+    pub command: CommandSpec,
+    pub budget: ResourceBudget,
+}
+
+#[derive(Debug)]
+/// 같은 cgroup manager와 정리 안전 상태를 공유하는 작업 실행 경계다.
+pub struct TaskRunner {
+    manager: CgroupManager,
+    cleanup_uncertain: AtomicBool,
+}
+
+impl TaskRunner {
+    /// preflight 성공 토큰 없이는 실행기를 만들 수 없다.
+    pub fn initialize(environment: VerifiedEnvironment) -> Result<Self> {
+        Ok(Self {
+            manager: CgroupManager::initialize(environment)?,
+            cleanup_uncertain: AtomicBool::new(false),
+        })
+    }
+
+    /// 전체 정리가 증명된 결과만 FINISHED snapshot으로 바꾼다.
+    pub async fn run_task<F>(
+        &self,
+        config: TaskRunConfig,
+        running_sender: tokio::sync::oneshot::Sender<TaskPayload>,
+        finished_time: F,
+    ) -> Result<TaskPayload>
+    where
+        F: FnOnce() -> (String, Instant),
+    {
+        if self.cleanup_uncertain.load(Ordering::Acquire) {
+            return Err(Error::CleanupUncertain);
+        }
+
+        let prepared = prepare_protocol_command(&config.command)?;
+        let mut lifecycle = SingleTaskLifecycle::running(
+            config.task_id.clone(),
+            config.submitted_at,
+            config.started_at,
+            config.started_monotonic,
+        );
+        let execution = ExecutionConfig {
+            job_id: config.task_id,
+            limits: config.budget.cgroup_limits(),
+            wall_timeout: config.budget.wall_timeout(),
+            cleanup_timeout: config.cleanup_timeout,
+            capture_limits: config.budget.capture_limits(),
+            prepared,
+        };
+
+        let cleaned = match execute(&self.manager, execution, || {
+            // execve 성공을 확인한 뒤 실제로 완료할 같은 lifecycle의 snapshot만 공개한다.
+            let _ = running_sender.send(lifecycle.snapshot());
+        })
+        .await
+        {
+            Ok(cleaned) => cleaned,
+            Err(failure) => {
+                if failure.block_future_runs {
+                    self.cleanup_uncertain.store(true, Ordering::Release);
+                }
+                return Err(failure.error);
+            }
+        };
+        let (finished_at, finished_monotonic) = finished_time();
+        lifecycle
+            .complete(cleaned, finished_at, finished_monotonic)
+            .cloned()
+            .map_err(|error| Error::TaskLifecycle(error.to_string()))
+    }
+
+    pub fn cleanup_is_uncertain(&self) -> bool {
+        self.cleanup_uncertain.load(Ordering::Acquire)
+    }
+}
+
+fn prepare_protocol_command(command: &CommandSpec) -> Result<PreparedCommand> {
+    let mut argv = Vec::with_capacity(command.args.len() + 1);
+    argv.push(OsString::from(&command.program));
+    argv.extend(command.args.iter().map(OsString::from));
+    let environment = command
+        .environment
+        .iter()
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+        .collect::<BTreeMap<_, _>>();
+    Ok(PreparedCommand::new(
+        argv,
+        &PathBuf::from(&command.working_directory),
+        environment,
+    )?)
+}
+
+pub(crate) struct ExecutionConfig {
+    pub(crate) job_id: String,
+    pub(crate) limits: crate::cgroup::CgroupLimits,
+    pub(crate) wall_timeout: Duration,
+    pub(crate) cleanup_timeout: Duration,
+    pub(crate) capture_limits: CaptureLimits,
+    pub(crate) prepared: PreparedCommand,
+}
+
+#[derive(Debug)]
+pub(crate) struct CleanedRun {
+    job_id: String,
+    pid: i32,
+    membership_verified: bool,
+    evidence: ExecutionEvidence,
+    control: ControlTriggers,
+    stats: JobStats,
+    output: CapturedOutput,
+    daemon_error: bool,
+}
+
+impl CleanedRun {
+    pub(crate) fn into_lifecycle_parts(
+        self,
+    ) -> (
+        ExecutionEvidence,
+        ControlTriggers,
+        JobStats,
+        CapturedOutput,
+        bool,
+    ) {
+        (
+            self.evidence,
+            self.control,
+            self.stats,
+            self.output,
+            self.daemon_error,
+        )
+    }
+
+    pub(crate) fn into_diagnostic_parts(self) -> DiagnosticRun {
+        let (exit_code, signal, exec_errno) = match self.evidence {
+            ExecutionEvidence::Started(process) => (process.exit_code(), process.signal(), None),
+            ExecutionEvidence::StartFailed { errno } => (None, None, Some(errno)),
+        };
+        DiagnosticRun {
+            job_id: self.job_id,
+            pid: self.pid,
+            membership_verified: self.membership_verified,
+            timed_out: self.control.first() == Some(crate::lifecycle::ControlTrigger::TimedOut),
+            exit_code,
+            signal,
+            exec_errno,
+            stats: self.stats,
+            output: self.output,
+        }
+    }
+}
+
+pub(crate) struct DiagnosticRun {
+    pub(crate) job_id: String,
+    pub(crate) pid: i32,
+    pub(crate) membership_verified: bool,
+    pub(crate) timed_out: bool,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) signal: Option<i32>,
+    pub(crate) exec_errno: Option<i32>,
+    pub(crate) stats: JobStats,
+    pub(crate) output: CapturedOutput,
+}
+
+pub(crate) struct CoreFailure {
+    error: Error,
+    block_future_runs: bool,
+}
+
+impl CoreFailure {
+    fn before_job(error: CgroupError) -> Self {
+        let block_future_runs = matches!(&error, CgroupError::CleanupCombined { .. });
+        Self {
+            error: error.into(),
+            block_future_runs,
+        }
+    }
+
+    pub(crate) fn into_error(self) -> Error {
+        self.error
+    }
+}
+
+pub(crate) async fn execute<F>(
+    manager: &CgroupManager,
+    config: ExecutionConfig,
+    on_started: F,
+) -> std::result::Result<CleanedRun, CoreFailure>
+where
+    F: FnOnce(),
+{
+    let ExecutionConfig {
+        job_id,
+        limits,
+        wall_timeout,
+        cleanup_timeout,
+        capture_limits,
+        prepared,
+    } = config;
+    let job = manager
+        .create_job(&job_id, limits)
+        .map_err(CoreFailure::before_job)?;
+
+    let pending = match spawn_in_cgroup(&prepared, job.raw_fd(), capture_limits) {
+        Ok(pending) => pending,
+        Err(error) => {
+            return Err(cleanup_job_after_failure(
+                job,
+                cleanup_timeout,
+                "프로세스 생성",
+                &error,
+                false,
+            )
+            .await);
+        }
+    };
+    match job.contains_pid(pending.pid()) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(cleanup_pending_job(
+                job,
+                pending,
+                cleanup_timeout,
+                "exec 전 cgroup 소속 재확인",
+                &"PID가 작업 cgroup에서 확인되지 않았습니다",
+            )
+            .await);
+        }
+        Err(error) => {
+            return Err(cleanup_pending_job(
+                job,
+                pending,
+                cleanup_timeout,
+                "exec 전 cgroup 소속 재확인",
+                &error,
+            )
+            .await);
+        }
+    }
+    let spawn = match pending.start() {
+        Ok(spawn) => spawn,
+        Err(error) => {
+            let isolation_uncertain = matches!(&error, crate::executor::ExecutorError::Wait(_));
+            return Err(cleanup_job_after_failure(
+                job,
+                cleanup_timeout,
+                "프로세스 시작",
+                &error,
+                isolation_uncertain,
+            )
+            .await);
+        }
+    };
+
+    match spawn {
+        SpawnOutcome::ExecFailed(failure) => {
+            finish_exec_failure(job_id, job, failure, cleanup_timeout).await
+        }
+        SpawnOutcome::Started(process) => {
+            finish_started_process(
+                job_id,
+                job,
+                process,
+                wall_timeout,
+                cleanup_timeout,
+                on_started,
+            )
+            .await
+        }
+    }
+}
+
+async fn finish_exec_failure(
+    job_id: String,
+    job: JobCgroup,
+    failure: ExecFailure,
+    cleanup_timeout: Duration,
+) -> std::result::Result<CleanedRun, CoreFailure> {
+    match job.finish(cleanup_timeout).await {
+        Ok(stats) => Ok(CleanedRun {
+            job_id,
+            pid: failure.pid,
+            membership_verified: true,
+            evidence: ExecutionEvidence::StartFailed {
+                errno: failure.errno,
+            },
+            control: ControlTriggers::none(),
+            stats,
+            output: failure.output,
+            daemon_error: false,
+        }),
+        Err(error) => Err(CoreFailure {
+            error: run_failed("exec 실패 뒤 작업 cgroup 정리", &error, Vec::new()),
+            block_future_runs: true,
+        }),
+    }
+}
+
+async fn finish_started_process<F>(
+    job_id: String,
+    job: JobCgroup,
+    process: SpawnedProcess,
+    wall_timeout: Duration,
+    cleanup_timeout: Duration,
+    on_started: F,
+) -> std::result::Result<CleanedRun, CoreFailure>
+where
+    F: FnOnce(),
+{
+    let terminal_trigger = TerminalTriggerLatch::default();
+    on_started();
+    let wait_outcome = match process.wait_for(wall_timeout).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return cleanup_running_job(
+                job,
+                process,
+                RecoveryContext::new(
+                    job_id,
+                    cleanup_timeout,
+                    "target 종료 대기",
+                    error.to_string(),
+                    terminal_trigger.snapshot(),
+                    true,
+                ),
+            )
+            .await;
+        }
+    };
+
+    let (control, exit) = match wait_outcome {
+        WaitOutcome::Exited(exit) => (terminal_trigger.snapshot(), exit),
+        WaitOutcome::TimedOut => {
+            terminal_trigger.observe(ControlTrigger::TimedOut);
+            if let Err(error) = job.kill_all() {
+                return cleanup_running_job(
+                    job,
+                    process,
+                    RecoveryContext::new(
+                        job_id,
+                        cleanup_timeout,
+                        "시간 초과 전체 종료",
+                        error.to_string(),
+                        terminal_trigger.snapshot(),
+                        true,
+                    ),
+                )
+                .await;
+            }
+            let exit = match process.reap_after_kill(cleanup_timeout).await {
+                Ok(exit) => exit,
+                Err(error) => {
+                    return cleanup_running_job(
+                        job,
+                        process,
+                        RecoveryContext::new(
+                            job_id,
+                            cleanup_timeout,
+                            "시간 초과 종료 상태 회수",
+                            error.to_string(),
+                            terminal_trigger.snapshot(),
+                            true,
+                        ),
+                    )
+                    .await;
+                }
+            };
+            (terminal_trigger.snapshot(), exit)
+        }
+    };
+
+    finish_cleaned_started(job_id, job, process, exit, control, true, cleanup_timeout).await
+}
+
+async fn finish_cleaned_started(
+    job_id: String,
+    job: JobCgroup,
+    process: SpawnedProcess,
+    exit: ProcessExit,
+    control: ControlTriggers,
+    membership_verified: bool,
+    cleanup_timeout: Duration,
+) -> std::result::Result<CleanedRun, CoreFailure> {
+    let pid = process.pid();
+    // 후손이 출력 FD를 잡고 있을 수 있으므로 cgroup 전체를 먼저 비운 뒤 reader를 회수한다.
+    let finish_result = job.finish(cleanup_timeout).await;
+    let output_result = process.finish_output(cleanup_timeout).await;
+    match (finish_result, output_result) {
+        (Ok(stats), Ok(output)) => Ok(CleanedRun {
+            job_id,
+            pid,
+            membership_verified,
+            evidence: ExecutionEvidence::Started(ProcessEvidence::from(exit)),
+            control,
+            stats,
+            output,
+            daemon_error: false,
+        }),
+        (Err(cgroup_error), Ok(_)) => Err(CoreFailure {
+            error: run_failed("작업 cgroup 정리", &cgroup_error, Vec::new()),
+            block_future_runs: true,
+        }),
+        (Ok(_), Err(output_error)) => Err(CoreFailure {
+            error: run_failed("출력 reader 정리", &output_error, Vec::new()),
+            block_future_runs: false,
+        }),
+        (Err(cgroup_error), Err(output_error)) => Err(CoreFailure {
+            error: run_failed(
+                "작업 cgroup 정리",
+                &cgroup_error,
+                vec![output_error.to_string()],
+            ),
+            block_future_runs: true,
+        }),
+    }
+}
+
+async fn cleanup_job_after_failure(
+    job: JobCgroup,
+    timeout: Duration,
+    stage: &'static str,
+    cause: &dyn std::fmt::Display,
+    isolation_uncertain: bool,
+) -> CoreFailure {
+    match job.finish(timeout).await {
+        Ok(_) => CoreFailure {
+            error: run_failed(stage, cause, Vec::new()),
+            block_future_runs: isolation_uncertain,
+        },
+        Err(error) => CoreFailure {
+            error: run_failed(stage, cause, vec![error.to_string()]),
+            block_future_runs: true,
+        },
+    }
+}
+
+async fn cleanup_pending_job(
+    job: JobCgroup,
+    pending: crate::executor::PendingProcess,
+    timeout: Duration,
+    stage: &'static str,
+    cause: &dyn std::fmt::Display,
+) -> CoreFailure {
+    let abort_result = pending.abort();
+    let finish_result = job.finish(timeout).await;
+    let mut cleanup_errors = Vec::new();
+    if let Err(error) = &abort_result {
+        cleanup_errors.push(error.to_string());
+    }
+    if let Err(error) = &finish_result {
+        cleanup_errors.push(error.to_string());
+    }
+    CoreFailure {
+        error: run_failed(stage, cause, cleanup_errors),
+        block_future_runs: abort_result.is_err() || finish_result.is_err(),
+    }
+}
+
+struct RecoveryContext {
+    job_id: String,
+    timeout: Duration,
+    stage: &'static str,
+    cause: String,
+    control: ControlTriggers,
+    membership_verified: bool,
+}
+
+impl RecoveryContext {
+    fn new(
+        job_id: String,
+        timeout: Duration,
+        stage: &'static str,
+        cause: impl Into<String>,
+        control: ControlTriggers,
+        membership_verified: bool,
+    ) -> Self {
+        Self {
+            job_id,
+            timeout,
+            stage,
+            cause: cause.into(),
+            control,
+            membership_verified,
+        }
+    }
+}
+
+async fn cleanup_running_job(
+    job: JobCgroup,
+    process: SpawnedProcess,
+    context: RecoveryContext,
+) -> std::result::Result<CleanedRun, CoreFailure> {
+    let RecoveryContext {
+        job_id,
+        timeout,
+        stage,
+        cause,
+        control,
+        membership_verified,
+    } = context;
+    let pid = process.pid();
+    let mut cleanup_errors = Vec::new();
+    let mut isolation_uncertain = false;
+    let kill_result = job.kill_all();
+    if let Err(error) = &kill_result {
+        cleanup_errors.push(error.to_string());
+        isolation_uncertain = true;
+    }
+    let reap_result = process.reap_after_kill(timeout).await;
+    if let Err(error) = &reap_result {
+        cleanup_errors.push(error.to_string());
+        isolation_uncertain = true;
+    }
+    let finish_result = job.finish(timeout).await;
+    if let Err(error) = &finish_result {
+        cleanup_errors.push(error.to_string());
+        isolation_uncertain = true;
+    }
+    let output_result = process.finish_output(timeout).await;
+    if let Err(error) = &output_result {
+        cleanup_errors.push(error.to_string());
+    }
+
+    match (kill_result, reap_result, finish_result, output_result) {
+        (Ok(()), Ok(exit), Ok(stats), Ok(output)) => {
+            tracing::warn!(stage, cause = %cause, "내부 오류 뒤 안전한 정리를 완료했습니다");
+            Ok(CleanedRun {
+                job_id,
+                pid,
+                membership_verified,
+                evidence: ExecutionEvidence::Started(ProcessEvidence::from(exit)),
+                control,
+                stats,
+                output,
+                daemon_error: true,
+            })
+        }
+        _ => Err(CoreFailure {
+            error: run_failed(stage, &cause, cleanup_errors),
+            block_future_runs: isolation_uncertain,
+        }),
+    }
+}
+
+fn run_failed(
+    stage: &'static str,
+    cause: &dyn std::fmt::Display,
+    cleanup_errors: Vec<String>,
+) -> Error {
+    Error::RunFailed {
+        stage,
+        cause: cause.to_string(),
+        cleanup_errors,
+    }
+}

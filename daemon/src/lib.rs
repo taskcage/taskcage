@@ -5,13 +5,16 @@ pub mod cgroup;
 pub mod codec;
 #[cfg(target_os = "linux")]
 mod executor;
-// 다음 task handler가 사용할 내부 경계이며 이번 단계에서는 공개 handler를 만들지 않는다.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) mod lifecycle;
+#[cfg(any(target_os = "linux", test))]
+mod lifecycle;
 pub mod output;
 pub mod preflight;
 pub mod protocol;
 pub mod resource_budget;
+#[cfg(target_os = "linux")]
+mod runner;
+#[cfg(target_os = "linux")]
+pub use runner::{TaskRunConfig, TaskRunner};
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -20,14 +23,16 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use cgroup::CgroupManager;
 use cgroup::{CgroupError, CgroupLimits, JobStats};
 #[cfg(target_os = "linux")]
-use cgroup::{CgroupManager, JobCgroup};
-#[cfg(target_os = "linux")]
-use executor::{ExecutorError, PreparedCommand, SpawnedProcess, WaitOutcome, spawn_in_cgroup};
+use executor::{ExecutorError, PreparedCommand};
 use output::CaptureLimits;
 use preflight::{CapabilityProbe, CapabilityReport, PreflightError, SystemProbe};
 use protocol::TaskOutput;
+#[cfg(target_os = "linux")]
+use runner::{ExecutionConfig, execute};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -54,6 +59,10 @@ pub enum Error {
         cause: String,
         cleanup_errors: Vec<String>,
     },
+    #[error("이전 작업의 격리 정리를 확인하지 못해 새 작업을 실행할 수 없습니다")]
+    CleanupUncertain,
+    #[error("작업 lifecycle 결과를 만들지 못했습니다: {0}")]
+    TaskLifecycle(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -131,154 +140,40 @@ pub async fn run_once(config: RunOnceConfig) -> Result<RunOnceReport> {
     let manager = CgroupManager::initialize(environment)?;
     tracing::info!(root = %manager.root().display(), "검증된 cgroup 작업 영역을 준비했습니다");
 
-    let job = manager.create_job(&job_id, limits)?;
-    tracing::info!(job_id = job.id(), path = %job.path().display(), "작업 cgroup을 만들었습니다");
-    let process = match spawn_in_cgroup(&prepared, job.raw_fd(), capture_limits) {
-        Ok(process) => process,
-        Err(error) => {
-            return Err(
-                cleanup_job_after_failure(job, cleanup_timeout, "프로세스 생성", &error).await,
-            );
-        }
-    };
-    let pid = process.pid();
-    tracing::info!(job_id = %job_id, pid = process.pid(), "target을 작업 cgroup 안에서 시작했습니다");
-
-    let membership_verified = match job.contains_pid(process.pid()) {
-        Ok(verified) => verified,
-        Err(error) => {
-            return Err(cleanup_running_job(
-                job,
-                process,
-                cleanup_timeout,
-                "cgroup 소속 재확인",
-                &error,
-            )
-            .await);
-        }
-    };
-
-    let wait_outcome = match process.wait_for(wall_timeout).await {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            return Err(cleanup_running_job(
-                job,
-                process,
-                cleanup_timeout,
-                "target 종료 대기",
-                &error,
-            )
-            .await);
-        }
-    };
-    let (timed_out, exit) = match wait_outcome {
-        WaitOutcome::Exited(exit) => (false, exit),
-        WaitOutcome::TimedOut => {
-            if let Err(error) = job.kill_all() {
-                return Err(cleanup_running_job(
-                    job,
-                    process,
-                    cleanup_timeout,
-                    "시간 초과 전체 종료",
-                    &error,
-                )
-                .await);
-            }
-            let exit = match process.reap_after_kill(cleanup_timeout).await {
-                Ok(exit) => exit,
-                Err(error) => {
-                    return Err(cleanup_running_job(
-                        job,
-                        process,
-                        cleanup_timeout,
-                        "시간 초과 종료 상태 회수",
-                        &error,
-                    )
-                    .await);
-                }
-            };
-            (true, exit)
-        }
-    };
-
-    // 대표 프로세스가 정상 종료했어도 남은 자식과 손자를 먼저 cgroup 전체 종료한다.
-    // 그래야 후손이 출력 FD를 들고 있어도 EOF를 무기한 기다리지 않는다.
-    let finish_result = job.finish(cleanup_timeout).await;
-    let output_result = process.finish_output(cleanup_timeout).await;
-    let stats = match finish_result {
-        Ok(stats) => stats,
-        Err(error) => {
-            let cleanup_errors = output_result
-                .err()
-                .map(|output_error| vec![output_error.to_string()])
-                .unwrap_or_default();
-            return Err(Error::RunFailed {
-                stage: "작업 cgroup 정리",
-                cause: error.to_string(),
-                cleanup_errors,
-            });
-        }
-    };
-    let output = output_result?.into_task_output();
+    let cleaned = execute(
+        &manager,
+        ExecutionConfig {
+            job_id,
+            limits,
+            wall_timeout,
+            cleanup_timeout,
+            capture_limits,
+            prepared,
+        },
+        || {},
+    )
+    .await
+    .map_err(|failure| failure.into_error())?;
+    let diagnostic = cleaned.into_diagnostic_parts();
+    if let Some(errno) = diagnostic.exec_errno {
+        return Err(Error::RunFailed {
+            stage: "프로세스 생성",
+            cause: ExecutorError::Exec(errno).to_string(),
+            cleanup_errors: Vec::new(),
+        });
+    }
+    let output = diagnostic.output.into_task_output();
     Ok(RunOnceReport {
-        job_id,
-        pid,
-        membership_verified,
-        timed_out,
-        exit_code: exit.exit_code,
-        signal: exit.signal,
-        stats,
+        job_id: diagnostic.job_id,
+        pid: diagnostic.pid,
+        membership_verified: diagnostic.membership_verified,
+        timed_out: diagnostic.timed_out,
+        exit_code: diagnostic.exit_code,
+        signal: diagnostic.signal,
+        stats: diagnostic.stats,
         output,
         cleanup_complete: true,
     })
-}
-
-#[cfg(target_os = "linux")]
-async fn cleanup_job_after_failure(
-    job: JobCgroup,
-    timeout: Duration,
-    stage: &'static str,
-    cause: &dyn std::fmt::Display,
-) -> Error {
-    let cleanup_errors = job
-        .finish(timeout)
-        .await
-        .err()
-        .map(|error| vec![error.to_string()])
-        .unwrap_or_default();
-    Error::RunFailed {
-        stage,
-        cause: cause.to_string(),
-        cleanup_errors,
-    }
-}
-
-#[cfg(target_os = "linux")]
-async fn cleanup_running_job(
-    job: JobCgroup,
-    process: SpawnedProcess,
-    timeout: Duration,
-    stage: &'static str,
-    cause: &dyn std::fmt::Display,
-) -> Error {
-    let mut cleanup_errors = Vec::new();
-    if let Err(error) = job.kill_all() {
-        cleanup_errors.push(error.to_string());
-    }
-    if let Err(error) = process.reap_after_kill(timeout).await {
-        cleanup_errors.push(error.to_string());
-    }
-    if let Err(error) = job.finish(timeout).await {
-        cleanup_errors.push(error.to_string());
-    }
-    if let Err(error) = process.finish_output(timeout).await {
-        cleanup_errors.push(error.to_string());
-    }
-    Error::RunFailed {
-        stage,
-        cause: cause.to_string(),
-        cleanup_errors,
-    }
 }
 
 #[cfg(not(target_os = "linux"))]

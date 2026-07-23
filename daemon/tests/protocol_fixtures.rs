@@ -11,9 +11,10 @@ use taskcaged::protocol::{
 use taskcaged::resource_budget::ResourceBudget;
 
 const REQUEST_FIXTURES: [&str; 1] = ["submit-task-valid.json"];
-const RESPONSE_FIXTURES: [&str; 5] = [
+const RESPONSE_FIXTURES: [&str; 6] = [
     "error-capacity-exhausted.json",
     "task-accepted.json",
+    "task-result-execution-failed.json",
     "task-result-output-truncated.json",
     "task-result-timeout.json",
     "task-running.json",
@@ -158,6 +159,20 @@ fn task_fixtures_preserve_state_and_terminal_meaning() {
             },
             ..
         }
+    ));
+
+    let execution_failed: Response =
+        decode_json(&fixture_bytes("task-result-execution-failed.json")).unwrap();
+    assert!(matches!(
+        execution_failed,
+        Response::Task {
+            payload: TaskPayload::Finished {
+                termination_reason: TerminationReason::ExecutionFailed,
+                process,
+                ..
+            },
+            ..
+        } if process.exit_code.is_none() && process.signal.is_none()
     ));
 
     let truncated: Response =
