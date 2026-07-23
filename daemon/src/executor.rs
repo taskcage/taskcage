@@ -41,6 +41,16 @@ struct CloneArgs {
     cgroup: u64,
 }
 
+#[derive(Clone, Copy)]
+struct ChildDescriptors {
+    exec_read: RawFd,
+    exec_write: RawFd,
+    stdout: RawFd,
+    stderr: RawFd,
+    start_read: RawFd,
+    start_write: RawFd,
+}
+
 #[derive(Debug, Error)]
 pub enum ExecutorError {
     #[error("실행할 프로그램이 없습니다")]
@@ -55,6 +65,10 @@ pub enum ExecutorError {
     InvalidEnvironmentKey(OsString),
     #[error("실행 오류 전달용 관을 만들지 못했습니다")]
     ExecPipe(#[source] io::Error),
+    #[error("exec 시작 게이트용 관을 만들지 못했습니다")]
+    StartGatePipe(#[source] io::Error),
+    #[error("검증이 끝난 target의 exec 시작을 허용하지 못했습니다")]
+    StartGateSignal(#[source] io::Error),
     #[error("{stream} 출력 관을 준비하지 못했습니다")]
     OutputPipe {
         stream: &'static str,
@@ -165,6 +179,92 @@ impl PreparedCommand {
 pub struct SpawnedProcess {
     pid: libc::pid_t,
     output_readers: OutputReaders,
+}
+
+#[derive(Debug)]
+pub struct PendingProcess {
+    pid: libc::pid_t,
+    exec_read_end: Option<OwnedFd>,
+    start_write_end: Option<OwnedFd>,
+    output_readers: Option<OutputReaders>,
+}
+
+impl PendingProcess {
+    pub fn pid(&self) -> libc::pid_t {
+        self.pid
+    }
+
+    /// 부모가 cgroup 소속을 확인한 뒤에만 자식의 execve 경로를 연다.
+    pub fn start(mut self) -> Result<SpawnOutcome, ExecutorError> {
+        let start_write_end = self
+            .start_write_end
+            .take()
+            .expect("exec 시작 게이트가 존재합니다");
+        if let Err(source) = write_start_signal(start_write_end.as_raw_fd()) {
+            drop(start_write_end);
+            self.stop_and_reap()?;
+            return Err(ExecutorError::StartGateSignal(source));
+        }
+        drop(start_write_end);
+
+        let exec_read_end = self
+            .exec_read_end
+            .take()
+            .expect("실행 오류 통로가 존재합니다");
+        let mut payload = Vec::with_capacity(size_of::<i32>());
+        if let Err(error) = File::from(exec_read_end).read_to_end(&mut payload) {
+            self.stop_and_reap()?;
+            return Err(ExecutorError::ExecPipe(error));
+        }
+        let output_readers = self
+            .output_readers
+            .take()
+            .expect("출력 reader가 존재합니다");
+        if payload.is_empty() {
+            Ok(SpawnOutcome::Started(SpawnedProcess {
+                pid: self.pid,
+                output_readers,
+            }))
+        } else if payload.len() == size_of::<i32>() {
+            let errno = i32::from_ne_bytes(payload.try_into().expect("길이를 먼저 확인했습니다"));
+            let wait_result = wait_blocking(self.pid);
+            let output_result = output_readers.cancel_and_collect();
+            wait_result?;
+            let output = output_result?;
+            Ok(SpawnOutcome::ExecFailed(ExecFailure {
+                pid: self.pid,
+                errno,
+                output,
+            }))
+        } else {
+            let _ = wait_blocking(self.pid);
+            output_readers.cancel_and_join();
+            Err(ExecutorError::InvalidExecPayload)
+        }
+    }
+
+    pub fn abort(mut self) -> Result<(), ExecutorError> {
+        self.stop_and_reap()
+    }
+
+    fn stop_and_reap(&mut self) -> Result<(), ExecutorError> {
+        self.start_write_end.take();
+        unsafe { libc::kill(self.pid, libc::SIGKILL) };
+        let wait_result = wait_blocking(self.pid);
+        self.exec_read_end.take();
+        if let Some(output_readers) = self.output_readers.take() {
+            output_readers.cancel_and_join();
+        }
+        wait_result.map(|_| ())
+    }
+}
+
+impl Drop for PendingProcess {
+    fn drop(&mut self) {
+        if self.output_readers.is_some() {
+            let _ = self.stop_and_reap();
+        }
+    }
 }
 
 impl SpawnedProcess {
@@ -317,6 +417,24 @@ impl OutputReaders {
             let _ = stderr.join();
         }
     }
+
+    fn cancel_and_collect(mut self) -> Result<CapturedOutput, ExecutorError> {
+        self.cancelled.store(true, Ordering::Release);
+        let stdout_result = self
+            .stdout
+            .take()
+            .expect("stdout reader가 존재합니다")
+            .join();
+        let stderr_result = self
+            .stderr
+            .take()
+            .expect("stderr reader가 존재합니다")
+            .join();
+
+        let stdout = join_output_reader("stdout", stdout_result)?;
+        let stderr = join_output_reader("stderr", stderr_result)?;
+        Ok(CapturedOutput { stdout, stderr })
+    }
 }
 
 impl Drop for OutputReaders {
@@ -342,12 +460,26 @@ pub struct ProcessExit {
     pub signal: Option<i32>,
 }
 
+#[derive(Debug)]
+pub struct ExecFailure {
+    pub pid: libc::pid_t,
+    pub errno: i32,
+    pub output: CapturedOutput,
+}
+
+#[derive(Debug)]
+pub enum SpawnOutcome {
+    Started(SpawnedProcess),
+    ExecFailed(ExecFailure),
+}
+
 pub fn spawn_in_cgroup(
     command: &PreparedCommand,
     cgroup_fd: RawFd,
     capture_limits: CaptureLimits,
-) -> Result<SpawnedProcess, ExecutorError> {
+) -> Result<PendingProcess, ExecutorError> {
     let (exec_read_end, exec_write_end) = pipe_cloexec().map_err(ExecutorError::ExecPipe)?;
+    let (start_read_end, start_write_end) = pipe_cloexec().map_err(ExecutorError::StartGatePipe)?;
     let (stdout_read_end, stdout_write_end) =
         pipe_cloexec().map_err(|source| ExecutorError::OutputPipe {
             stream: "stdout",
@@ -393,42 +525,29 @@ pub fn spawn_in_cgroup(
     if result == 0 {
         child_exec(
             command,
-            exec_read_end.as_raw_fd(),
-            exec_write_end.as_raw_fd(),
-            stdout_write_end.as_raw_fd(),
-            stderr_write_end.as_raw_fd(),
+            ChildDescriptors {
+                exec_read: exec_read_end.as_raw_fd(),
+                exec_write: exec_write_end.as_raw_fd(),
+                stdout: stdout_write_end.as_raw_fd(),
+                stderr: stderr_write_end.as_raw_fd(),
+                start_read: start_read_end.as_raw_fd(),
+                start_write: start_write_end.as_raw_fd(),
+            },
             parent_pid,
         );
     }
 
     drop(exec_write_end);
+    drop(start_read_end);
     drop(stdout_write_end);
     drop(stderr_write_end);
     let pid = result as libc::pid_t;
-    let mut payload = Vec::with_capacity(size_of::<i32>());
-    if let Err(error) = File::from(exec_read_end).read_to_end(&mut payload) {
-        // 오류 통로를 읽지 못해도 직접 만든 자식을 좀비로 남기지 않는다. 작업 cgroup의
-        // 다른 프로세스는 호출자가 이어서 전체 종료한다.
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-        let _ = wait_blocking(pid);
-        output_readers.cancel_and_join();
-        return Err(ExecutorError::ExecPipe(error));
-    }
-    if payload.is_empty() {
-        Ok(SpawnedProcess {
-            pid,
-            output_readers,
-        })
-    } else if payload.len() == size_of::<i32>() {
-        let errno = i32::from_ne_bytes(payload.try_into().expect("길이를 먼저 확인했습니다"));
-        let _ = wait_blocking(pid);
-        output_readers.cancel_and_join();
-        Err(ExecutorError::Exec(errno))
-    } else {
-        let _ = wait_blocking(pid);
-        output_readers.cancel_and_join();
-        Err(ExecutorError::InvalidExecPayload)
-    }
+    Ok(PendingProcess {
+        pid,
+        exec_read_end: Some(exec_read_end),
+        start_write_end: Some(start_write_end),
+        output_readers: Some(output_readers),
+    })
 }
 
 fn pipe_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
@@ -459,15 +578,21 @@ fn pipe_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
 
 fn child_exec(
     command: &PreparedCommand,
-    read_fd: RawFd,
-    write_fd: RawFd,
-    stdout_fd: RawFd,
-    stderr_fd: RawFd,
+    descriptors: ChildDescriptors,
     expected_parent: libc::pid_t,
 ) -> ! {
+    let ChildDescriptors {
+        exec_read: read_fd,
+        exec_write: write_fd,
+        stdout: stdout_fd,
+        stderr: stderr_fd,
+        start_read: start_read_fd,
+        start_write: start_write_fd,
+    } = descriptors;
     // 이 아래의 자식 경로는 할당, 잠금, 로그 없이 낮은 수준의 시스템 호출만 사용한다.
     unsafe {
         libc::close(read_fd);
+        libc::close(start_write_fd);
         if libc::dup2(stdout_fd, libc::STDOUT_FILENO) == -1 {
             write_errno_and_exit(write_fd, current_errno_or(libc::EBADF));
         }
@@ -481,6 +606,22 @@ fn child_exec(
         {
             write_errno_and_exit(write_fd, current_errno_or(libc::ESRCH));
         }
+        let mut start = 0_u8;
+        loop {
+            let read = libc::read(
+                start_read_fd,
+                (&mut start as *mut u8).cast::<libc::c_void>(),
+                1,
+            );
+            if read == 1 {
+                break;
+            }
+            if read == -1 && current_errno_or(libc::EIO) == libc::EINTR {
+                continue;
+            }
+            write_errno_and_exit(write_fd, libc::ECANCELED);
+        }
+        libc::close(start_read_fd);
         if libc::chdir(command.working_directory.as_ptr()) == -1 {
             write_errno_and_exit(write_fd, current_errno_or(libc::ENOENT));
         }
@@ -490,6 +631,33 @@ fn child_exec(
             command.environment_pointers.as_ptr(),
         );
         write_errno_and_exit(write_fd, current_errno_or(libc::ENOEXEC));
+    }
+}
+
+fn write_start_signal(descriptor: RawFd) -> io::Result<()> {
+    let signal = [1_u8];
+    loop {
+        let written = unsafe {
+            libc::write(
+                descriptor,
+                signal.as_ptr().cast::<libc::c_void>(),
+                signal.len(),
+            )
+        };
+        if written == 1 {
+            return Ok(());
+        }
+        if written == -1 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "exec 시작 게이트에 신호를 쓰지 못했습니다",
+        ));
     }
 }
 

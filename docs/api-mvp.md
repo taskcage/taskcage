@@ -107,8 +107,8 @@ SDK의 분기 기준은 사람이 읽는 `message`가 아니라 `code`다.
 RUNNING -> FINISHED
 ```
 
-- `RUNNING`: 데몬이 작업 cgroup을 만들고 모든 제한을 설정한 뒤, 외부 명령을 그 cgroup 안에서 실행 중이다.
-- `FINISHED`: 종료 결과를 확정했고 더 이상 상태가 바뀌지 않는다.
+- `RUNNING`: 데몬이 작업 cgroup을 만들고 모든 제한을 설정한 뒤, 그 cgroup 안에서 외부 명령의 시작을 시도했거나 실행 중이다.
+- `FINISHED`: 작업 cgroup 전체와 출력 reader 정리를 확인한 뒤 종료 결과를 확정했으며, 더 이상 상태가 바뀌지 않는다.
 
 데몬은 cgroup v2 controller, 쓰기 권한, `cgroup.kill`, 원자적 cgroup 진입 같은 필수 조건을 충족하지 못하면 작업을 수락하지 않는다.
 
@@ -127,6 +127,12 @@ RUNNING -> FINISHED
 | `DAEMON_ERROR` | 작업 생성 뒤 데몬 내부 오류로 안전한 결과를 확정하지 못했다. |
 
 데몬은 단일 exit code만으로 종료 원인을 추측하지 않는다. 메모리·PID 한도 초과는 cgroup 이벤트를, timeout과 cancel은 데몬 제어 상태를 함께 확인해 판정한다.
+
+종료 원인이 겹칠 때는 다음 규칙을 사용한다.
+
+- timeout과 cancel 같은 데몬 제어 원인은 먼저 관찰한 하나만 기록하며, 늦게 도착한 원인이 이미 기록한 값을 덮어쓰지 않는다.
+- 같은 작업에서 메모리와 PID 사건이 함께 늘었으면 `memory.events.local`의 `oom_kill` 증가, `pids.events`의 `max` 증가, `memory.events.local`의 `oom` 증가 순서로 더 직접적인 근거를 선택한다.
+- 안전한 정리를 완료한 데몬 내부 오류보다 위의 명시적 제어 원인과 커널 사건을 우선한다.
 
 ## API
 
@@ -215,7 +221,9 @@ SDK는 응답 유실이나 재연결 뒤 같은 작업을 재전송할 수 있�
 }
 ```
 
-`taskAccepted`는 데몬이 작업 cgroup을 만들고 모든 제한을 설정한 뒤, 외부 명령을 해당 cgroup 안에서 시작한 후에만 반환한다. `effectiveLimits`는 실제 cgroup에 적용된 값이며 요청값과 다르면 데몬은 작업을 수락하지 않고 `LIMIT_EXCEEDS_POLICY` 오류를 반환한다. 슬롯이 없으면 데몬은 작업을 만들지 않고 `CAPACITY_EXHAUSTED` 오류를 반환한다. 같은 `clientRequestId` 재전송에는 새 작업 대신 기존 `taskId`와 현재 상태를 반환한다.
+`taskAccepted`는 데몬이 작업 cgroup을 만들고 모든 제한을 설정한 뒤, 외부 명령을 해당 cgroup 안에서 시작한 후에만 반환한다. 실행 파일 또는 작업 디렉터리 문제로 `execve`가 시작되지 못하면 `taskAccepted`를 반환하지 않고, 정리를 마친 `task`/`FINISHED` 응답을 같은 요청의 직접 응답으로 반환한다. 이때 `terminationReason`은 `EXECUTION_FAILED`이고 `process.exitCode`와 `process.signal`은 모두 `null`이다. `execve`가 성공한 뒤 명령이 매우 빨리 종료해도 먼저 `taskAccepted`를 반환한다.
+
+`effectiveLimits`는 실제 cgroup에 적용된 값이며 요청값과 다르면 데몬은 작업을 수락하지 않고 `LIMIT_EXCEEDS_POLICY` 오류를 반환한다. 슬롯이 없으면 데몬은 작업을 만들지 않고 `CAPACITY_EXHAUSTED` 오류를 반환한다. 같은 `clientRequestId` 재전송에는 새 작업 대신 기존 `taskId`와 현재 상태를 반환한다.
 
 ### `getTask`
 
@@ -276,6 +284,8 @@ SDK는 응답 유실이나 재연결 뒤 같은 작업을 재전송할 수 있�
 - `wallTimeMs`는 실행 시작부터 종료 확정까지의 단조 시간 차이다.
 - `cpuTimeMicros`와 `memoryPeakBytes`는 cgroup 통계에서 수집한다.
 - `exitCode`와 `signal`은 해당하지 않으면 `null`이다.
+- `signal`은 Linux 표준 signal의 정식 이름을 사용한다. 예를 들어 9는 `SIGKILL`, 11은 `SIGSEGV`, 15는 `SIGTERM`이다. realtime signal은 `SIGRTMIN` 또는 `SIGRTMIN+N` 형태로 반환한다.
+- `EXECUTION_FAILED`로 실행 파일을 시작하지 못한 경우 `exitCode`와 `signal`은 모두 `null`이다.
 - 출력은 UTF-8 문자열로 반환하며, 유효하지 않은 UTF-8 바이트열은 U+FFFD로 치환한다.
 
 ### `cancelTask`
@@ -310,6 +320,7 @@ SDK는 응답 유실이나 재연결 뒤 같은 작업을 재전송할 수 있�
 - stdout 또는 stderr가 각자의 상한을 초과하면 데몬은 해당 스트림의 오래된 바이트를 버리고 마지막 N raw bytes만 유지한다. 작업은 계속 실행하며, `stdoutTail` 또는 `stderrTail`과 `*Truncated: true`를 결과에 반환한다. 유효하지 않은 UTF-8 바이트는 응답 직전 U+FFFD로 치환한다.
 - 결과와 `clientRequestId` 매핑은 완료 시점부터 최소 10분 보관한다. 기간 뒤 조회와 취소는 `TASK_NOT_FOUND`를 반환할 수 있다.
 - 데몬 재시작으로 연결이 끊기면 SDK는 같은 `clientRequestId`로 제출을 재시도할 수 있다. 진행 중 작업의 재개는 지원하지 않으며, 데몬은 시작 시 남은 TaskCage cgroup을 안전하게 정리한다.
+- 작업 cgroup 제거와 `populated 0`, direct child 회수, 출력 reader 종료를 모두 확인하기 전에는 `FINISHED`를 공개하지 않는다. 격리 정리를 확인하지 못한 실행기는 새 작업을 시작하지 않으며 내부 방어 경로에서 안전한 정리를 다시 시도한다. wire에 별도 cleanup state나 cleanup 객체를 추가하지 않는다.
 
 ## 오류 코드
 
@@ -318,14 +329,14 @@ SDK는 응답 유실이나 재연결 뒤 같은 작업을 재전송할 수 있�
 | `INVALID_REQUEST` | 필수 필드, 타입, 경로 또는 상한 검증 실패 | 아니오 |
 | `UNSUPPORTED_PROTOCOL_VERSION` | 지원하지 않는 프로토콜 버전 | 아니오 |
 | `FRAME_TOO_LARGE` | 프레임 크기가 최대치를 넘음 | 아니오 |
-| `ENVIRONMENT_UNAVAILABLE` | cgroup v2 또는 필수 controller·권한을 사용할 수 없음 | 아니오 |
+| `ENVIRONMENT_UNAVAILABLE` | cgroup v2, 필수 controller·권한 또는 안전한 작업 격리 상태를 사용할 수 없음 | 아니오 |
 | `CAPACITY_EXHAUSTED` | 전역 실행 슬롯이 모두 사용 중임 | 예 |
 | `TASK_NOT_FOUND` | 작업이 없거나 보관 기간이 지남 | 아니오 |
 | `TASK_ALREADY_FINISHED` | 완료된 작업 취소 요청 | 아니오 |
 | `IDEMPOTENCY_CONFLICT` | 같은 clientRequestId에 다른 요청 본문을 사용함 | 아니오 |
 | `LIMIT_EXCEEDS_POLICY` | 요청 제한이 데몬의 배포 정책을 벗어남 | 아니오 |
 | `DAEMON_UNAVAILABLE` | SDK가 UDS 연결 또는 응답을 얻지 못함 | 예 |
-| `INTERNAL_ERROR` | 작업을 만들기 전 데몬의 예상하지 못한 오류 | 상황에 따라 |
+| `INTERNAL_ERROR` | 예상하지 못한 데몬 오류로 안전한 공개 결과를 만들 수 없음 | 상황에 따라 |
 
 `DAEMON_UNAVAILABLE`은 소켓 연결·읽기·쓰기 실패를 Java SDK가 표현하는 로컬 오류이며, 데몬이 전송하는 JSON 오류가 아니다.
 
@@ -337,6 +348,7 @@ Java SDK와 Rust 데몬은 아래 fixture를 공유 계약으로 사용한다. �
 submit-task-valid.json
 task-accepted.json
 task-running.json
+task-result-execution-failed.json
 task-result-timeout.json
 task-result-output-truncated.json
 error-capacity-exhausted.json

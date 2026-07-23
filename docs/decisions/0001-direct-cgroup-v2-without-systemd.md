@@ -26,6 +26,8 @@ TaskCage의 핵심 가치는 외부 명령이 제한된 cgroup 안에서만 실�
 
 - 실행 전 작업 cgroup을 만들고 `cpu.max`, `memory.max`, `pids.max`를 설정한다.
 - 원자적 cgroup 진입을 보장할 수 없으면 외부 명령을 실행하지 않는다.
+- `clone3(CLONE_INTO_CGROUP)` 자식은 exec 직전 게이트에서 기다리고, 부모가 `cgroup.procs`에서
+  소속을 재확인한 뒤에만 `execve`를 진행한다. 짧게 끝나는 target도 확인 전에 실행되지 않는다.
 - 종료·취소·timeout·오류 시 `cgroup.kill`로 작업 cgroup 전체를 정리한다.
 - `cgroup.events`의 `populated 0`을 확인한 뒤 cgroup을 제거한다.
 - 시작 시 cgroup v2 controller, `cgroup.kill`, 필요한 쓰기 권한을 점검하고, 충족하지 못하면 명시적으로 실패한다.

@@ -44,6 +44,8 @@ Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 
    독립적으로 반환한다.
 9. 대표 프로세스 종료 뒤 후손이 출력 FD를 들고 있어도 cgroup 전체 정리 뒤 reader가
    종료된다.
+10. 같은 atomic runner가 실제 protocol task의 RUNNING snapshot을 만든 뒤 정상 종료, 0이 아닌
+    종료, timeout과 exec 시작 실패를 하나의 FINISHED lifecycle로 완료한다.
 
 실행 방법:
 

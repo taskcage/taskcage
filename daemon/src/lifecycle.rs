@@ -1,5 +1,6 @@
 //! 정리가 끝난 작업 한 건을 protocol v1의 불변 snapshot으로 바꾼다.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Instant;
 
 use thiserror::Error;
@@ -18,6 +19,16 @@ impl ProcessEvidence {
     pub(crate) fn new(exit_code: Option<i32>, signal: Option<i32>) -> Self {
         Self { exit_code, signal }
     }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn exit_code(self) -> Option<i32> {
+        self.exit_code
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn signal(self) -> Option<i32> {
+        self.signal
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -30,33 +41,61 @@ impl From<crate::executor::ProcessExit> for ProcessEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecutionEvidence {
     Started(ProcessEvidence),
-    StartFailed,
+    StartFailed { errno: i32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlTrigger {
+    TimedOut,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ControlTriggers {
-    timed_out: bool,
-    cancelled: bool,
+    first: Option<ControlTrigger>,
 }
 
 impl ControlTriggers {
-    pub(crate) fn observed(timed_out: bool, cancelled: bool) -> Self {
-        Self {
-            timed_out,
-            cancelled,
-        }
-    }
-
     pub(crate) fn none() -> Self {
-        Self::observed(false, false)
+        Self { first: None }
     }
 
     pub(crate) fn timed_out() -> Self {
-        Self::observed(true, false)
+        Self {
+            first: Some(ControlTrigger::TimedOut),
+        }
     }
 
-    pub(crate) fn cancelled() -> Self {
-        Self::observed(false, true)
+    pub(crate) fn first(self) -> Option<ControlTrigger> {
+        self.first
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TerminalTriggerLatch {
+    first: AtomicU8,
+}
+
+impl TerminalTriggerLatch {
+    /// timeout과 향후 cancel 경로가 같은 first-observed 규칙을 사용한다.
+    pub(crate) fn observe(&self, trigger: ControlTrigger) -> bool {
+        let value = match trigger {
+            ControlTrigger::TimedOut => 1,
+            ControlTrigger::Cancelled => 2,
+        };
+        self.first
+            .compare_exchange(0, value, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(crate) fn snapshot(&self) -> ControlTriggers {
+        match self.first.load(Ordering::Acquire) {
+            1 => ControlTriggers::timed_out(),
+            2 => ControlTriggers {
+                first: Some(ControlTrigger::Cancelled),
+            },
+            _ => ControlTriggers::none(),
+        }
     }
 }
 
@@ -69,8 +108,7 @@ pub(crate) struct TerminationEvidence<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) struct CleanedExecution {
-    cleanup_complete: bool,
+struct CompletionData {
     evidence: ExecutionEvidence,
     control: ControlTriggers,
     stats: JobStats,
@@ -78,23 +116,26 @@ pub(crate) struct CleanedExecution {
     daemon_error: bool,
 }
 
-impl CleanedExecution {
-    /// process와 job cgroup 정리가 모두 성공한 뒤에만 호출한다.
-    pub(crate) fn after_cleanup(
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct TestCompletion(CompletionData);
+
+#[cfg(test)]
+impl TestCompletion {
+    pub(crate) fn new(
         evidence: ExecutionEvidence,
         control: ControlTriggers,
         stats: JobStats,
         output: CapturedOutput,
         daemon_error: bool,
     ) -> Self {
-        Self {
-            cleanup_complete: true,
+        Self(CompletionData {
             evidence,
             control,
             stats,
             output,
             daemon_error,
-        }
+        })
     }
 }
 
@@ -145,9 +186,40 @@ impl SingleTaskLifecycle {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn complete(
         &mut self,
-        completion: CleanedExecution,
+        completion: crate::runner::CleanedRun,
+        finished_at: String,
+        finished_monotonic: Instant,
+    ) -> Result<&TaskPayload, LifecycleError> {
+        let (evidence, control, stats, output, daemon_error) = completion.into_lifecycle_parts();
+        self.complete_inner(
+            CompletionData {
+                evidence,
+                control,
+                stats,
+                output,
+                daemon_error,
+            },
+            finished_at,
+            finished_monotonic,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_for_test(
+        &mut self,
+        completion: TestCompletion,
+        finished_at: String,
+        finished_monotonic: Instant,
+    ) -> Result<&TaskPayload, LifecycleError> {
+        self.complete_inner(completion.0, finished_at, finished_monotonic)
+    }
+
+    fn complete_inner(
+        &mut self,
+        completion: CompletionData,
         finished_at: String,
         finished_monotonic: Instant,
     ) -> Result<&TaskPayload, LifecycleError> {
@@ -156,24 +228,19 @@ impl SingleTaskLifecycle {
             LifecycleState::Finished(_) => return Err(LifecycleError::AlreadyFinished),
         };
 
-        // FINISHED는 전체 cgroup과 output reader 정리가 확인된 뒤에만 만든다.
-        if !completion.cleanup_complete {
-            return Err(LifecycleError::CleanupIncomplete);
-        }
-
         let termination_reason = classify_termination(&TerminationEvidence {
             execution: completion.evidence,
             control: completion.control,
             event_delta: &completion.stats.event_delta,
             daemon_error: completion.daemon_error,
         })?;
-        if completion.evidence == ExecutionEvidence::StartFailed {
-            return Err(LifecycleError::ExecutionStartContractUndecided);
-        }
 
         let process = match completion.evidence {
             ExecutionEvidence::Started(process) => map_process_result(process)?,
-            ExecutionEvidence::StartFailed => unreachable!("위에서 시작 실패를 거부했습니다"),
+            ExecutionEvidence::StartFailed { .. } => ProcessResult {
+                exit_code: None,
+                signal: None,
+            },
         };
         let wall_time = finished_monotonic
             .checked_duration_since(running.started_monotonic)
@@ -209,58 +276,29 @@ impl SingleTaskLifecycle {
 pub(crate) fn classify_termination(
     evidence: &TerminationEvidence<'_>,
 ) -> Result<TerminationReason, LifecycleError> {
-    let memory_exceeded =
-        evidence.event_delta.memory_oom > 0 || evidence.event_delta.memory_oom_kill > 0;
-    let process_exceeded = evidence.event_delta.pids_max > 0;
-
-    let mut selected = None;
-    select_reason(
-        &mut selected,
-        evidence.control.timed_out,
-        TerminationReason::TimedOut,
-    )?;
-    select_reason(
-        &mut selected,
-        evidence.control.cancelled,
-        TerminationReason::Cancelled,
-    )?;
-    select_reason(
-        &mut selected,
-        memory_exceeded,
-        TerminationReason::MemoryLimitExceeded,
-    )?;
-    select_reason(
-        &mut selected,
-        process_exceeded,
-        TerminationReason::ProcessLimitExceeded,
-    )?;
-    select_reason(
-        &mut selected,
-        evidence.daemon_error,
-        TerminationReason::DaemonError,
-    )?;
-    select_reason(
-        &mut selected,
-        evidence.execution == ExecutionEvidence::StartFailed,
-        TerminationReason::ExecutionFailed,
-    )?;
-
-    Ok(selected.unwrap_or(TerminationReason::Exited))
-}
-
-fn select_reason(
-    selected: &mut Option<TerminationReason>,
-    observed: bool,
-    candidate: TerminationReason,
-) -> Result<(), LifecycleError> {
-    if !observed {
-        return Ok(());
+    if let Some(trigger) = evidence.control.first() {
+        return Ok(match trigger {
+            ControlTrigger::TimedOut => TerminationReason::TimedOut,
+            ControlTrigger::Cancelled => TerminationReason::Cancelled,
+        });
     }
-    if selected.is_some_and(|reason| reason != candidate) {
-        return Err(LifecycleError::AmbiguousTermination);
+    // 실제 kill 증거, PID 제한 증거, kill 없는 OOM 통지 순으로 더 강한 근거를 우선한다.
+    if evidence.event_delta.memory_oom_kill > 0 {
+        return Ok(TerminationReason::MemoryLimitExceeded);
     }
-    *selected = Some(candidate);
-    Ok(())
+    if evidence.event_delta.pids_max > 0 {
+        return Ok(TerminationReason::ProcessLimitExceeded);
+    }
+    if evidence.event_delta.memory_oom > 0 {
+        return Ok(TerminationReason::MemoryLimitExceeded);
+    }
+    if evidence.daemon_error {
+        return Ok(TerminationReason::DaemonError);
+    }
+    if matches!(evidence.execution, ExecutionEvidence::StartFailed { .. }) {
+        return Ok(TerminationReason::ExecutionFailed);
+    }
+    Ok(TerminationReason::Exited)
 }
 
 fn map_process_result(evidence: ProcessEvidence) -> Result<ProcessResult, LifecycleError> {
@@ -271,31 +309,56 @@ fn map_process_result(evidence: ProcessEvidence) -> Result<ProcessResult, Lifecy
         }),
         (None, Some(signal)) => Ok(ProcessResult {
             exit_code: None,
-            signal: Some(
-                linux_signal_name(signal)
-                    .ok_or(LifecycleError::UnknownSignal(signal))?
-                    .to_owned(),
-            ),
+            signal: Some(linux_signal_name(signal).ok_or(LifecycleError::UnknownSignal(signal))?),
         }),
         _ => Err(LifecycleError::InvalidProcessOutcome),
     }
 }
 
-fn linux_signal_name(signal: i32) -> Option<&'static str> {
-    // 현재 wire fixture가 확정한 문자열만 공개하고 나머지는 계약 결정으로 남긴다.
-    (signal == 9).then_some("SIGKILL")
+fn linux_signal_name(signal: i32) -> Option<String> {
+    let standard = match signal {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        5 => "SIGTRAP",
+        6 => "SIGABRT",
+        7 => "SIGBUS",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        10 => "SIGUSR1",
+        11 => "SIGSEGV",
+        12 => "SIGUSR2",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        16 => "SIGSTKFLT",
+        17 => "SIGCHLD",
+        18 => "SIGCONT",
+        19 => "SIGSTOP",
+        20 => "SIGTSTP",
+        21 => "SIGTTIN",
+        22 => "SIGTTOU",
+        23 => "SIGURG",
+        24 => "SIGXCPU",
+        25 => "SIGXFSZ",
+        26 => "SIGVTALRM",
+        27 => "SIGPROF",
+        28 => "SIGWINCH",
+        29 => "SIGIO",
+        30 => "SIGPWR",
+        31 => "SIGSYS",
+        34 => "SIGRTMIN",
+        35..=64 => return Some(format!("SIGRTMIN+{}", signal - 34)),
+        _ => return None,
+    };
+    Some(standard.to_owned())
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum LifecycleError {
     #[error("이미 FINISHED인 작업은 다시 완료할 수 없습니다")]
     AlreadyFinished,
-    #[error("전체 정리가 끝나기 전에는 FINISHED를 만들 수 없습니다")]
-    CleanupIncomplete,
-    #[error("여러 종료 원인이 동시에 관찰되어 공개 우선순위 결정이 필요합니다")]
-    AmbiguousTermination,
-    #[error("exec 시작 실패를 submit 오류와 FINISHED 중 무엇으로 낼지 공개 결정이 필요합니다")]
-    ExecutionStartContractUndecided,
     #[error("프로세스 종료 결과에는 exit code와 signal 중 정확히 하나가 있어야 합니다")]
     InvalidProcessOutcome,
     #[error("공개 문자열 규칙이 없는 Linux signal 번호입니다: {0}")]
@@ -337,8 +400,8 @@ mod tests {
         control: ControlTriggers,
         event_delta: KernelEvents,
         daemon_error: bool,
-    ) -> CleanedExecution {
-        CleanedExecution::after_cleanup(
+    ) -> TestCompletion {
+        TestCompletion::new(
             evidence,
             control,
             stats(event_delta),
@@ -369,6 +432,12 @@ mod tests {
         }
     }
 
+    fn observed(trigger: ControlTrigger) -> ControlTriggers {
+        let latch = TerminalTriggerLatch::default();
+        assert!(latch.observe(trigger));
+        latch.snapshot()
+    }
+
     #[test]
     fn running_snapshot_uses_caller_identity_and_timestamps() {
         let lifecycle = running(Instant::now());
@@ -388,7 +457,7 @@ mod tests {
             let start = Instant::now();
             let mut lifecycle = running(start);
             let payload = lifecycle
-                .complete(
+                .complete_for_test(
                     completion(
                         started(Some(exit_code), None),
                         ControlTriggers::none(),
@@ -415,14 +484,17 @@ mod tests {
     fn timeout_and_cancel_need_explicit_internal_triggers() {
         let cases = [
             (ControlTriggers::timed_out(), TerminationReason::TimedOut),
-            (ControlTriggers::cancelled(), TerminationReason::Cancelled),
+            (
+                observed(ControlTrigger::Cancelled),
+                TerminationReason::Cancelled,
+            ),
         ];
 
         for (control, expected) in cases {
             let start = Instant::now();
             let mut lifecycle = running(start);
             let payload = lifecycle
-                .complete(
+                .complete_for_test(
                     completion(
                         started(None, Some(9)),
                         control,
@@ -460,7 +532,7 @@ mod tests {
             let start = Instant::now();
             let mut lifecycle = running(start);
             let payload = lifecycle
-                .complete(
+                .complete_for_test(
                     completion(
                         started(None, Some(9)),
                         ControlTriggers::none(),
@@ -480,7 +552,7 @@ mod tests {
         let start = Instant::now();
         let mut lifecycle = running(start);
         let payload = lifecycle
-            .complete(
+            .complete_for_test(
                 completion(
                     started(Some(70), None),
                     ControlTriggers::none(),
@@ -508,11 +580,11 @@ mod tests {
     }
 
     #[test]
-    fn exec_failure_is_only_a_candidate_until_public_contract_is_decided() {
+    fn exec_failure_finishes_without_a_process_result() {
         let events = KernelEvents::default();
         assert_eq!(
             classify_termination(&TerminationEvidence {
-                execution: ExecutionEvidence::StartFailed,
+                execution: ExecutionEvidence::StartFailed { errno: 2 },
                 control: ControlTriggers::none(),
                 event_delta: &events,
                 daemon_error: false,
@@ -522,85 +594,64 @@ mod tests {
 
         let start = Instant::now();
         let mut lifecycle = running(start);
-        assert_eq!(
-            lifecycle.complete(
+        let payload = lifecycle
+            .complete_for_test(
                 completion(
-                    ExecutionEvidence::StartFailed,
+                    ExecutionEvidence::StartFailed { errno: 2 },
                     ControlTriggers::none(),
                     KernelEvents::default(),
                     false,
                 ),
                 FINISHED_AT.to_owned(),
                 start + Duration::from_secs(1),
-            ),
-            Err(LifecycleError::ExecutionStartContractUndecided)
-        );
-        assert!(matches!(lifecycle.snapshot(), TaskPayload::Running { .. }));
+            )
+            .unwrap();
+        assert_eq!(reason(payload), TerminationReason::ExecutionFailed);
+        assert!(matches!(
+            payload,
+            TaskPayload::Finished { process, .. }
+                if process.exit_code.is_none() && process.signal.is_none()
+        ));
     }
 
     #[test]
-    fn ambiguous_public_priorities_do_not_produce_finished() {
-        let cases = [
-            (
-                ControlTriggers::observed(true, true),
-                KernelEvents::default(),
-                false,
-            ),
-            (
-                ControlTriggers::none(),
-                KernelEvents {
-                    memory_oom: 1,
-                    memory_oom_kill: 0,
-                    pids_max: 1,
-                },
-                false,
-            ),
-            (
-                ControlTriggers::none(),
-                KernelEvents {
-                    memory_oom: 1,
-                    ..KernelEvents::default()
-                },
-                true,
-            ),
-        ];
-
-        for (control, events, daemon_error) in cases {
-            let start = Instant::now();
-            let mut lifecycle = running(start);
-            assert_eq!(
-                lifecycle.complete(
-                    completion(started(None, Some(9)), control, events, daemon_error),
-                    FINISHED_AT.to_owned(),
-                    start + Duration::from_secs(1),
-                ),
-                Err(LifecycleError::AmbiguousTermination)
-            );
-            assert!(matches!(lifecycle.snapshot(), TaskPayload::Running { .. }));
-        }
+    fn first_control_trigger_cannot_be_overwritten() {
+        let control = TerminalTriggerLatch::default();
+        assert!(control.observe(ControlTrigger::Cancelled));
+        assert!(!control.observe(ControlTrigger::TimedOut));
+        assert_eq!(control.snapshot().first(), Some(ControlTrigger::Cancelled));
     }
 
     #[test]
-    fn cleanup_must_be_complete_before_finished() {
-        let start = Instant::now();
-        let mut lifecycle = running(start);
-        let mut completion = completion(
-            started(Some(0), None),
-            ControlTriggers::none(),
-            KernelEvents::default(),
-            false,
-        );
-        completion.cleanup_complete = false;
-
+    fn simultaneous_memory_and_pid_events_use_documented_evidence_priority() {
+        let events = KernelEvents {
+            memory_oom: 1,
+            memory_oom_kill: 0,
+            pids_max: 1,
+        };
         assert_eq!(
-            lifecycle.complete(
-                completion,
-                FINISHED_AT.to_owned(),
-                start + Duration::from_secs(1),
-            ),
-            Err(LifecycleError::CleanupIncomplete)
+            classify_termination(&TerminationEvidence {
+                execution: started(None, Some(9)),
+                control: ControlTriggers::none(),
+                event_delta: &events,
+                daemon_error: false,
+            }),
+            Ok(TerminationReason::ProcessLimitExceeded)
         );
-        assert!(matches!(lifecycle.snapshot(), TaskPayload::Running { .. }));
+
+        let killed = KernelEvents {
+            memory_oom_kill: 1,
+            ..events
+        };
+        assert_eq!(
+            classify_termination(&TerminationEvidence {
+                execution: started(None, Some(9)),
+                control: ControlTriggers::none(),
+                event_delta: &killed,
+                daemon_error: false,
+            }),
+            Ok(TerminationReason::MemoryLimitExceeded)
+        );
     }
 
     #[test]
@@ -608,7 +659,7 @@ mod tests {
         let start = Instant::now();
         let mut lifecycle = running(start);
         let payload = lifecycle
-            .complete(
+            .complete_for_test(
                 completion(
                     started(None, Some(9)),
                     ControlTriggers::none(),
@@ -652,7 +703,7 @@ mod tests {
         let start = Instant::now();
         let mut lifecycle = running(start);
         lifecycle
-            .complete(
+            .complete_for_test(
                 completion(
                     started(Some(0), None),
                     ControlTriggers::none(),
@@ -666,7 +717,7 @@ mod tests {
         let original = lifecycle.snapshot();
 
         assert_eq!(
-            lifecycle.complete(
+            lifecycle.complete_for_test(
                 completion(
                     started(None, Some(9)),
                     ControlTriggers::timed_out(),
@@ -686,7 +737,7 @@ mod tests {
         let start = Instant::now();
         let mut lifecycle = running(start);
         lifecycle
-            .complete(
+            .complete_for_test(
                 completion(
                     started(Some(0), None),
                     ControlTriggers::none(),
@@ -747,13 +798,26 @@ mod tests {
     }
 
     #[test]
+    fn canonical_and_realtime_signal_names_are_stable() {
+        for (signal, expected) in [
+            (9, "SIGKILL"),
+            (11, "SIGSEGV"),
+            (15, "SIGTERM"),
+            (34, "SIGRTMIN"),
+            (64, "SIGRTMIN+30"),
+        ] {
+            assert_eq!(linux_signal_name(signal).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
     fn unknown_signal_does_not_create_an_arbitrary_wire_string() {
         let start = Instant::now();
         let mut lifecycle = running(start);
         assert_eq!(
-            lifecycle.complete(
+            lifecycle.complete_for_test(
                 completion(
-                    started(None, Some(11)),
+                    started(None, Some(33)),
                     ControlTriggers::none(),
                     KernelEvents::default(),
                     false,
@@ -761,7 +825,7 @@ mod tests {
                 FINISHED_AT.to_owned(),
                 start + Duration::from_secs(1),
             ),
-            Err(LifecycleError::UnknownSignal(11))
+            Err(LifecycleError::UnknownSignal(33))
         );
         assert!(matches!(lifecycle.snapshot(), TaskPayload::Running { .. }));
     }
@@ -772,7 +836,7 @@ mod tests {
         let started_at_monotonic = finished + Duration::from_millis(1);
         let mut lifecycle = running(started_at_monotonic);
         assert_eq!(
-            lifecycle.complete(
+            lifecycle.complete_for_test(
                 completion(
                     started(Some(0), None),
                     ControlTriggers::none(),

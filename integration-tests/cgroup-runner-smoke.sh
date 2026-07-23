@@ -173,3 +173,23 @@ if run_delegated bad-cwd run-once \
   echo "FAIL: 없는 작업 디렉터리를 성공으로 처리했습니다" >&2
   exit 1
 fi
+
+# 같은 atomic runner가 protocol task의 RUNNING -> FINISHED lifecycle도 실제로 완료한다.
+cargo test -p taskcaged --test task_runner_linux --no-run
+task_runner_test="$(find "$(pwd)/target/debug/deps" -maxdepth 1 -type f -executable \
+  -name 'task_runner_linux-*' -print -quit)"
+if [[ -z "${task_runner_test}" ]]; then
+  echo "FAIL: task runner Linux 통합 시험 실행 파일을 찾지 못했습니다" >&2
+  exit 1
+fi
+unit_sequence=$((unit_sequence + 1))
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-runner-lifecycle-$$-${unit_sequence}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --setenv=TASKCAGE_RUN_LINUX_INTEGRATION=1 \
+  "${task_runner_test}" --nocapture

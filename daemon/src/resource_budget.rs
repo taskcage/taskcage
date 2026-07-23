@@ -6,6 +6,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::cgroup::{CgroupLimits, CpuLimit};
+use crate::output::CaptureLimits;
 use crate::protocol::{OutputLimits, ResourceLimits};
 
 const MAX_OUTPUT_TAIL_BYTES: u32 = 65_536;
@@ -83,6 +84,10 @@ impl ResourceBudget {
 
     pub fn stderr_tail_max_bytes(&self) -> usize {
         self.stderr_tail_max_bytes.get()
+    }
+
+    pub fn capture_limits(&self) -> CaptureLimits {
+        CaptureLimits::new(self.stdout_tail_max_bytes, self.stderr_tail_max_bytes)
     }
 
     pub fn effective_limits(&self) -> &ResourceLimits {
