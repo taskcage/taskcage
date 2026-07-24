@@ -46,6 +46,8 @@ Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 
    종료된다.
 10. 같은 atomic runner가 실제 protocol task의 RUNNING snapshot을 만든 뒤 정상 종료, 0이 아닌
     종료, timeout과 exec 시작 실패를 하나의 FINISHED lifecycle로 완료한다.
+11. Runner가 cgroup과 출력 reader 정리를 끝낸 뒤 만든 완료 결과만 Registry의 FINISHED
+    전이에 사용할 수 있고, 작업 cgroup이 남지 않는다.
 
 실행 방법:
 

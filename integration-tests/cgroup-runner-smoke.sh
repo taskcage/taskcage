@@ -193,3 +193,32 @@ unit_sequence=$((unit_sequence + 1))
   --property=Delegate=yes \
   --setenv=TASKCAGE_RUN_LINUX_INTEGRATION=1 \
   "${task_runner_test}" --nocapture
+
+# Runner만 만들 수 있는 정리 완료 결과가 Registry의 FINISHED 전이를 수행한다.
+registry_test=""
+while IFS= read -r artifact; do
+  if [[ "${artifact}" == *'"target":{"kind":["lib"]'* &&
+        "${artifact}" == *'"test":true'* &&
+        "${artifact}" == *'"executable":"'* ]]; then
+    registry_test="${artifact#*\"executable\":\"}"
+    registry_test="${registry_test%%\"*}"
+  fi
+done < <(cargo test -p taskcaged --lib --no-run --message-format=json)
+if [[ -z "${registry_test}" || ! -x "${registry_test}" ]]; then
+  echo "FAIL: Registry와 Runner 통합 시험 실행 파일을 찾지 못했습니다" >&2
+  exit 1
+fi
+unit_sequence=$((unit_sequence + 1))
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-registry-runner-$$-${unit_sequence}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --setenv=TASKCAGE_RUN_LINUX_REGISTRY_INTEGRATION=1 \
+  "${registry_test}" \
+  'registry::tests::actual_runner_completion_is_recorded_only_after_cleanup' \
+  --exact \
+  --nocapture
