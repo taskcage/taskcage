@@ -6,7 +6,7 @@
 
 > 데몬은 cgroup v2 제한이 적용된 상태에서만 신뢰된 외부 명령을 실행한다. 종료·취소·시간 초과·자원 제한 초과 시 작업 cgroup 전체를 정리하고, SDK에 일관된 종료 원인과 사용량을 반환한다.
 
-MVP는 단일 Linux 호스트에서 Java 21+ SDK와 `taskcaged`가 통신하는 경우만 다룬다. 데몬은 systemd나 DBus를 사용하지 않고 cgroup v2 파일 인터페이스와 Linux 프로세스 API를 직접 제어한다. 원격 실행, gRPC, 로그 스트리밍, 작업 재개, FIFO 대기열, 우선순위, CLI와 다른 언어 SDK는 범위 밖이다.
+MVP는 단일 Linux 호스트에서 Java 17+ SDK와 `taskcaged`가 통신하는 경우만 다룬다. 데몬은 systemd나 DBus를 사용하지 않고 cgroup v2 파일 인터페이스와 Linux 프로세스 API를 직접 제어한다. 원격 실행, gRPC, 로그 스트리밍, 작업 재개, FIFO 대기열, 우선순위, CLI와 다른 언어 SDK는 범위 밖이다.
 
 ## 핵심 정책
 
