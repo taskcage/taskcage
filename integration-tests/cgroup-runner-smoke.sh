@@ -174,38 +174,18 @@ if run_delegated bad-cwd run-once \
   exit 1
 fi
 
-# 같은 atomic runner가 protocol task의 RUNNING -> FINISHED lifecycle도 실제로 완료한다.
-cargo test -p taskcaged --test task_runner_linux --no-run
-task_runner_test="$(find "$(pwd)/target/debug/deps" -maxdepth 1 -type f -executable \
-  -name 'task_runner_linux-*' -print -quit)"
-if [[ -z "${task_runner_test}" ]]; then
-  echo "FAIL: task runner Linux 통합 시험 실행 파일을 찾지 못했습니다" >&2
-  exit 1
-fi
-unit_sequence=$((unit_sequence + 1))
-"${taskcage_systemd[@]}" \
-  --quiet \
-  --wait \
-  --collect \
-  --pipe \
-  --unit="taskcage-runner-lifecycle-$$-${unit_sequence}" \
-  --property=Type=exec \
-  --property=Delegate=yes \
-  --setenv=TASKCAGE_RUN_LINUX_INTEGRATION=1 \
-  "${task_runner_test}" --nocapture
-
-# Runner만 만들 수 있는 정리 완료 결과가 Registry의 FINISHED 전이를 수행한다.
-registry_test=""
+# 검증부터 멱등 예약, 실제 Runner와 FINISHED 저장까지 단일 submit 조정 경로를 통과한다.
+submit_test=""
 while IFS= read -r artifact; do
   if [[ "${artifact}" == *'"target":{"kind":["lib"]'* &&
         "${artifact}" == *'"test":true'* &&
         "${artifact}" == *'"executable":"'* ]]; then
-    registry_test="${artifact#*\"executable\":\"}"
-    registry_test="${registry_test%%\"*}"
+    submit_test="${artifact#*\"executable\":\"}"
+    submit_test="${submit_test%%\"*}"
   fi
 done < <(cargo test -p taskcaged --lib --no-run --message-format=json)
-if [[ -z "${registry_test}" || ! -x "${registry_test}" ]]; then
-  echo "FAIL: Registry와 Runner 통합 시험 실행 파일을 찾지 못했습니다" >&2
+if [[ -z "${submit_test}" || ! -x "${submit_test}" ]]; then
+  echo "FAIL: submit 조정 경로와 Runner 통합 시험 실행 파일을 찾지 못했습니다" >&2
   exit 1
 fi
 unit_sequence=$((unit_sequence + 1))
@@ -214,11 +194,11 @@ unit_sequence=$((unit_sequence + 1))
   --wait \
   --collect \
   --pipe \
-  --unit="taskcage-registry-runner-$$-${unit_sequence}" \
+  --unit="taskcage-submit-runner-$$-${unit_sequence}" \
   --property=Type=exec \
   --property=Delegate=yes \
-  --setenv=TASKCAGE_RUN_LINUX_REGISTRY_INTEGRATION=1 \
-  "${registry_test}" \
-  'registry::tests::actual_runner_completion_is_recorded_only_after_cleanup' \
+  --setenv=TASKCAGE_RUN_LINUX_SUBMIT_INTEGRATION=1 \
+  "${submit_test}" \
+  'submit::tests::actual_submit_coordinator_runs_once_and_finishes_after_cleanup' \
   --exact \
   --nocapture

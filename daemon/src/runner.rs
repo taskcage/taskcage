@@ -19,11 +19,12 @@ use crate::output::{CaptureLimits, CapturedOutput};
 use crate::preflight::VerifiedEnvironment;
 use crate::protocol::{CommandSpec, TaskPayload};
 use crate::resource_budget::ResourceBudget;
+use crate::submit::RunnerPermit;
 use crate::{Error, Result};
 
 #[derive(Debug)]
 /// cgroup과 출력 reader 정리가 끝난 뒤 Runner만 만들 수 있는 완료 결과다.
-pub struct CompletedTask {
+pub(crate) struct CompletedTask {
     payload: TaskPayload,
 }
 
@@ -37,37 +38,33 @@ impl CompletedTask {
         Ok(Self { payload })
     }
 
-    pub fn payload(&self) -> &TaskPayload {
-        &self.payload
-    }
-
-    pub fn into_payload(self) -> TaskPayload {
+    pub(crate) fn into_payload(self) -> TaskPayload {
         self.payload
     }
 }
 
 #[derive(Debug)]
 /// wire 검증이 끝난 작업을 실행 코어에 넘기는 내부 입력이다.
-pub struct TaskRunConfig {
-    pub task_id: String,
-    pub submitted_at: String,
-    pub started_at: String,
-    pub started_monotonic: Instant,
-    pub cleanup_timeout: Duration,
-    pub command: CommandSpec,
-    pub budget: ResourceBudget,
+pub(crate) struct TaskRunConfig {
+    pub(crate) task_id: String,
+    pub(crate) submitted_at: String,
+    pub(crate) started_at: String,
+    pub(crate) started_monotonic: Instant,
+    pub(crate) cleanup_timeout: Duration,
+    pub(crate) command: CommandSpec,
+    pub(crate) budget: ResourceBudget,
 }
 
 #[derive(Debug)]
 /// 같은 cgroup manager와 정리 안전 상태를 공유하는 작업 실행 경계다.
-pub struct TaskRunner {
+pub(crate) struct TaskRunner {
     manager: CgroupManager,
     cleanup_uncertain: AtomicBool,
 }
 
 impl TaskRunner {
     /// preflight 성공 토큰 없이는 실행기를 만들 수 없다.
-    pub fn initialize(environment: VerifiedEnvironment) -> Result<Self> {
+    pub(crate) fn initialize(environment: VerifiedEnvironment) -> Result<Self> {
         Ok(Self {
             manager: CgroupManager::initialize(environment)?,
             cleanup_uncertain: AtomicBool::new(false),
@@ -75,8 +72,9 @@ impl TaskRunner {
     }
 
     /// 전체 정리가 증명된 결과만 FINISHED snapshot으로 바꾼다.
-    pub async fn run_task<F>(
+    pub(crate) async fn run_task<F>(
         &self,
+        _permit: RunnerPermit,
         config: TaskRunConfig,
         running_sender: tokio::sync::oneshot::Sender<TaskPayload>,
         finished_time: F,
@@ -126,7 +124,8 @@ impl TaskRunner {
         CompletedTask::new(payload)
     }
 
-    pub fn cleanup_is_uncertain(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn cleanup_is_uncertain(&self) -> bool {
         self.cleanup_uncertain.load(Ordering::Acquire)
     }
 }
@@ -260,11 +259,12 @@ where
     let pending = match spawn_in_cgroup(&prepared, job.raw_fd(), capture_limits) {
         Ok(pending) => pending,
         Err(error) => {
+            drop(prepared);
             return Err(cleanup_job_after_failure(
                 job,
                 cleanup_timeout,
                 "프로세스 생성",
-                &error,
+                error.to_string(),
                 false,
             )
             .await);
@@ -273,22 +273,24 @@ where
     match job.contains_pid(pending.pid()) {
         Ok(true) => {}
         Ok(false) => {
+            drop(prepared);
             return Err(cleanup_pending_job(
                 job,
                 pending,
                 cleanup_timeout,
                 "exec 전 cgroup 소속 재확인",
-                &"PID가 작업 cgroup에서 확인되지 않았습니다",
+                "PID가 작업 cgroup에서 확인되지 않았습니다".to_owned(),
             )
             .await);
         }
         Err(error) => {
+            drop(prepared);
             return Err(cleanup_pending_job(
                 job,
                 pending,
                 cleanup_timeout,
                 "exec 전 cgroup 소속 재확인",
-                &error,
+                error.to_string(),
             )
             .await);
         }
@@ -297,16 +299,19 @@ where
         Ok(spawn) => spawn,
         Err(error) => {
             let isolation_uncertain = matches!(&error, crate::executor::ExecutorError::Wait(_));
+            drop(prepared);
             return Err(cleanup_job_after_failure(
                 job,
                 cleanup_timeout,
                 "프로세스 시작",
-                &error,
+                error.to_string(),
                 isolation_uncertain,
             )
             .await);
         }
     };
+    // clone3 자식이 execve를 끝낸 뒤에는 raw argv 포인터를 await 경계에 보관하지 않는다.
+    drop(prepared);
 
     match spawn {
         SpawnOutcome::ExecFailed(failure) => {
@@ -475,16 +480,16 @@ async fn cleanup_job_after_failure(
     job: JobCgroup,
     timeout: Duration,
     stage: &'static str,
-    cause: &dyn std::fmt::Display,
+    cause: String,
     isolation_uncertain: bool,
 ) -> CoreFailure {
     match job.finish(timeout).await {
         Ok(_) => CoreFailure {
-            error: run_failed(stage, cause, Vec::new()),
+            error: run_failed(stage, &cause, Vec::new()),
             block_future_runs: isolation_uncertain,
         },
         Err(error) => CoreFailure {
-            error: run_failed(stage, cause, vec![error.to_string()]),
+            error: run_failed(stage, &cause, vec![error.to_string()]),
             block_future_runs: true,
         },
     }
@@ -495,7 +500,7 @@ async fn cleanup_pending_job(
     pending: crate::executor::PendingProcess,
     timeout: Duration,
     stage: &'static str,
-    cause: &dyn std::fmt::Display,
+    cause: String,
 ) -> CoreFailure {
     let abort_result = pending.abort();
     let finish_result = job.finish(timeout).await;
@@ -507,7 +512,7 @@ async fn cleanup_pending_job(
         cleanup_errors.push(error.to_string());
     }
     CoreFailure {
-        error: run_failed(stage, cause, cleanup_errors),
+        error: run_failed(stage, &cause, cleanup_errors),
         block_future_runs: abort_result.is_err() || finish_result.is_err(),
     }
 }

@@ -106,9 +106,7 @@ pub enum ExecutorError {
 pub struct PreparedCommand {
     executable: CString,
     argv: Vec<CString>,
-    argv_pointers: Vec<*const libc::c_char>,
     environment: Vec<CString>,
-    environment_pointers: Vec<*const libc::c_char>,
     working_directory: CString,
 }
 
@@ -151,28 +149,21 @@ impl PreparedCommand {
             .collect::<Result<_, _>>()?;
         let working_directory = os_string_to_cstring(working_directory.as_os_str().to_owned())?;
 
-        let mut prepared = Self {
+        Ok(Self {
             executable,
             argv,
-            argv_pointers: Vec::new(),
             environment,
-            environment_pointers: Vec::new(),
             working_directory,
-        };
-        prepared.argv_pointers = prepared
-            .argv
-            .iter()
-            .map(|value| value.as_ptr())
-            .chain(std::iter::once(ptr::null()))
-            .collect();
-        prepared.environment_pointers = prepared
-            .environment
-            .iter()
-            .map(|value| value.as_ptr())
-            .chain(std::iter::once(ptr::null()))
-            .collect();
-        Ok(prepared)
+        })
     }
+}
+
+fn nul_terminated_pointers(values: &[CString]) -> Vec<*const libc::c_char> {
+    values
+        .iter()
+        .map(|value| value.as_ptr())
+        .chain(std::iter::once(ptr::null()))
+        .collect()
 }
 
 #[derive(Debug)]
@@ -501,6 +492,9 @@ pub fn spawn_in_cgroup(
         "stderr",
     )?;
     let output_readers = OutputReaders::start(stdout_reader, stderr_reader)?;
+    // clone3 전에만 할당한다. 자식은 복제된 포인터 배열을 그대로 execve에 사용한다.
+    let argv_pointers = nul_terminated_pointers(&command.argv);
+    let environment_pointers = nul_terminated_pointers(&command.environment);
     let parent_pid = unsafe { libc::getpid() };
     let args = CloneArgs {
         flags: CLONE_INTO_CGROUP,
@@ -525,6 +519,8 @@ pub fn spawn_in_cgroup(
     if result == 0 {
         child_exec(
             command,
+            argv_pointers.as_ptr(),
+            environment_pointers.as_ptr(),
             ChildDescriptors {
                 exec_read: exec_read_end.as_raw_fd(),
                 exec_write: exec_write_end.as_raw_fd(),
@@ -578,6 +574,8 @@ fn pipe_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
 
 fn child_exec(
     command: &PreparedCommand,
+    argv_pointers: *const *const libc::c_char,
+    environment_pointers: *const *const libc::c_char,
     descriptors: ChildDescriptors,
     expected_parent: libc::pid_t,
 ) -> ! {
@@ -627,8 +625,8 @@ fn child_exec(
         }
         libc::execve(
             command.executable.as_ptr(),
-            command.argv_pointers.as_ptr(),
-            command.environment_pointers.as_ptr(),
+            argv_pointers,
+            environment_pointers,
         );
         write_errno_and_exit(write_fd, current_errno_or(libc::ENOEXEC));
     }
@@ -822,7 +820,8 @@ mod tests {
         .unwrap();
         assert_eq!(command.argv.len(), 2);
         assert_eq!(command.argv[1].to_bytes(), b"hello world");
-        assert!(command.argv_pointers.last().unwrap().is_null());
+        let pointers = nul_terminated_pointers(&command.argv);
+        assert!(pointers.last().unwrap().is_null());
     }
 
     #[test]

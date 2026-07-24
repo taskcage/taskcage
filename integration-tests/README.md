@@ -44,10 +44,12 @@ Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 
    독립적으로 반환한다.
 9. 대표 프로세스 종료 뒤 후손이 출력 FD를 들고 있어도 cgroup 전체 정리 뒤 reader가
    종료된다.
-10. 같은 atomic runner가 실제 protocol task의 RUNNING snapshot을 만든 뒤 정상 종료, 0이 아닌
-    종료, timeout과 exec 시작 실패를 하나의 FINISHED lifecycle로 완료한다.
+10. 단일 submit 조정 경로가 실제 Runner를 통해 정상 종료, 0이 아닌 종료, timeout과 exec
+    시작 실패를 protocol lifecycle 결과로 만든다.
 11. Runner가 cgroup과 출력 reader 정리를 끝낸 뒤 만든 완료 결과만 Registry의 FINISHED
     전이에 사용할 수 있고, 작업 cgroup이 남지 않는다.
+12. 검증부터 멱등 예약과 실제 Runner까지 같은 경로를 통과하며, 같은 submit payload를 다시
+    보내도 새 Runner 없이 같은 taskId의 RUNNING과 FINISHED를 공유한다.
 
 실행 방법:
 
