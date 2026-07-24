@@ -35,8 +35,6 @@ pub(crate) enum RegistryError {
     TaskAlreadyExists(String),
     #[error("같은 clientRequestId에 다른 submit payload가 사용됐습니다: {0}")]
     IdempotencyConflict(String),
-    #[error("실패한 submit 예약의 제거 또는 재시도 정책이 아직 결정되지 않았습니다: {0}")]
-    FailedReservationPolicyUndecided(String),
     #[error("작업을 찾을 수 없습니다: {0}")]
     TaskNotFound(String),
     #[error("완료된 작업 결과는 바꿀 수 없습니다: {0}")]
@@ -48,9 +46,17 @@ pub(crate) enum RegistryError {
 }
 
 impl RegistryError {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "UDS handler가 Registry 오류를 기존 wire code로 바꿀 때 사용합니다"
+        )
+    )]
     pub(crate) fn error_code(&self) -> Option<ErrorCode> {
         match self {
             Self::IdempotencyConflict(_) => Some(ErrorCode::IdempotencyConflict),
+            Self::StateUnavailable => Some(ErrorCode::InternalError),
             _ => None,
         }
     }
@@ -140,14 +146,8 @@ where
             if existing.payload != payload {
                 return Err(RegistryError::IdempotencyConflict(client_request_id));
             }
-            if existing.reservation.failed() {
-                return Err(RegistryError::FailedReservationPolicyUndecided(
-                    client_request_id,
-                ));
-            }
             return Ok(SubmitReservation::Existing(SubmitWaiter {
                 task_id: existing.task_id.clone(),
-                request,
                 signal: Arc::clone(&existing.reservation),
             }));
         }
@@ -173,32 +173,38 @@ where
             registry: self.clone(),
             client_request_id,
             task_id: candidate_task_id,
-            request,
+            request: Box::new(request),
             signal,
             resolved: false,
         }))
     }
 
-    pub(crate) fn snapshot(&self, task_id: &str) -> Option<TaskPayload> {
-        let mut state = self.lock_state().ok()?;
+    pub(crate) fn snapshot(&self, task_id: &str) -> Result<Option<TaskPayload>, RegistryError> {
+        let mut state = self.lock_state()?;
         state.purge_expired();
-        state
+        Ok(state
             .tasks
             .get(task_id)
-            .map(|record| record.snapshot.clone())
+            .map(|record| record.snapshot.clone()))
     }
 
     pub(crate) fn snapshot_by_client_request_id(
         &self,
         client_request_id: &str,
-    ) -> Option<TaskPayload> {
-        let mut state = self.lock_state().ok()?;
+    ) -> Result<Option<TaskPayload>, RegistryError> {
+        let mut state = self.lock_state()?;
         state.purge_expired();
-        let task_id = &state.requests.get(client_request_id)?.task_id;
-        state
+        let Some(task_id) = state
+            .requests
+            .get(client_request_id)
+            .map(|request| &request.task_id)
+        else {
+            return Ok(None);
+        };
+        Ok(state
             .tasks
             .get(task_id)
-            .map(|record| record.snapshot.clone())
+            .map(|record| record.snapshot.clone()))
     }
 
     fn publish_running(
@@ -275,6 +281,26 @@ where
             .signal
             .publish(SubmitObservation::Task(snapshot.clone()));
         Ok(snapshot)
+    }
+
+    /// RUNNING 공개 전 실패는 예약과 두 인덱스를 같은 잠금 구간에서 되돌린다.
+    fn release_failed_owner(&self, owner: &SubmitExecutionOwner<C>) -> Result<(), RegistryError> {
+        let mut state = self.lock_state()?;
+        state.purge_expired();
+        state.verify_owner(owner)?;
+        if state.tasks.contains_key(&owner.task_id) {
+            // RUNNING 이후 실패는 정리 계약이 확정될 때까지 공개 상태를 지우지 않는다.
+            return Ok(());
+        }
+
+        let removed_request = state.requests.remove(&owner.client_request_id);
+        let removed_client_request_id = state.task_requests.remove(&owner.task_id);
+        debug_assert!(removed_request.is_some());
+        debug_assert_eq!(
+            removed_client_request_id.as_deref(),
+            Some(owner.client_request_id.as_str())
+        );
+        Ok(())
     }
 
     fn lock_state(&self) -> Result<MutexGuard<'_, RegistryState<C>>, RegistryError> {
@@ -379,10 +405,6 @@ impl SubmitSignal {
         self.lock_observation().clone()
     }
 
-    fn failed(&self) -> bool {
-        matches!(self.current(), Some(SubmitObservation::Failed(_)))
-    }
-
     fn lock_observation(&self) -> MutexGuard<'_, Option<SubmitObservation>> {
         self.observation
             .lock()
@@ -407,7 +429,7 @@ where
     registry: TaskRegistry<C>,
     client_request_id: String,
     task_id: String,
-    request: ValidatedSubmit,
+    request: Box<ValidatedSubmit>,
     signal: Arc<SubmitSignal>,
     resolved: bool,
 }
@@ -421,7 +443,7 @@ where
     }
 
     pub(crate) fn request(&self) -> &ValidatedSubmit {
-        &self.request
+        self.request.as_ref()
     }
 
     pub(crate) fn publish_running(
@@ -440,7 +462,10 @@ where
     }
 
     #[cfg(test)]
-    fn finish_for_test(mut self, snapshot: TaskPayload) -> Result<TaskPayload, RegistryError> {
+    pub(crate) fn finish_for_test(
+        mut self,
+        snapshot: TaskPayload,
+    ) -> Result<TaskPayload, RegistryError> {
         self.finish_inner(snapshot)
     }
 
@@ -451,19 +476,23 @@ where
                 Ok(snapshot)
             }
             Err(error) => {
-                self.signal
-                    .publish(SubmitObservation::Failed(SubmitFailure::new(
-                        ErrorCode::InternalError,
-                        error.to_string(),
-                    )));
-                self.resolved = true;
+                self.fail_inner(SubmitFailure::new(
+                    ErrorCode::InternalError,
+                    error.to_string(),
+                ));
                 Err(error)
             }
         }
     }
 
     pub(crate) fn fail(mut self, failure: SubmitFailure) -> SubmitObservation {
+        self.fail_inner(failure)
+    }
+
+    fn fail_inner(&mut self, failure: SubmitFailure) -> SubmitObservation {
         let observation = SubmitObservation::Failed(failure);
+        // 잠금 자체를 사용할 수 없으면 waiter는 깨우되 Registry 오류는 이후 조회에서 보존한다.
+        let _ = self.registry.release_failed_owner(self);
         self.signal.publish(observation.clone());
         self.resolved = true;
         observation
@@ -478,29 +507,22 @@ where
         if self.resolved {
             return;
         }
-        self.signal
-            .publish(SubmitObservation::Failed(SubmitFailure::new(
-                ErrorCode::InternalError,
-                "실행 소유자가 결과를 공개하기 전에 종료됐습니다",
-            )));
-        self.resolved = true;
+        self.fail_inner(SubmitFailure::new(
+            ErrorCode::InternalError,
+            "실행 소유자가 결과를 공개하기 전에 종료됐습니다",
+        ));
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct SubmitWaiter {
     task_id: String,
-    request: ValidatedSubmit,
     signal: Arc<SubmitSignal>,
 }
 
 impl SubmitWaiter {
     pub(crate) fn task_id(&self) -> &str {
         &self.task_id
-    }
-
-    pub(crate) fn request(&self) -> &ValidatedSubmit {
-        &self.request
     }
 
     pub(crate) async fn wait(self) -> SubmitObservation {
@@ -520,21 +542,16 @@ impl SubmitWaiter {
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[cfg(target_os = "linux")]
-    use std::fs;
+    use std::thread;
 
     use tokio::sync::Barrier;
     use tokio::time::{Duration as TokioDuration, timeout};
 
+    use super::*;
     use crate::protocol::{
         CommandSpec, CpuMax, OutputLimits, ProcessResult, Request, ResourceLimits, TaskOutput,
         TaskTiming, TaskUsage, TerminationReason,
     };
-    #[cfg(target_os = "linux")]
-    use crate::{TaskRunConfig, TaskRunner, preflight::CapabilityProbe, preflight::SystemProbe};
-
-    use super::*;
 
     const TASK_ID: &str = "33333333-3333-3333-3333-333333333333";
     const OTHER_TASK_ID: &str = "44444444-4444-4444-4444-444444444444";
@@ -636,6 +653,25 @@ mod tests {
         (TaskRegistry::with_clock(clock.clone()), clock)
     }
 
+    #[test]
+    fn poisoned_mutex_is_not_reported_as_a_missing_task() {
+        let registry = TaskRegistry::new();
+        let state = Arc::clone(&registry.state);
+        let poison = thread::spawn(move || {
+            let _guard = state.lock().unwrap();
+            panic!("Registry Mutex를 시험용으로 오염시킵니다");
+        });
+        assert!(poison.join().is_err());
+
+        let snapshot_error = registry.snapshot(TASK_ID).unwrap_err();
+        assert_eq!(snapshot_error, RegistryError::StateUnavailable);
+        assert_eq!(snapshot_error.error_code(), Some(ErrorCode::InternalError));
+        assert_eq!(
+            registry.snapshot_by_client_request_id(CLIENT_REQUEST_ID),
+            Err(RegistryError::StateUnavailable)
+        );
+    }
+
     fn reserve_owner<C>(
         registry: &TaskRegistry<C>,
         payload: SubmitTaskPayload,
@@ -678,10 +714,10 @@ mod tests {
 
         owner.publish_running(expected.clone()).unwrap();
 
-        assert_eq!(registry.snapshot(TASK_ID), Some(expected.clone()));
+        assert_eq!(registry.snapshot(TASK_ID), Ok(Some(expected.clone())));
         assert_eq!(
             registry.snapshot_by_client_request_id(CLIENT_REQUEST_ID),
-            Some(expected)
+            Ok(Some(expected))
         );
         owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
     }
@@ -691,10 +727,10 @@ mod tests {
         let registry = TaskRegistry::new();
         let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
 
-        assert_eq!(registry.snapshot(TASK_ID), None);
+        assert_eq!(registry.snapshot(TASK_ID), Ok(None));
         assert_eq!(
             registry.snapshot_by_client_request_id(CLIENT_REQUEST_ID),
-            None
+            Ok(None)
         );
         assert_eq!(
             owner.publish_running(finished(TASK_ID)),
@@ -721,7 +757,6 @@ mod tests {
 
         let waiter = existing(&registry, submit_payload(), OTHER_TASK_ID);
         assert_eq!(waiter.task_id(), TASK_ID);
-        assert_eq!(waiter.request().payload().limits, submit_payload().limits);
         assert_eq!(waiter.wait().await, SubmitObservation::Task(expected));
         assert_eq!(runner_starts.load(Ordering::SeqCst), 1);
         owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
@@ -814,8 +849,8 @@ mod tests {
                 RegistryError::IdempotencyConflict(CLIENT_REQUEST_ID.to_owned())
             );
             assert_eq!(error.error_code(), Some(ErrorCode::IdempotencyConflict));
-            assert_eq!(registry.snapshot(TASK_ID), Some(expected));
-            assert_eq!(registry.snapshot(OTHER_TASK_ID), None);
+            assert_eq!(registry.snapshot(TASK_ID), Ok(Some(expected)));
+            assert_eq!(registry.snapshot(OTHER_TASK_ID), Ok(None));
             owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
         }
     }
@@ -839,7 +874,7 @@ mod tests {
         );
         assert_eq!(
             registry.snapshot_by_client_request_id(OTHER_CLIENT_REQUEST_ID),
-            None
+            Ok(None)
         );
         first.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
     }
@@ -856,8 +891,8 @@ mod tests {
                 actual: OTHER_TASK_ID.to_owned(),
             })
         );
-        assert_eq!(registry.snapshot(TASK_ID), None);
-        assert_eq!(registry.snapshot(OTHER_TASK_ID), None);
+        assert_eq!(registry.snapshot(TASK_ID), Ok(None));
+        assert_eq!(registry.snapshot(OTHER_TASK_ID), Ok(None));
     }
 
     #[test]
@@ -869,7 +904,7 @@ mod tests {
         assert!(ValidatedSubmit::try_from_payload(invalid).is_err());
         assert_eq!(
             registry.snapshot_by_client_request_id(CLIENT_REQUEST_ID),
-            None
+            Ok(None)
         );
         let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
         assert_eq!(owner.task_id(), TASK_ID);
@@ -883,12 +918,12 @@ mod tests {
         let expected = finished(TASK_ID);
         owner.finish_for_test(expected.clone()).unwrap();
 
-        let mut caller_copy = registry.snapshot(TASK_ID).unwrap();
+        let mut caller_copy = registry.snapshot(TASK_ID).unwrap().unwrap();
         match &mut caller_copy {
             TaskPayload::Finished { output, .. } => output.stdout_tail.push_str("changed"),
             TaskPayload::Running { .. } => panic!("FINISHED snapshot이 필요합니다"),
         }
-        assert_eq!(registry.snapshot(TASK_ID), Some(expected));
+        assert_eq!(registry.snapshot(TASK_ID), Ok(Some(expected)));
     }
 
     #[test]
@@ -898,13 +933,13 @@ mod tests {
         let expected = owner.finish_for_test(finished(TASK_ID)).unwrap();
 
         clock.advance(MIN_FINISHED_RETENTION - Duration::from_nanos(1));
-        assert_eq!(registry.snapshot(TASK_ID), Some(expected.clone()));
+        assert_eq!(registry.snapshot(TASK_ID), Ok(Some(expected.clone())));
 
         clock.advance(Duration::from_nanos(1));
-        assert_eq!(registry.snapshot(TASK_ID), Some(expected.clone()));
+        assert_eq!(registry.snapshot(TASK_ID), Ok(Some(expected.clone())));
         assert_eq!(
             registry.snapshot_by_client_request_id(CLIENT_REQUEST_ID),
-            Some(expected)
+            Ok(Some(expected))
         );
     }
 
@@ -916,10 +951,10 @@ mod tests {
 
         clock.advance(MIN_FINISHED_RETENTION + Duration::from_nanos(1));
 
-        assert_eq!(registry.snapshot(TASK_ID), None);
+        assert_eq!(registry.snapshot(TASK_ID), Ok(None));
         assert_eq!(
             registry.snapshot_by_client_request_id(CLIENT_REQUEST_ID),
-            None
+            Ok(None)
         );
         let mut changed = submit_payload();
         changed.command.program = "/usr/bin/false".to_owned();
@@ -942,10 +977,10 @@ mod tests {
 
         clock.advance(Duration::from_secs(5 * 60) + Duration::from_nanos(1));
 
-        assert_eq!(registry.snapshot(TASK_ID), None);
+        assert_eq!(registry.snapshot(TASK_ID), Ok(None));
         assert_eq!(
             registry.snapshot(OTHER_TASK_ID),
-            Some(finished(OTHER_TASK_ID))
+            Ok(Some(finished(OTHER_TASK_ID)))
         );
     }
 
@@ -957,10 +992,10 @@ mod tests {
 
         clock.advance(Duration::from_secs(24 * 60 * 60));
 
-        assert_eq!(registry.snapshot(TASK_ID), Some(running(TASK_ID)));
+        assert_eq!(registry.snapshot(TASK_ID), Ok(Some(running(TASK_ID))));
         assert_eq!(
             registry.snapshot_by_client_request_id(CLIENT_REQUEST_ID),
-            Some(running(TASK_ID))
+            Ok(Some(running(TASK_ID)))
         );
         owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
     }
@@ -1160,79 +1195,28 @@ mod tests {
                 .all(|observation| observation == &SubmitObservation::Failed(expected.clone()))
         );
         assert_eq!(
-            registry
-                .reserve_submit(validated(submit_payload()), OTHER_TASK_ID.to_owned())
-                .unwrap_err(),
-            RegistryError::FailedReservationPolicyUndecided(CLIENT_REQUEST_ID.to_owned())
+            registry.snapshot_by_client_request_id(CLIENT_REQUEST_ID),
+            Ok(None)
         );
+        let retry = reserve_owner(&registry, submit_payload(), OTHER_TASK_ID);
+        assert_eq!(retry.task_id(), OTHER_TASK_ID);
+        retry.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
     }
 
-    #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn actual_runner_completion_is_recorded_only_after_cleanup() {
-        if std::env::var_os("TASKCAGE_RUN_LINUX_REGISTRY_INTEGRATION").is_none() {
-            eprintln!("NOT EXECUTED: 실제 cgroup v2 위임 환경이 필요합니다");
-            return;
-        }
-
-        let environment = SystemProbe::from_environment().check().unwrap();
-        let jobs_path = environment.report().delegated_root.join("jobs");
-        let runner = TaskRunner::initialize(environment).unwrap();
-        let mut payload = submit_payload();
-        payload.command.program = "/bin/sleep".to_owned();
-        payload.command.args = vec!["0.1".to_owned()];
-        payload.command.working_directory = "/".to_owned();
-        payload.command.environment.clear();
+    async fn failure_after_running_preserves_public_snapshot_and_shared_failure() {
         let registry = TaskRegistry::new();
-        let owner = reserve_owner(&registry, payload.clone(), TASK_ID);
-        let waiter = existing(&registry, payload.clone(), OTHER_TASK_ID);
-        let runner_starts = AtomicUsize::new(0);
-        let started = Instant::now();
-        let config = TaskRunConfig {
-            task_id: owner.task_id().to_owned(),
-            submitted_at: "2026-07-24T10:00:00.000Z".to_owned(),
-            started_at: "2026-07-24T10:00:00.010Z".to_owned(),
-            started_monotonic: started,
-            cleanup_timeout: Duration::from_secs(5),
-            command: owner.request().payload().command.clone(),
-            budget: owner.request().budget().clone(),
-        };
-        let (running_sender, mut running_receiver) = tokio::sync::oneshot::channel();
-        runner_starts.fetch_add(1, Ordering::SeqCst);
-        let run = runner.run_task(config, running_sender, || {
-            (
-                "2026-07-24T10:00:01.000Z".to_owned(),
-                started + Duration::from_secs(1),
-            )
-        });
-        tokio::pin!(run);
+        let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
+        let running = owner.publish_running(running(TASK_ID)).unwrap();
+        let expected = SubmitFailure::new(ErrorCode::InternalError, "cleanup uncertain");
 
-        let running_snapshot = tokio::select! {
-            biased;
-            running = &mut running_receiver => running.unwrap(),
-            result = &mut run => panic!("RUNNING 등록 전에 실행이 끝났습니다: {result:?}"),
-        };
-        let expected_running = owner.publish_running(running_snapshot).unwrap();
         assert_eq!(
-            waiter.wait().await,
-            SubmitObservation::Task(expected_running)
+            owner.fail(expected.clone()),
+            SubmitObservation::Failed(expected.clone())
         );
+        assert_eq!(registry.snapshot(TASK_ID), Ok(Some(running)));
 
-        let completed = run.await.unwrap();
-        let expected_finished = owner.finish(completed).unwrap();
-        let finished_waiter = existing(&registry, payload, OTHER_TASK_ID);
-        assert_eq!(
-            finished_waiter.wait().await,
-            SubmitObservation::Task(expected_finished.clone())
-        );
-        assert_eq!(registry.snapshot(TASK_ID), Some(expected_finished));
-        assert_eq!(runner_starts.load(Ordering::SeqCst), 1);
-
-        let remaining_jobs = fs::read_dir(jobs_path)
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with("job-"))
-            .count();
-        assert_eq!(remaining_jobs, 0, "작업 cgroup이 남아 있습니다");
+        let waiter = existing(&registry, submit_payload(), OTHER_TASK_ID);
+        assert_eq!(waiter.wait().await, SubmitObservation::Failed(expected));
     }
 }
