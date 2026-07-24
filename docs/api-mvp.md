@@ -124,7 +124,7 @@ RUNNING -> FINISHED
 | `TIMED_OUT` | 벽시계 실행 시간이 `wallTimeLimitMs`를 넘었다. |
 | `MEMORY_LIMIT_EXCEEDED` | cgroup 메모리 이벤트에 근거해 메모리 상한 초과를 판정했다. |
 | `PROCESS_LIMIT_EXCEEDED` | cgroup PID 이벤트에 근거해 프로세스 수 상한 초과를 판정했다. |
-| `DAEMON_ERROR` | 작업 생성 뒤 데몬 내부 오류로 안전한 결과를 확정하지 못했다. |
+| `DAEMON_ERROR` | 작업 생성 뒤 데몬 내부 오류가 발생했지만 안전한 정리와 필수 결과 근거를 모두 확인했다. |
 
 데몬은 단일 exit code만으로 종료 원인을 추측하지 않는다. 메모리·PID 한도 초과는 cgroup 이벤트를, timeout과 cancel은 데몬 제어 상태를 함께 확인해 판정한다.
 
@@ -321,6 +321,41 @@ SDK는 응답 유실이나 재연결 뒤 같은 작업을 재전송할 수 있�
 - 결과와 `clientRequestId` 매핑은 완료 시점부터 최소 10분 보관한다. 기간 뒤 조회와 취소는 `TASK_NOT_FOUND`를 반환할 수 있다.
 - 데몬 재시작으로 연결이 끊기면 SDK는 같은 `clientRequestId`로 제출을 재시도할 수 있다. 진행 중 작업의 재개는 지원하지 않으며, 데몬은 시작 시 남은 TaskCage cgroup을 안전하게 정리한다.
 - 작업 cgroup 제거와 `populated 0`, direct child 회수, 출력 reader 종료를 모두 확인하기 전에는 `FINISHED`를 공개하지 않는다. 격리 정리를 확인하지 못한 실행기는 새 작업을 시작하지 않으며 내부 방어 경로에서 안전한 정리를 다시 시도한다. wire에 별도 cleanup state나 cleanup 객체를 추가하지 않는다.
+
+### `RUNNING` 이후 정리 불확실 상태
+
+`RUNNING`을 공개한 뒤 direct child 회수, 작업 cgroup 전체 종료, `populated 0`, cgroup 제거 또는
+출력 reader 회수 중 하나를 확인하지 못하면 데몬은 process-wide 정리 불확실 상태로 전환한다. 이
+상태는 현재 프로세스가 살아 있는 동안 되돌리지 않는다.
+
+- 해당 작업은 정리 완료와 필수 결과 근거를 모두 확인하기 전까지 `FINISHED`로 전환하지 않는다.
+  exit code, signal 또는 timeout만으로 `EXITED`나 `DAEMON_ERROR`를 만들지 않는다.
+- `getCapabilities.cgroupV2Ready`는 `false`를 반환한다. 새로운 `clientRequestId`의 `submitTask`는
+  task ID, Registry 항목, cgroup과 process를 만들기 전에 `ENVIRONMENT_UNAVAILABLE`로 거절한다.
+- `getTask`는 저장된 snapshot을 반환하므로 정리가 불확실한 작업은 `RUNNING`으로 보인다.
+- 같은 `clientRequestId`와 같은 본문의 재전송은 새 실행 없이 기존 `taskId`와 `RUNNING`을
+  반환한다. 본문이 다르면 `IDEMPOTENCY_CONFLICT`를 반환한다.
+- 데몬은 기존 내부 cleanup timeout 범위에서 제한된 복구를 시도한다. 전체 정리와 필수 결과 근거를
+  모두 확인한 경우에만 기존 lifecycle로 `FINISHED`를 정확히 한 번 저장한다.
+- 제한된 복구로 안전한 최종 결과를 만들지 못하면 신규 요청 수락을 중단하고 0이 아닌 종료 코드로
+  제어된 종료를 수행한다. 연결 종료로 응답을 받지 못한 SDK는 기존 `DAEMON_UNAVAILABLE`을 사용한다.
+- 치명적 로그에는 `taskId`, 실패 단계, 재시도 결과와 정리하지 못한 항목만 기록한다. 명령 인자
+  전체, 환경 변수 값과 stdout·stderr 원문은 기록하지 않는다.
+
+### 재시작 복구
+
+- 데몬은 UDS 요청을 받기 전에 남아 있는 TaskCage cgroup을 검색하고 정리한다. 잔여 cgroup의
+  `populated 0`과 제거를 확인하기 전에는 요청을 수락하거나 준비됐다고 보고하지 않는다.
+- 시작 복구에 실패하면 신규 작업을 시작하지 않는다.
+- MVP Registry는 메모리 기반이므로 재시작 전 작업 snapshot과 idempotency mapping을 복구하지
+  않는다. 이전 `taskId` 조회는 `TASK_NOT_FOUND`가 될 수 있다.
+- 같은 `clientRequestId`를 재제출하면 새 작업이 만들어질 수 있지만, 이전 잔여 cgroup 정리가 끝난
+  뒤에만 허용한다. 따라서 이전 작업과 새 작업의 동시 실행은 막지만 장애와 재시작을 가로지르는
+  정확히 한 번 실행은 보장하지 않는다.
+
+이 동작은 기존 `RUNNING`, `FINISHED`, `ENVIRONMENT_UNAVAILABLE`, `DAEMON_UNAVAILABLE`,
+`TASK_NOT_FOUND`와 `IDEMPOTENCY_CONFLICT`만 사용한다. protocol v1에 cleanup field, 상태, 응답
+타입 또는 오류 코드를 추가하지 않는다.
 
 ## 오류 코드
 
