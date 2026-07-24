@@ -121,6 +121,8 @@ if (result.terminationReason() == TerminationReason.TIMEOUT) {
 
 - [MVP API 명세](docs/api-mvp.md): UDS 프로토콜, 요청·응답, 오류 코드와 공유 fixture 계약
 - [직접 cgroup v2 제어 결정](docs/decisions/0001-direct-cgroup-v2-without-systemd.md): systemd 없이 구현하는 이유와 운영 원칙
+- [정리 뒤 종료 결과 공개 결정](docs/decisions/0002-publish-terminal-results-after-cleanup.md): 작업 전체 정리가 확인된 뒤에만 `FINISHED`를 공개하는 원칙
+- [RUNNING 이후 정리 불확실 처리 결정](docs/decisions/0003-fail-stop-on-uncertain-cleanup-after-running.md): 제한된 복구 뒤 fail-stop 종료와 재시작 복구 원칙
 
 ## 지원 범위
 

@@ -74,7 +74,9 @@ fail-closed로 거절하고 오류 반환 경로와 Drop 방어에서 안전한 
 
 ## 남은 위험
 
-- cleanup 재시도의 내부 횟수와 운영 경보 방식은 아직 정하지 않았다.
+- cleanup 재시도, 신규 실행 차단, 운영 경보, 제어 종료와 재시작 복구 정책은
+  [ADR 0003](0003-fail-stop-on-uncertain-cleanup-after-running.md)에서 결정했다. 실제 구현과 Linux 검증은
+  후속 작업으로 남아 있다.
 - UDS server, task registry와 cancel handler가 구현될 때도 같은 lifecycle 규칙을 지키는지 별도로 검증해야 한다.
 - Java SDK 구현 전까지 새 fixture의 실제 Java 호환성 검증은 완료되지 않는다.
 
