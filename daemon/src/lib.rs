@@ -10,11 +10,19 @@ mod lifecycle;
 pub mod output;
 pub mod preflight;
 pub mod protocol;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "UDS handler 전 단계라 실제 사용은 내부 시험에서 먼저 검증합니다"
+    )
+)]
+pub(crate) mod registry;
 pub mod resource_budget;
 #[cfg(target_os = "linux")]
 mod runner;
 #[cfg(target_os = "linux")]
-pub use runner::{TaskRunConfig, TaskRunner};
+pub use runner::{CompletedTask, TaskRunConfig, TaskRunner};
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;

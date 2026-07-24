@@ -22,6 +22,31 @@ use crate::resource_budget::ResourceBudget;
 use crate::{Error, Result};
 
 #[derive(Debug)]
+/// cgroup과 출력 reader 정리가 끝난 뒤 Runner만 만들 수 있는 완료 결과다.
+pub struct CompletedTask {
+    payload: TaskPayload,
+}
+
+impl CompletedTask {
+    fn new(payload: TaskPayload) -> Result<Self> {
+        if !matches!(payload, TaskPayload::Finished { .. }) {
+            return Err(Error::TaskLifecycle(
+                "정리가 끝난 lifecycle이 FINISHED 결과를 만들지 않았습니다".to_owned(),
+            ));
+        }
+        Ok(Self { payload })
+    }
+
+    pub fn payload(&self) -> &TaskPayload {
+        &self.payload
+    }
+
+    pub fn into_payload(self) -> TaskPayload {
+        self.payload
+    }
+}
+
+#[derive(Debug)]
 /// wire 검증이 끝난 작업을 실행 코어에 넘기는 내부 입력이다.
 pub struct TaskRunConfig {
     pub task_id: String,
@@ -55,7 +80,7 @@ impl TaskRunner {
         config: TaskRunConfig,
         running_sender: tokio::sync::oneshot::Sender<TaskPayload>,
         finished_time: F,
-    ) -> Result<TaskPayload>
+    ) -> Result<CompletedTask>
     where
         F: FnOnce() -> (String, Instant),
     {
@@ -94,10 +119,11 @@ impl TaskRunner {
             }
         };
         let (finished_at, finished_monotonic) = finished_time();
-        lifecycle
+        let payload = lifecycle
             .complete(cleaned, finished_at, finished_monotonic)
             .cloned()
-            .map_err(|error| Error::TaskLifecycle(error.to_string()))
+            .map_err(|error| Error::TaskLifecycle(error.to_string()))?;
+        CompletedTask::new(payload)
     }
 
     pub fn cleanup_is_uncertain(&self) -> bool {

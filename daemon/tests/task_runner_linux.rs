@@ -10,7 +10,7 @@ use taskcaged::protocol::{
     TaskUsage, TerminationReason,
 };
 use taskcaged::resource_budget::ResourceBudget;
-use taskcaged::{TaskRunConfig, TaskRunner};
+use taskcaged::{CompletedTask, TaskRunConfig, TaskRunner};
 
 fn budget(wall_time_limit_ms: u64) -> ResourceBudget {
     ResourceBudget::try_from_protocol(
@@ -56,10 +56,10 @@ fn assert_running(payload: TaskPayload, task_id: &str) {
 }
 
 fn assert_finished(
-    payload: TaskPayload,
+    completed: CompletedTask,
     expected_reason: TerminationReason,
 ) -> (ProcessResult, TaskUsage, TaskOutput) {
-    match payload {
+    match completed.into_payload() {
         TaskPayload::Finished {
             termination_reason,
             process,
