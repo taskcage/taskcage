@@ -10,6 +10,7 @@ mod lifecycle;
 pub mod output;
 pub mod preflight;
 pub mod protocol;
+pub mod registry;
 pub mod resource_budget;
 #[cfg(target_os = "linux")]
 mod runner;
