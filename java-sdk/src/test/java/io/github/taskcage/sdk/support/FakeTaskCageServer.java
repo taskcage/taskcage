@@ -25,13 +25,13 @@ public final class FakeTaskCageServer implements AutoCloseable {
     private final Path directory;
     private final Path socketPath;
     private final ServerSocketChannel server;
-    private final List<Function<JsonNode, JsonNode>> handlers;
+    private final List<ResponseHandler> handlers;
     private final List<JsonNode> requests = new ArrayList<>();
     private final CountDownLatch handled;
     private final AtomicReference<Throwable> failure = new AtomicReference<>();
     private final Thread thread;
 
-    private FakeTaskCageServer(List<Function<JsonNode, JsonNode>> handlers) throws IOException {
+    private FakeTaskCageServer(List<ResponseHandler> handlers) throws IOException {
         this.directory = Files.createTempDirectory("taskcage-sdk-test-");
         this.socketPath = directory.resolve("taskcaged.sock");
         this.server = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
@@ -44,11 +44,15 @@ public final class FakeTaskCageServer implements AutoCloseable {
     }
 
     public static FakeTaskCageServer start(Function<JsonNode, JsonNode> handler) throws IOException {
-        return new FakeTaskCageServer(List.of(handler));
+        return new FakeTaskCageServer(List.of(encoded(handler)));
     }
 
     public static FakeTaskCageServer start(List<Function<JsonNode, JsonNode>> handlers) throws IOException {
-        return new FakeTaskCageServer(handlers);
+        return new FakeTaskCageServer(handlers.stream().map(FakeTaskCageServer::encoded).toList());
+    }
+
+    public static FakeTaskCageServer startRaw(Function<JsonNode, byte[]> handler) throws IOException {
+        return new FakeTaskCageServer(List.of(handler::apply));
     }
 
     public Path socketPath() {
@@ -87,19 +91,16 @@ public final class FakeTaskCageServer implements AutoCloseable {
 
     private void serve() {
         try {
-            for (Function<JsonNode, JsonNode> handler : handlers) {
+            for (ResponseHandler handler : handlers) {
                 try (SocketChannel client = server.accept()) {
                     JsonNode request = MAPPER.readTree(
                             LengthPrefixedFrameCodec.read(client, Duration.ofSeconds(2)));
                     synchronized (requests) {
                         requests.add(request);
                     }
-                    JsonNode response = handler.apply(request);
+                    byte[] response = handler.respond(request);
                     if (response != null) {
-                        LengthPrefixedFrameCodec.write(
-                                client,
-                                MAPPER.writeValueAsBytes(response),
-                                Duration.ofSeconds(2));
+                        LengthPrefixedFrameCodec.write(client, response, Duration.ofSeconds(2));
                     }
                 }
                 handled.countDown();
@@ -109,5 +110,17 @@ public final class FakeTaskCageServer implements AutoCloseable {
                 failure.compareAndSet(null, exception);
             }
         }
+    }
+
+    private static ResponseHandler encoded(Function<JsonNode, JsonNode> handler) {
+        return request -> {
+            JsonNode response = handler.apply(request);
+            return response == null ? null : MAPPER.writeValueAsBytes(response);
+        };
+    }
+
+    @FunctionalInterface
+    private interface ResponseHandler {
+        byte[] respond(JsonNode request) throws IOException;
     }
 }

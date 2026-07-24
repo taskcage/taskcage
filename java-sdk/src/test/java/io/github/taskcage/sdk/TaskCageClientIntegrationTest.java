@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import io.github.taskcage.sdk.support.FakeTaskCageServer;
 import java.time.Duration;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
@@ -54,6 +55,28 @@ class TaskCageClientIntegrationTest {
             response.put("requestId", "different-request-id");
             return response;
         });
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            assertThrows(TaskCageProtocolException.class, client::capabilities);
+            server.awaitRequests(Duration.ofSeconds(2));
+        }
+    }
+
+    @Test
+    void malformedJsonResponseIsReportedAsProtocolFailureWithoutRetrying() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.startRaw(ignored -> "{".getBytes(StandardCharsets.UTF_8));
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            assertThrows(TaskCageProtocolException.class, client::capabilities);
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals(1, server.requests().size());
+        }
+    }
+
+    @Test
+    void duplicateJsonKeysAreReportedAsProtocolFailure() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.startRaw(request -> (
+                "{\"protocolVersion\":1,\"requestId\":\"" + request.path("requestId").asText()
+                        + "\",\"requestId\":\"other\",\"type\":\"capabilities\",\"payload\":{}}")
+                .getBytes(StandardCharsets.UTF_8));
                 TaskCageClient client = TaskCageClient.connect(configFor(server))) {
             assertThrows(TaskCageProtocolException.class, client::capabilities);
             server.awaitRequests(Duration.ofSeconds(2));

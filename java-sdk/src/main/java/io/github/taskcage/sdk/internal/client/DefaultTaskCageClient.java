@@ -1,8 +1,10 @@
 package io.github.taskcage.sdk.internal.client;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.taskcage.sdk.TaskCageCapabilities;
 import io.github.taskcage.sdk.TaskCageClient;
@@ -21,7 +23,9 @@ public final class DefaultTaskCageClient implements TaskCageClient {
     private static final int PROTOCOL_VERSION = 1;
 
     private final TaskCageClientConfig config;
-    private final ObjectMapper mapper = new ObjectMapper();
+    private final ObjectMapper mapper = JsonMapper.builder()
+            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+            .build();
     private final ReentrantLock requestLock = new ReentrantLock();
     private UnixDomainSocketConnection connection;
     private boolean closed;
@@ -74,6 +78,9 @@ public final class DefaultTaskCageClient implements TaskCageClient {
             JsonNode response = mapper.readTree(responseBytes);
             validateResponse(response, requestId);
             return response;
+        } catch (JsonProcessingException exception) {
+            closeConnection();
+            throw new TaskCageProtocolException("invalid JSON response from TaskCage daemon", exception);
         } catch (IOException exception) {
             closeConnection();
             throw new TaskCageConnectionException("TaskCage daemon connection failed", exception);
