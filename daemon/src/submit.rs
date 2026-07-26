@@ -18,10 +18,9 @@ use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use self::registry::MonotonicClock;
 #[cfg(any(target_os = "linux", test))]
-use self::registry::{
-    RegistryClock, RegistryError, SubmitExecutionOwner, SubmitFailure, SubmitObservation,
-    SubmitReservation, TaskRegistry,
-};
+use self::registry::{RegistryClock, SubmitExecutionOwner, SubmitReservation, TaskRegistry};
+#[cfg(any(target_os = "linux", test))]
+pub(crate) use self::registry::{RegistryError, SubmitFailure, SubmitObservation};
 #[cfg(any(target_os = "linux", test))]
 use crate::capacity::{TaskCapacity, TaskCapacityPermit, TaskCapacitySettings};
 #[cfg(target_os = "linux")]
@@ -167,11 +166,27 @@ impl SubmitCoordinator {
     where
         F: FnOnce() -> (String, Instant) + Send + 'static,
     {
+        let (request_id, validated) = ValidatedSubmit::try_from_request(request)?;
+        self.submit_validated(request_id, validated, metadata, finished_time)
+            .await
+    }
+
+    pub(crate) async fn submit_validated<F>(
+        &self,
+        request_id: String,
+        validated: ValidatedSubmit,
+        metadata: SubmitMetadata,
+        finished_time: F,
+    ) -> Result<SubmitOutcome, SubmitError>
+    where
+        F: FnOnce() -> (String, Instant) + Send + 'static,
+    {
         let runner = Arc::clone(&self.runner);
-        coordinate_submit(
+        coordinate_validated_submit(
             self.registry.clone(),
             Arc::clone(&self.capacity),
-            request,
+            request_id,
+            validated,
             metadata,
             move |config, running_sender| async move {
                 runner
@@ -231,6 +246,13 @@ impl SubmitCoordinator {
 }
 
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "단위 시험은 raw Request 경계를, production handler는 검증된 경계를 사용합니다"
+    )
+)]
 async fn coordinate_submit<C, E, Fut>(
     registry: TaskRegistry<C>,
     capacity: Arc<TaskCapacity>,
@@ -245,6 +267,26 @@ where
 {
     // 검증은 Registry 예약과 Runner side effect보다 먼저 끝낸다.
     let (request_id, validated) = ValidatedSubmit::try_from_request(request)?;
+    coordinate_validated_submit(
+        registry, capacity, request_id, validated, metadata, executor,
+    )
+    .await
+}
+
+#[cfg(any(target_os = "linux", test))]
+async fn coordinate_validated_submit<C, E, Fut>(
+    registry: TaskRegistry<C>,
+    capacity: Arc<TaskCapacity>,
+    request_id: String,
+    validated: ValidatedSubmit,
+    metadata: SubmitMetadata,
+    executor: E,
+) -> Result<SubmitOutcome, SubmitError>
+where
+    C: RegistryClock + Send + 'static,
+    E: FnOnce(SubmitExecutionConfig, oneshot::Sender<TaskPayload>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>> + Send + 'static,
+{
     let effective_limits = validated.payload().limits.clone();
     let reservation = registry.reserve_submit(validated, metadata.task_id.clone())?;
 

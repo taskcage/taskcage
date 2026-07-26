@@ -202,3 +202,19 @@ unit_sequence=$((unit_sequence + 1))
   'submit::tests::actual_submit_coordinator_runs_once_and_finishes_after_cleanup' \
   --exact \
   --nocapture
+
+# typed protocol handler가 기존 capability, submit coordinator와 Registry를 그대로 사용한다.
+unit_sequence=$((unit_sequence + 1))
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-protocol-handlers-$$-${unit_sequence}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --setenv=TASKCAGE_RUN_LINUX_HANDLER_INTEGRATION=1 \
+  "${submit_test}" \
+  'handlers::tests::actual_handlers_connect_submit_and_get_task_to_the_runner' \
+  --exact \
+  --nocapture

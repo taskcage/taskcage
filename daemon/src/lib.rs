@@ -7,6 +7,8 @@ pub mod codec;
 #[cfg(target_os = "linux")]
 mod executor;
 #[cfg(any(target_os = "linux", test))]
+mod handlers;
+#[cfg(any(target_os = "linux", test))]
 mod lifecycle;
 pub mod output;
 pub mod preflight;
