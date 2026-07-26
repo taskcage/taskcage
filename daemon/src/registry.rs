@@ -489,6 +489,30 @@ where
         self.fail_inner(failure)
     }
 
+    /// RUNNING 전 거절에서 예약 제거가 확인된 경우에만 원래 오류를 반환한다.
+    pub(crate) fn rollback_before_running(
+        mut self,
+        failure: SubmitFailure,
+    ) -> Result<SubmitObservation, RegistryError> {
+        match self.registry.release_failed_owner(&self) {
+            Ok(()) => {
+                let observation = SubmitObservation::Failed(failure);
+                self.signal.publish(observation.clone());
+                self.resolved = true;
+                Ok(observation)
+            }
+            Err(error) => {
+                self.signal
+                    .publish(SubmitObservation::Failed(SubmitFailure::new(
+                        ErrorCode::InternalError,
+                        error.to_string(),
+                    )));
+                self.resolved = true;
+                Err(error)
+            }
+        }
+    }
+
     fn fail_inner(&mut self, failure: SubmitFailure) -> SubmitObservation {
         let observation = SubmitObservation::Failed(failure);
         // 잠금 자체를 사용할 수 없으면 waiter는 깨우되 Registry 오류는 이후 조회에서 보존한다.
