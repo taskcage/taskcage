@@ -336,19 +336,24 @@ SDK는 응답 유실이나 재연결 뒤 같은 작업을 재전송할 수 있�
   작업은 `RUNNING`으로 보인다.
 - 같은 `clientRequestId`와 같은 본문의 재전송은 새 실행 없이 기존 `taskId`와 현재 저장된 snapshot을
   반환한다. 본문이 다르면 `IDEMPOTENCY_CONFLICT`를 반환한다.
-- 최초 cleanup 단계가 시작된 단조시간에 기존 내부 cleanup timeout을 한 번만 더해 절대 cleanup
-  deadline을 만든다. 불확실성을 관찰하면 새 시간을 더하지 않고 이를 process-wide 종료 deadline으로
-  승계한다. 같은 작업 재시도, 다른 활성 작업 정리, 결과 저장, 조회 유예와 마지막 종료 방어가 이
-  deadline을 공유하며 단계마다 timeout을 새로 시작하지 않는다.
+- 일반 cleanup은 최초 cleanup 단계가 시작된 단조시간에 작업별 cleanup timeout을 한 번만 더한 절대
+  deadline을 사용한다. child 회수, cgroup 정리와 output reader 회수 단계마다 timeout을 새로 시작하지
+  않는다.
+- 정리 불확실성을 처음 관찰하면 별도의 양수·유한 내부 fail-stop timeout으로 process-wide fail-stop
+  deadline을 정확히 한 번 만든다. 작업별 cleanup deadline이 이미 소진됐어도 fail-stop 예산은 온전히
+  남아 있다. 이후 다른 오류는 이 deadline을 연장하지 않는다.
+- 같은 작업 재시도, 다른 활성 작업 정리, 결과 저장, 조회 유예와 마지막 종료 방어가 fail-stop
+  deadline을 공유한다. 전체 최악 시간은 작업별 cleanup timeout과 fail-stop timeout의 합으로 제한된다.
+  fail-stop timeout은 daemon 내부 설정 또는 생성자 입력이며 새 wire field가 아니다.
 - 신규 UDS 연결과 신규 작업 수락을 중단하고, 모든 활성 작업에 whole-cgroup 종료와 정리를 시작한다.
   안전한 정리와 필수 결과 근거를 모두 확인한 작업만 기존 lifecycle로 `FINISHED`를 정확히 한 번
   저장한다. fail-stop 때문에 종료한 작업은 다른 선행 종료 근거가 없을 때 기존 `DAEMON_ERROR`를
   사용한다.
-- 복구 성공 여부와 관계없이 정상 상태로 돌아가지 않는다. deadline이 남아 있는 동안 이미 연결된
-  클라이언트의 capabilities, 작업 조회와 idempotency 재전송을 처리한다. 새로운 `clientRequestId`의
-  제출은 `ENVIRONMENT_UNAVAILABLE`로 거절하며 side effect를 만들지 않는다. deadline에 도달하거나
-  모든 활성 작업 정리가 끝나고 기존 연결이 모두 닫히면 0이 아닌 종료 코드로 종료한다. 연결 종료로
-  응답을 받지 못한 SDK는 기존 `DAEMON_UNAVAILABLE`을 사용한다.
+- 복구 성공 여부와 관계없이 정상 상태로 돌아가지 않는다. fail-stop deadline이 남아 있는 동안 이미
+  연결된 클라이언트의 capabilities, 작업 조회와 idempotency 재전송을 처리한다. 새로운
+  `clientRequestId`의 제출은 `ENVIRONMENT_UNAVAILABLE`로 거절하며 side effect를 만들지 않는다.
+  fail-stop deadline에 도달하거나 모든 활성 작업 정리가 끝나고 기존 연결이 모두 닫히면 0이 아닌
+  종료 코드로 종료한다. 연결 종료로 응답을 받지 못한 SDK는 기존 `DAEMON_UNAVAILABLE`을 사용한다.
 - 치명적 로그에는 `taskId`, 실패 단계, 재시도 결과와 정리하지 못한 항목만 기록한다. 명령 인자
   전체, 환경 변수 값과 stdout·stderr 원문은 기록하지 않는다.
 
