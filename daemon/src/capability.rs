@@ -13,7 +13,7 @@ use crate::protocol::{CapabilitiesPayload, ErrorCode, MAX_FRAME_BYTES, PROTOCOL_
 )]
 #[derive(Debug)]
 enum CgroupReadiness {
-    Ready(VerifiedEnvironment),
+    Ready,
     Unavailable(PreflightError),
 }
 
@@ -24,6 +24,34 @@ pub struct CapabilityAdapter {
     cgroup_readiness: CgroupReadiness,
 }
 
+/// 한 번의 preflight 성공 토큰을 capability 상태와 실행 코어에 함께 연결한다.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "protocol handler는 Linux 실행 경로에서 성공 토큰을 소비합니다"
+    )
+)]
+#[derive(Debug)]
+pub(crate) enum CapabilityInitialization {
+    Ready {
+        adapter: CapabilityAdapter,
+        environment: VerifiedEnvironment,
+    },
+    Unavailable {
+        adapter: CapabilityAdapter,
+    },
+}
+
+impl CapabilityInitialization {
+    #[cfg(test)]
+    fn adapter(&self) -> &CapabilityAdapter {
+        match self {
+            Self::Ready { adapter, .. } | Self::Unavailable { adapter } => adapter,
+        }
+    }
+}
+
 impl CapabilityAdapter {
     #[cfg_attr(
         not(test),
@@ -32,7 +60,10 @@ impl CapabilityAdapter {
             reason = "UDS handler가 다음 단계에서 capability와 submit에 같은 설정을 전달합니다"
         )
     )]
-    pub(crate) fn from_probe<P>(probe: &P, capacity_settings: TaskCapacitySettings) -> Self
+    pub(crate) fn from_probe<P>(
+        probe: &P,
+        capacity_settings: TaskCapacitySettings,
+    ) -> CapabilityInitialization
     where
         P: CapabilityProbe,
     {
@@ -49,15 +80,21 @@ impl CapabilityAdapter {
     pub(crate) fn from_preflight(
         preflight: Result<VerifiedEnvironment, PreflightError>,
         capacity_settings: TaskCapacitySettings,
-    ) -> Self {
-        let cgroup_readiness = match preflight {
-            Ok(environment) => CgroupReadiness::Ready(environment),
-            Err(error) => CgroupReadiness::Unavailable(error),
-        };
-
-        Self {
-            capacity_settings,
-            cgroup_readiness,
+    ) -> CapabilityInitialization {
+        match preflight {
+            Ok(environment) => CapabilityInitialization::Ready {
+                adapter: Self {
+                    capacity_settings,
+                    cgroup_readiness: CgroupReadiness::Ready,
+                },
+                environment,
+            },
+            Err(error) => CapabilityInitialization::Unavailable {
+                adapter: Self {
+                    capacity_settings,
+                    cgroup_readiness: CgroupReadiness::Unavailable(error),
+                },
+            },
         }
     }
 
@@ -67,14 +104,14 @@ impl CapabilityAdapter {
             protocol_versions: vec![PROTOCOL_VERSION],
             max_frame_bytes: MAX_FRAME_BYTES as u32,
             max_concurrent_tasks: self.capacity_settings.max_concurrent_tasks(),
-            cgroup_v2_ready: matches!(&self.cgroup_readiness, CgroupReadiness::Ready(_)),
+            cgroup_v2_ready: matches!(&self.cgroup_readiness, CgroupReadiness::Ready),
         }
     }
 
     /// 준비 성공 토큰이 없으면 작업 생성 전에 거절한다.
-    pub fn submit_gate(&self) -> Result<&VerifiedEnvironment, ErrorCode> {
+    pub fn submit_gate(&self) -> Result<(), ErrorCode> {
         match &self.cgroup_readiness {
-            CgroupReadiness::Ready(environment) => Ok(environment),
+            CgroupReadiness::Ready => Ok(()),
             CgroupReadiness::Unavailable(_) => Err(ErrorCode::EnvironmentUnavailable),
         }
     }
@@ -82,7 +119,7 @@ impl CapabilityAdapter {
     /// wire 응답에는 넣지 않는 사전 검사 진단이다.
     pub fn unavailable_diagnostic(&self) -> Option<&PreflightError> {
         match &self.cgroup_readiness {
-            CgroupReadiness::Ready(_) => None,
+            CgroupReadiness::Ready => None,
             CgroupReadiness::Unavailable(diagnostic) => Some(diagnostic),
         }
     }
@@ -120,8 +157,9 @@ mod tests {
 
     #[test]
     fn ready_probe_produces_only_the_public_capability_fields() {
-        let adapter =
+        let initialization =
             CapabilityAdapter::from_probe(&ReadyProbe, TaskCapacitySettings::new(7).unwrap());
+        let adapter = initialization.adapter();
 
         let payload = adapter.payload();
         let value = serde_json::to_value(&payload).unwrap();
@@ -148,7 +186,10 @@ mod tests {
         assert!(payload.cgroup_v2_ready);
         assert!(adapter.unavailable_diagnostic().is_none());
 
-        let environment = adapter.submit_gate().expect("ready gate");
+        adapter.submit_gate().expect("ready gate");
+        let CapabilityInitialization::Ready { environment, .. } = initialization else {
+            panic!("준비된 probe는 검증된 환경을 실행 코어에 넘겨야 합니다");
+        };
         assert_eq!(
             environment.report().delegated_root,
             PathBuf::from("/delegated")
@@ -157,8 +198,9 @@ mod tests {
 
     #[test]
     fn unavailable_probe_rejects_submit_before_any_side_effect() {
-        let adapter =
+        let initialization =
             CapabilityAdapter::from_probe(&UnavailableProbe, TaskCapacitySettings::new(7).unwrap());
+        let adapter = initialization.adapter();
         let cgroup_creations = Cell::new(0);
         let target_starts = Cell::new(0);
 
@@ -184,7 +226,8 @@ mod tests {
     #[test]
     fn reported_maximum_and_actual_permits_share_one_setting() {
         let settings = TaskCapacitySettings::new(3).unwrap();
-        let adapter = CapabilityAdapter::from_probe(&ReadyProbe, settings);
+        let initialization = CapabilityAdapter::from_probe(&ReadyProbe, settings);
+        let adapter = initialization.adapter();
         let capacity = Arc::new(TaskCapacity::new(settings));
         let permits: Vec<_> = (0..3)
             .map(|_| {

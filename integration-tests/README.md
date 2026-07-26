@@ -52,6 +52,8 @@ Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 
     보내도 새 Runner 없이 같은 taskId의 RUNNING과 FINISHED를 공유한다.
 13. 실행 슬롯이 하나일 때 다른 새 submit은 즉시 `CAPACITY_EXHAUSTED`로 거절되고 Registry와
     작업 cgroup을 남기지 않으며, 기존 멱등 요청은 같은 작업을 공유한다.
+14. typed protocol handler가 capability, 정상 submit, `getTask`와 exec 시작 실패를 기존 실행
+    코어에 연결하며 정리 뒤 작업 cgroup을 남기지 않는다.
 
 실행 방법:
 
