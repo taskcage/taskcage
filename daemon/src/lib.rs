@@ -1,5 +1,10 @@
 //! TaskCage Rust 데몬의 사전 검사와 작업 실행 생명주기를 제공한다.
 
+#[cfg_attr(
+    not(any(target_os = "linux", test)),
+    allow(dead_code, reason = "protocol task 취소는 Linux에서만 제공됩니다")
+)]
+mod cancellation;
 pub mod capability;
 mod capacity;
 pub mod cgroup;
@@ -8,7 +13,10 @@ pub mod codec;
 mod executor;
 #[cfg(any(target_os = "linux", test))]
 mod handlers;
-#[cfg(any(target_os = "linux", test))]
+#[cfg_attr(
+    not(any(target_os = "linux", test)),
+    allow(dead_code, reason = "protocol task lifecycle은 Linux에서만 제공됩니다")
+)]
 mod lifecycle;
 pub mod output;
 pub mod preflight;
@@ -29,6 +37,8 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use cancellation::cancellation_channel;
 #[cfg(target_os = "linux")]
 use cgroup::CgroupManager;
 use cgroup::{CgroupError, CgroupLimits, JobStats};
@@ -146,6 +156,7 @@ pub async fn run_once(config: RunOnceConfig) -> Result<RunOnceReport> {
     let manager = CgroupManager::initialize(environment)?;
     tracing::info!(root = %manager.root().display(), "검증된 cgroup 작업 영역을 준비했습니다");
 
+    let (cancellation, _unused_cancel_handle) = cancellation_channel();
     let cleaned = execute(
         &manager,
         ExecutionConfig {
@@ -156,6 +167,7 @@ pub async fn run_once(config: RunOnceConfig) -> Result<RunOnceReport> {
             capture_limits,
             prepared,
         },
+        cancellation,
         || {},
     )
     .await

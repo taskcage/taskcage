@@ -66,6 +66,12 @@ impl ControlTriggers {
         }
     }
 
+    pub(crate) fn cancelled() -> Self {
+        Self {
+            first: Some(ControlTrigger::Cancelled),
+        }
+    }
+
     pub(crate) fn first(self) -> Option<ControlTrigger> {
         self.first
     }
@@ -91,11 +97,16 @@ impl TerminalTriggerLatch {
     pub(crate) fn snapshot(&self) -> ControlTriggers {
         match self.first.load(Ordering::Acquire) {
             1 => ControlTriggers::timed_out(),
-            2 => ControlTriggers {
-                first: Some(ControlTrigger::Cancelled),
-            },
+            2 => ControlTriggers::cancelled(),
             _ => ControlTriggers::none(),
         }
+    }
+
+    /// target 종료가 먼저 관찰되면 늦은 timeout과 cancel을 막는다.
+    pub(crate) fn close_without_control(&self) -> bool {
+        self.first
+            .compare_exchange(0, 3, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 }
 
@@ -620,6 +631,15 @@ mod tests {
         assert!(control.observe(ControlTrigger::Cancelled));
         assert!(!control.observe(ControlTrigger::TimedOut));
         assert_eq!(control.snapshot().first(), Some(ControlTrigger::Cancelled));
+    }
+
+    #[test]
+    fn normal_exit_closes_the_terminal_latch_against_late_control() {
+        let control = TerminalTriggerLatch::default();
+        assert!(control.close_without_control());
+        assert!(!control.observe(ControlTrigger::Cancelled));
+        assert!(!control.observe(ControlTrigger::TimedOut));
+        assert_eq!(control.snapshot().first(), None);
     }
 
     #[test]

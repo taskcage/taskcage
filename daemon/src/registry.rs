@@ -7,6 +7,9 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::Notify;
 
+#[cfg(test)]
+use crate::cancellation::cancellation_channel;
+use crate::cancellation::{CancellationWaiter, RunningCancellation};
 use crate::protocol::{ErrorCode, SubmitTaskPayload, TaskPayload};
 use crate::submit::ValidatedSubmit;
 
@@ -56,6 +59,8 @@ impl RegistryError {
     pub(crate) fn error_code(&self) -> Option<ErrorCode> {
         match self {
             Self::IdempotencyConflict(_) => Some(ErrorCode::IdempotencyConflict),
+            Self::TaskNotFound(_) => Some(ErrorCode::TaskNotFound),
+            Self::TaskAlreadyFinished(_) => Some(ErrorCode::TaskAlreadyFinished),
             Self::StateUnavailable => Some(ErrorCode::InternalError),
             _ => None,
         }
@@ -66,6 +71,7 @@ impl RegistryError {
 struct TaskRecord {
     snapshot: TaskPayload,
     finished_monotonic: Option<Instant>,
+    cancellation: Option<RunningCancellation>,
 }
 
 #[derive(Debug)]
@@ -207,10 +213,32 @@ where
             .map(|record| record.snapshot.clone()))
     }
 
+    /// RUNNING 확인과 cancel trigger 기록을 같은 Registry 잠금 구간에서 수행한다.
+    pub(crate) fn request_cancel(
+        &self,
+        task_id: &str,
+    ) -> Result<CancellationWaiter, RegistryError> {
+        let mut state = self.lock_state()?;
+        state.purge_expired();
+        let record = state
+            .tasks
+            .get(task_id)
+            .ok_or_else(|| RegistryError::TaskNotFound(task_id.to_owned()))?;
+        if matches!(record.snapshot, TaskPayload::Finished { .. }) {
+            return Err(RegistryError::TaskAlreadyFinished(task_id.to_owned()));
+        }
+        record
+            .cancellation
+            .as_ref()
+            .map(RunningCancellation::request_cancel)
+            .ok_or(RegistryError::StateUnavailable)
+    }
+
     fn publish_running(
         &self,
         owner: &SubmitExecutionOwner<C>,
         snapshot: TaskPayload,
+        cancellation: RunningCancellation,
     ) -> Result<TaskPayload, RegistryError> {
         let actual_task_id = match &snapshot {
             TaskPayload::Running { task_id, .. } => task_id,
@@ -229,6 +257,7 @@ where
             TaskRecord {
                 snapshot: snapshot.clone(),
                 finished_monotonic: None,
+                cancellation: Some(cancellation),
             },
         );
         drop(state);
@@ -253,13 +282,14 @@ where
         state.purge_expired();
         state.verify_owner(owner)?;
         let finished_monotonic = state.clock.now();
-        match state.tasks.get_mut(&owner.task_id) {
+        let cancellation = match state.tasks.get_mut(&owner.task_id) {
             Some(record) if record.finished_monotonic.is_some() => {
                 return Err(RegistryError::TaskAlreadyFinished(owner.task_id.clone()));
             }
             Some(record) => {
                 record.snapshot = snapshot.clone();
                 record.finished_monotonic = Some(finished_monotonic);
+                record.cancellation.take()
             }
             None => {
                 // execve 시작 실패는 RUNNING 공개 없이 정리된 FINISHED로 바로 저장한다.
@@ -268,15 +298,20 @@ where
                     TaskRecord {
                         snapshot: snapshot.clone(),
                         finished_monotonic: Some(finished_monotonic),
+                        cancellation: None,
                     },
                 );
+                None
             }
-        }
+        };
         state.finished_expirations.push_back(FinishedExpiration {
             task_id: owner.task_id.clone(),
             finished_monotonic,
         });
         drop(state);
+        if let Some(cancellation) = cancellation {
+            cancellation.complete(snapshot.clone());
+        }
         owner
             .signal
             .publish(SubmitObservation::Task(snapshot.clone()));
@@ -446,11 +481,21 @@ where
         self.request.as_ref()
     }
 
+    pub(crate) fn publish_running_with_cancellation(
+        &self,
+        snapshot: TaskPayload,
+        cancellation: RunningCancellation,
+    ) -> Result<TaskPayload, RegistryError> {
+        self.registry.publish_running(self, snapshot, cancellation)
+    }
+
+    #[cfg(test)]
     pub(crate) fn publish_running(
         &self,
         snapshot: TaskPayload,
     ) -> Result<TaskPayload, RegistryError> {
-        self.registry.publish_running(self, snapshot)
+        let (_runtime, cancellation) = cancellation_channel();
+        self.publish_running_with_cancellation(snapshot, cancellation)
     }
 
     #[cfg(target_os = "linux")]
@@ -672,6 +717,18 @@ mod tests {
         }
     }
 
+    fn cancelled(task_id: &str) -> TaskPayload {
+        let mut payload = finished(task_id);
+        let TaskPayload::Finished {
+            termination_reason, ..
+        } = &mut payload
+        else {
+            unreachable!()
+        };
+        *termination_reason = TerminationReason::Cancelled;
+        payload
+    }
+
     fn registry() -> (TaskRegistry<FakeClock>, FakeClock) {
         let clock = FakeClock::new();
         (TaskRegistry::with_clock(clock.clone()), clock)
@@ -744,6 +801,75 @@ mod tests {
             Ok(Some(expected))
         );
         owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+    }
+
+    #[tokio::test]
+    async fn running_cancel_waiters_finish_only_after_cancelled_snapshot_is_stored() {
+        let (registry, _) = registry();
+        let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
+        let (runtime, cancellation) = cancellation_channel();
+        owner
+            .publish_running_with_cancellation(running(TASK_ID), cancellation)
+            .unwrap();
+
+        let first = registry.request_cancel(TASK_ID).unwrap();
+        let second = registry.request_cancel(TASK_ID).unwrap();
+        runtime.cancelled().await;
+        assert_eq!(
+            runtime.control_snapshot().first(),
+            Some(crate::lifecycle::ControlTrigger::Cancelled)
+        );
+
+        let mut first_wait = Box::pin(first.wait());
+        assert!(
+            timeout(TokioDuration::from_millis(10), &mut first_wait)
+                .await
+                .is_err()
+        );
+        let expected = cancelled(TASK_ID);
+        owner.finish_for_test(expected.clone()).unwrap();
+
+        assert_eq!(first_wait.await, expected);
+        assert_eq!(second.wait().await, expected);
+        assert_eq!(registry.snapshot(TASK_ID), Ok(Some(expected)));
+    }
+
+    #[tokio::test]
+    async fn dropped_cancel_waiter_does_not_stop_internal_cancellation() {
+        let (registry, _) = registry();
+        let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
+        let (runtime, cancellation) = cancellation_channel();
+        owner
+            .publish_running_with_cancellation(running(TASK_ID), cancellation)
+            .unwrap();
+
+        drop(registry.request_cancel(TASK_ID).unwrap());
+        runtime.cancelled().await;
+        let expected = cancelled(TASK_ID);
+        owner.finish_for_test(expected.clone()).unwrap();
+        assert_eq!(registry.snapshot(TASK_ID), Ok(Some(expected)));
+    }
+
+    #[test]
+    fn cancel_rejects_finished_missing_and_expired_tasks() {
+        let (registry, clock) = registry();
+        assert!(matches!(
+            registry.request_cancel(TASK_ID),
+            Err(RegistryError::TaskNotFound(task_id)) if task_id == TASK_ID
+        ));
+
+        let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
+        owner.finish_for_test(finished(TASK_ID)).unwrap();
+        assert!(matches!(
+            registry.request_cancel(TASK_ID),
+            Err(RegistryError::TaskAlreadyFinished(task_id)) if task_id == TASK_ID
+        ));
+
+        clock.advance(MIN_FINISHED_RETENTION + Duration::from_nanos(1));
+        assert!(matches!(
+            registry.request_cancel(TASK_ID),
+            Err(RegistryError::TaskNotFound(task_id)) if task_id == TASK_ID
+        ));
     }
 
     #[test]

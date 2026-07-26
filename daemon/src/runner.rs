@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::cancellation::CancellationRuntime;
 use crate::cgroup::{CgroupError, CgroupManager, JobCgroup, JobStats};
 use crate::executor::{
     ExecFailure, PreparedCommand, ProcessExit, SpawnOutcome, SpawnedProcess, WaitOutcome,
@@ -13,7 +14,6 @@ use crate::executor::{
 };
 use crate::lifecycle::{
     ControlTrigger, ControlTriggers, ExecutionEvidence, ProcessEvidence, SingleTaskLifecycle,
-    TerminalTriggerLatch,
 };
 use crate::output::{CaptureLimits, CapturedOutput};
 use crate::preflight::VerifiedEnvironment;
@@ -100,6 +100,7 @@ impl TaskRunner {
         _permit: RunnerPermit,
         config: TaskRunConfig,
         running_sender: tokio::sync::oneshot::Sender<TaskPayload>,
+        cancellation: CancellationRuntime,
         finished_time: F,
     ) -> std::result::Result<CompletedTask, TaskRunFailure>
     where
@@ -128,7 +129,7 @@ impl TaskRunner {
             prepared,
         };
 
-        let cleaned = match execute(&self.manager, execution, || {
+        let cleaned = match execute(&self.manager, execution, cancellation, || {
             // execve 성공을 확인한 뒤 실제로 완료할 같은 lifecycle의 snapshot만 공개한다.
             let _ = running_sender.send(lifecycle.snapshot());
         })
@@ -270,6 +271,7 @@ impl CoreFailure {
 pub(crate) async fn execute<F>(
     manager: &CgroupManager,
     config: ExecutionConfig,
+    cancellation: CancellationRuntime,
     on_started: F,
 ) -> std::result::Result<CleanedRun, CoreFailure>
 where
@@ -355,6 +357,7 @@ where
                 process,
                 wall_timeout,
                 cleanup_timeout,
+                cancellation,
                 on_started,
             )
             .await
@@ -394,16 +397,21 @@ async fn finish_started_process<F>(
     process: SpawnedProcess,
     wall_timeout: Duration,
     cleanup_timeout: Duration,
+    cancellation: CancellationRuntime,
     on_started: F,
 ) -> std::result::Result<CleanedRun, CoreFailure>
 where
     F: FnOnce(),
 {
-    let terminal_trigger = TerminalTriggerLatch::default();
     on_started();
-    let wait_outcome = match process.wait_for(wall_timeout).await {
-        Ok(outcome) => outcome,
-        Err(error) => {
+    let wait_outcome = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => None,
+        outcome = process.wait_for(wall_timeout) => Some(outcome),
+    };
+
+    let (control, exit, kill_already_sent) = match wait_outcome {
+        Some(Err(error)) => {
             return cleanup_running_job(
                 job,
                 process,
@@ -412,70 +420,154 @@ where
                     cleanup_timeout,
                     "target 종료 대기",
                     error.to_string(),
-                    terminal_trigger.snapshot(),
+                    cancellation.control_snapshot(),
+                    true,
+                ),
+            )
+            .await;
+        }
+        Some(Ok(WaitOutcome::Exited(exit))) if cancellation.close_without_control() => {
+            (ControlTriggers::none(), exit, false)
+        }
+        Some(Ok(WaitOutcome::Exited(exit))) => {
+            // cancel이 waitpid와 거의 동시에 먼저 기록됐으면 이미 회수한 child는 다시 기다리지 않는다.
+            let kill_already_sent = match job.kill_all() {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(cause = %error, "종료 상태 회수와 경쟁한 cgroup cancel을 정리 경로에서 재시도합니다");
+                    false
+                }
+            };
+            (cancellation.control_snapshot(), exit, kill_already_sent)
+        }
+        Some(Ok(WaitOutcome::TimedOut)) => {
+            cancellation.observe_timeout();
+            return finish_controlled_process(
+                job_id,
+                job,
+                process,
+                cleanup_timeout,
+                cancellation.control_snapshot(),
+            )
+            .await;
+        }
+        None => {
+            return finish_controlled_process(
+                job_id,
+                job,
+                process,
+                cleanup_timeout,
+                cancellation.control_snapshot(),
+            )
+            .await;
+        }
+    };
+
+    finish_cleaned_started(
+        job,
+        StartedCompletion {
+            job_id,
+            process,
+            exit,
+            control,
+            membership_verified: true,
+            kill_already_sent,
+            cleanup_timeout,
+        },
+    )
+    .await
+}
+
+async fn finish_controlled_process(
+    job_id: String,
+    job: JobCgroup,
+    process: SpawnedProcess,
+    cleanup_timeout: Duration,
+    control: ControlTriggers,
+) -> std::result::Result<CleanedRun, CoreFailure> {
+    let stage = match control.first() {
+        Some(ControlTrigger::Cancelled) => "취소 전체 종료",
+        Some(ControlTrigger::TimedOut) => "시간 초과 전체 종료",
+        None => "제어 원인 없는 전체 종료",
+    };
+    if let Err(error) = job.kill_all() {
+        return cleanup_running_job(
+            job,
+            process,
+            RecoveryContext::new(
+                job_id,
+                cleanup_timeout,
+                stage,
+                error.to_string(),
+                control,
+                true,
+            ),
+        )
+        .await;
+    }
+    let exit = match process.reap_after_kill(cleanup_timeout).await {
+        Ok(exit) => exit,
+        Err(error) => {
+            return cleanup_running_job(
+                job,
+                process,
+                RecoveryContext::new(
+                    job_id,
+                    cleanup_timeout,
+                    "제어 종료 상태 회수",
+                    error.to_string(),
+                    control,
                     true,
                 ),
             )
             .await;
         }
     };
-
-    let (control, exit) = match wait_outcome {
-        WaitOutcome::Exited(exit) => (terminal_trigger.snapshot(), exit),
-        WaitOutcome::TimedOut => {
-            terminal_trigger.observe(ControlTrigger::TimedOut);
-            if let Err(error) = job.kill_all() {
-                return cleanup_running_job(
-                    job,
-                    process,
-                    RecoveryContext::new(
-                        job_id,
-                        cleanup_timeout,
-                        "시간 초과 전체 종료",
-                        error.to_string(),
-                        terminal_trigger.snapshot(),
-                        true,
-                    ),
-                )
-                .await;
-            }
-            let exit = match process.reap_after_kill(cleanup_timeout).await {
-                Ok(exit) => exit,
-                Err(error) => {
-                    return cleanup_running_job(
-                        job,
-                        process,
-                        RecoveryContext::new(
-                            job_id,
-                            cleanup_timeout,
-                            "시간 초과 종료 상태 회수",
-                            error.to_string(),
-                            terminal_trigger.snapshot(),
-                            true,
-                        ),
-                    )
-                    .await;
-                }
-            };
-            (terminal_trigger.snapshot(), exit)
-        }
-    };
-
-    finish_cleaned_started(job_id, job, process, exit, control, true, cleanup_timeout).await
+    finish_cleaned_started(
+        job,
+        StartedCompletion {
+            job_id,
+            process,
+            exit,
+            control,
+            membership_verified: true,
+            kill_already_sent: true,
+            cleanup_timeout,
+        },
+    )
+    .await
 }
 
-async fn finish_cleaned_started(
+struct StartedCompletion {
     job_id: String,
-    job: JobCgroup,
     process: SpawnedProcess,
     exit: ProcessExit,
     control: ControlTriggers,
     membership_verified: bool,
+    kill_already_sent: bool,
     cleanup_timeout: Duration,
+}
+
+async fn finish_cleaned_started(
+    job: JobCgroup,
+    completion: StartedCompletion,
 ) -> std::result::Result<CleanedRun, CoreFailure> {
+    let StartedCompletion {
+        job_id,
+        process,
+        exit,
+        control,
+        membership_verified,
+        kill_already_sent,
+        cleanup_timeout,
+    } = completion;
     let pid = process.pid();
     // 후손이 출력 FD를 잡고 있을 수 있으므로 cgroup 전체를 먼저 비운 뒤 reader를 회수한다.
-    let finish_result = job.finish(cleanup_timeout).await;
+    let finish_result = if kill_already_sent {
+        job.finish_after_kill(cleanup_timeout).await
+    } else {
+        job.finish(cleanup_timeout).await
+    };
     let output_result = process.finish_output(cleanup_timeout).await;
     match (finish_result, output_result) {
         (Ok(stats), Ok(output)) => Ok(CleanedRun {
@@ -603,7 +695,11 @@ async fn cleanup_running_job(
         cleanup_errors.push(error.to_string());
         isolation_uncertain = true;
     }
-    let finish_result = job.finish(timeout).await;
+    let finish_result = if kill_result.is_ok() {
+        job.finish_after_kill(timeout).await
+    } else {
+        job.finish(timeout).await
+    };
     if let Err(error) = &finish_result {
         cleanup_errors.push(error.to_string());
         isolation_uncertain = true;

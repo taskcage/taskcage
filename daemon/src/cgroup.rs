@@ -491,10 +491,18 @@ impl JobCgroup {
     }
 
     /// 전체 종료, 빈 상태 확인, 통계 읽기, cgroup 제거 순서를 지킨다.
-    pub async fn finish(mut self, timeout: Duration) -> Result<JobStats, CgroupError> {
+    pub async fn finish(self, timeout: Duration) -> Result<JobStats, CgroupError> {
         if self.is_populated()? {
             self.kill_all()?;
         }
+        self.finish_after_kill(timeout).await
+    }
+
+    /// 이미 cgroup.kill을 보낸 제어 종료 경로는 같은 종료 명령을 중복 전송하지 않는다.
+    pub(crate) async fn finish_after_kill(
+        mut self,
+        timeout: Duration,
+    ) -> Result<JobStats, CgroupError> {
         self.wait_empty(timeout).await?;
 
         // 통계 읽기에 실패해도 빈 cgroup 제거는 반드시 시도한다.
