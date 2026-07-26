@@ -50,6 +50,8 @@ Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 
     전이에 사용할 수 있고, 작업 cgroup이 남지 않는다.
 12. 검증부터 멱등 예약과 실제 Runner까지 같은 경로를 통과하며, 같은 submit payload를 다시
     보내도 새 Runner 없이 같은 taskId의 RUNNING과 FINISHED를 공유한다.
+13. 실행 슬롯이 하나일 때 다른 새 submit은 즉시 `CAPACITY_EXHAUSTED`로 거절되고 Registry와
+    작업 cgroup을 남기지 않으며, 기존 멱등 요청은 같은 작업을 공유한다.
 
 실행 방법:
 

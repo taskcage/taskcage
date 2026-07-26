@@ -62,6 +62,29 @@ pub(crate) struct TaskRunner {
     cleanup_uncertain: AtomicBool,
 }
 
+#[derive(Debug)]
+pub(crate) struct TaskRunFailure {
+    error: Error,
+    capacity_reusable: bool,
+}
+
+impl TaskRunFailure {
+    fn with_reusable_capacity(error: Error) -> Self {
+        Self {
+            error,
+            capacity_reusable: true,
+        }
+    }
+
+    pub(crate) fn capacity_reusable(&self) -> bool {
+        self.capacity_reusable
+    }
+
+    pub(crate) fn into_error(self) -> Error {
+        self.error
+    }
+}
+
 impl TaskRunner {
     /// preflight 성공 토큰 없이는 실행기를 만들 수 없다.
     pub(crate) fn initialize(environment: VerifiedEnvironment) -> Result<Self> {
@@ -78,15 +101,18 @@ impl TaskRunner {
         config: TaskRunConfig,
         running_sender: tokio::sync::oneshot::Sender<TaskPayload>,
         finished_time: F,
-    ) -> Result<CompletedTask>
+    ) -> std::result::Result<CompletedTask, TaskRunFailure>
     where
         F: FnOnce() -> (String, Instant),
     {
         if self.cleanup_uncertain.load(Ordering::Acquire) {
-            return Err(Error::CleanupUncertain);
+            return Err(TaskRunFailure::with_reusable_capacity(
+                Error::CleanupUncertain,
+            ));
         }
 
-        let prepared = prepare_protocol_command(&config.command)?;
+        let prepared = prepare_protocol_command(&config.command)
+            .map_err(TaskRunFailure::with_reusable_capacity)?;
         let mut lifecycle = SingleTaskLifecycle::running(
             config.task_id.clone(),
             config.submitted_at,
@@ -113,15 +139,20 @@ impl TaskRunner {
                 if failure.block_future_runs {
                     self.cleanup_uncertain.store(true, Ordering::Release);
                 }
-                return Err(failure.error);
+                return Err(TaskRunFailure {
+                    error: failure.error,
+                    capacity_reusable: !failure.block_future_runs,
+                });
             }
         };
         let (finished_at, finished_monotonic) = finished_time();
         let payload = lifecycle
             .complete(cleaned, finished_at, finished_monotonic)
             .cloned()
-            .map_err(|error| Error::TaskLifecycle(error.to_string()))?;
-        CompletedTask::new(payload)
+            .map_err(|error| {
+                TaskRunFailure::with_reusable_capacity(Error::TaskLifecycle(error.to_string()))
+            })?;
+        CompletedTask::new(payload).map_err(TaskRunFailure::with_reusable_capacity)
     }
 
     #[cfg(test)]

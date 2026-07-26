@@ -12,7 +12,7 @@ use thiserror::Error;
 #[cfg(any(target_os = "linux", test))]
 use tokio::sync::oneshot;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
@@ -22,6 +22,8 @@ use self::registry::{
     RegistryClock, RegistryError, SubmitExecutionOwner, SubmitFailure, SubmitObservation,
     SubmitReservation, TaskRegistry,
 };
+#[cfg(any(target_os = "linux", test))]
+use crate::capacity::{TaskCapacity, TaskCapacityPermit, TaskCapacitySettings};
 #[cfg(target_os = "linux")]
 use crate::preflight::VerifiedEnvironment;
 #[cfg(any(target_os = "linux", test))]
@@ -30,6 +32,9 @@ use crate::protocol::{PROTOCOL_VERSION, Request, SubmitTaskPayload};
 use crate::resource_budget::{ResourceBudget, ResourceBudgetError};
 #[cfg(target_os = "linux")]
 use crate::runner::{CompletedTask, TaskRunConfig, TaskRunner};
+
+#[cfg(any(target_os = "linux", test))]
+const CAPACITY_EXHAUSTED_MESSAGE: &str = "all task execution slots are in use";
 
 /// 원자적 예약을 얻은 submit 조정 경로만 Runner 호출 권한을 만들 수 있다.
 #[cfg(target_os = "linux")]
@@ -93,6 +98,23 @@ enum ExecutionCompletion {
     Test(TaskPayload),
 }
 
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug)]
+struct ExecutionFailure {
+    submit: SubmitFailure,
+    capacity_reusable: bool,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl ExecutionFailure {
+    fn new(submit: SubmitFailure, capacity_reusable: bool) -> Self {
+        Self {
+            submit,
+            capacity_reusable,
+        }
+    }
+}
+
 /// UDS handler가 사용할 단일 submit 진입점이다. Registry와 Runner는 외부에 따로 노출하지 않는다.
 #[cfg(target_os = "linux")]
 #[cfg_attr(
@@ -106,6 +128,7 @@ enum ExecutionCompletion {
 pub(crate) struct SubmitCoordinator {
     registry: TaskRegistry<MonotonicClock>,
     runner: Arc<TaskRunner>,
+    capacity: Arc<TaskCapacity>,
 }
 
 #[cfg(target_os = "linux")]
@@ -117,10 +140,14 @@ impl SubmitCoordinator {
             reason = "UDS handler가 다음 단계에서 이 단일 진입점을 소유합니다"
         )
     )]
-    pub(crate) fn initialize(environment: VerifiedEnvironment) -> crate::Result<Self> {
+    pub(crate) fn initialize(
+        environment: VerifiedEnvironment,
+        capacity_settings: TaskCapacitySettings,
+    ) -> crate::Result<Self> {
         Ok(Self {
             registry: TaskRegistry::new(),
             runner: Arc::new(TaskRunner::initialize(environment)?),
+            capacity: Arc::new(TaskCapacity::new(capacity_settings)),
         })
     }
 
@@ -143,6 +170,7 @@ impl SubmitCoordinator {
         let runner = Arc::clone(&self.runner);
         coordinate_submit(
             self.registry.clone(),
+            Arc::clone(&self.capacity),
             request,
             metadata,
             move |config, running_sender| async move {
@@ -164,7 +192,14 @@ impl SubmitCoordinator {
                     .await
                     .map(ExecutionCompletion::Real)
                     .map_err(|error| {
-                        SubmitFailure::new(ErrorCode::InternalError, error.to_string())
+                        let capacity_reusable = error.capacity_reusable();
+                        ExecutionFailure::new(
+                            SubmitFailure::new(
+                                ErrorCode::InternalError,
+                                error.into_error().to_string(),
+                            ),
+                            capacity_reusable,
+                        )
                     })
             },
         )
@@ -198,6 +233,7 @@ impl SubmitCoordinator {
 #[cfg(any(target_os = "linux", test))]
 async fn coordinate_submit<C, E, Fut>(
     registry: TaskRegistry<C>,
+    capacity: Arc<TaskCapacity>,
     request: Request,
     metadata: SubmitMetadata,
     executor: E,
@@ -205,7 +241,7 @@ async fn coordinate_submit<C, E, Fut>(
 where
     C: RegistryClock + Send + 'static,
     E: FnOnce(SubmitExecutionConfig, oneshot::Sender<TaskPayload>) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<ExecutionCompletion, SubmitFailure>> + Send + 'static,
+    Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>> + Send + 'static,
 {
     // 검증은 Registry 예약과 Runner side effect보다 먼저 끝낸다.
     let (request_id, validated) = ValidatedSubmit::try_from_request(request)?;
@@ -219,6 +255,18 @@ where
         }
         SubmitReservation::Owner(owner) => {
             let task_id = owner.task_id().to_owned();
+            let Some(capacity_permit) = capacity.try_acquire() else {
+                let observation = owner.rollback_before_running(SubmitFailure::new(
+                    ErrorCode::CapacityExhausted,
+                    CAPACITY_EXHAUSTED_MESSAGE,
+                ))?;
+                return Ok(SubmitOutcome {
+                    request_id,
+                    task_id,
+                    effective_limits,
+                    observation,
+                });
+            };
             let config = SubmitExecutionConfig {
                 task_id: task_id.clone(),
                 submitted_at: metadata.submitted_at,
@@ -229,7 +277,13 @@ where
                 budget: owner.request().budget().clone(),
             };
             let (initial_sender, initial_receiver) = oneshot::channel();
-            tokio::spawn(run_owner(owner, config, executor, initial_sender));
+            tokio::spawn(run_owner(
+                owner,
+                config,
+                executor,
+                initial_sender,
+                capacity_permit,
+            ));
             let observation = initial_receiver
                 .await
                 .map_err(|_| SubmitError::CoordinatorStopped)?;
@@ -251,10 +305,11 @@ async fn run_owner<C, E, Fut>(
     config: SubmitExecutionConfig,
     executor: E,
     initial_sender: oneshot::Sender<SubmitObservation>,
+    capacity_permit: TaskCapacityPermit,
 ) where
     C: RegistryClock,
     E: FnOnce(SubmitExecutionConfig, oneshot::Sender<TaskPayload>) -> Fut,
-    Fut: Future<Output = Result<ExecutionCompletion, SubmitFailure>>,
+    Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>>,
 {
     let (running_sender, mut running_receiver) = oneshot::channel();
     let execution = executor(config, running_sender);
@@ -263,14 +318,36 @@ async fn run_owner<C, E, Fut>(
         biased;
         running = &mut running_receiver => {
             match running {
-                Ok(running) => run_after_running(owner, running, execution, initial_sender).await,
-                Err(_) => finish_without_running(owner, execution.await, initial_sender),
+                Ok(running) => run_after_running(
+                    owner,
+                    running,
+                    execution,
+                    initial_sender,
+                    capacity_permit,
+                ).await,
+                Err(_) => finish_without_running(
+                    owner,
+                    execution.await,
+                    initial_sender,
+                    capacity_permit,
+                ),
             }
         }
         completion = &mut execution => {
             match running_receiver.try_recv() {
-                Ok(running) => finish_after_running(owner, running, completion, initial_sender),
-                Err(_) => finish_without_running(owner, completion, initial_sender),
+                Ok(running) => finish_after_running(
+                    owner,
+                    running,
+                    completion,
+                    initial_sender,
+                    capacity_permit,
+                ),
+                Err(_) => finish_without_running(
+                    owner,
+                    completion,
+                    initial_sender,
+                    capacity_permit,
+                ),
             }
         }
     }
@@ -282,9 +359,10 @@ async fn run_after_running<C, Fut>(
     running: TaskPayload,
     execution: Fut,
     initial_sender: oneshot::Sender<SubmitObservation>,
+    capacity_permit: TaskCapacityPermit,
 ) where
     C: RegistryClock,
-    Fut: Future<Output = Result<ExecutionCompletion, SubmitFailure>>,
+    Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>>,
 {
     let running = match owner.publish_running(running) {
         Ok(running) => running,
@@ -292,6 +370,8 @@ async fn run_after_running<C, Fut>(
             let failure = SubmitFailure::new(ErrorCode::InternalError, error.to_string());
             let observation = owner.fail(failure);
             let _ = initial_sender.send(observation);
+            capacity_permit.retain_for_fail_stop();
+            let _ = execution.await;
             return;
         }
     };
@@ -299,10 +379,13 @@ async fn run_after_running<C, Fut>(
     let _ = initial_sender.send(SubmitObservation::Task(running));
     match execution.await {
         Ok(completed) => {
-            let _ = finish_owner(owner, completed);
+            if finish_owner(owner, completed).is_err() {
+                capacity_permit.retain_for_fail_stop();
+            }
         }
         Err(failure) => {
-            owner.fail(failure);
+            owner.fail(failure.submit);
+            capacity_permit.retain_for_fail_stop();
         }
     }
 }
@@ -311,8 +394,9 @@ async fn run_after_running<C, Fut>(
 fn finish_after_running<C>(
     owner: SubmitExecutionOwner<C>,
     running: TaskPayload,
-    completion: Result<ExecutionCompletion, SubmitFailure>,
+    completion: Result<ExecutionCompletion, ExecutionFailure>,
     initial_sender: oneshot::Sender<SubmitObservation>,
+    capacity_permit: TaskCapacityPermit,
 ) where
     C: RegistryClock,
 {
@@ -322,16 +406,20 @@ fn finish_after_running<C>(
             let failure = SubmitFailure::new(ErrorCode::InternalError, error.to_string());
             let observation = owner.fail(failure);
             let _ = initial_sender.send(observation);
+            capacity_permit.retain_for_fail_stop();
             return;
         }
     };
     let _ = initial_sender.send(SubmitObservation::Task(running));
     match completion {
         Ok(completed) => {
-            let _ = finish_owner(owner, completed);
+            if finish_owner(owner, completed).is_err() {
+                capacity_permit.retain_for_fail_stop();
+            }
         }
         Err(failure) => {
-            owner.fail(failure);
+            owner.fail(failure.submit);
+            capacity_permit.retain_for_fail_stop();
         }
     }
 }
@@ -339,22 +427,44 @@ fn finish_after_running<C>(
 #[cfg(any(target_os = "linux", test))]
 fn finish_without_running<C>(
     owner: SubmitExecutionOwner<C>,
-    completion: Result<ExecutionCompletion, SubmitFailure>,
+    completion: Result<ExecutionCompletion, ExecutionFailure>,
     initial_sender: oneshot::Sender<SubmitObservation>,
+    capacity_permit: TaskCapacityPermit,
 ) where
     C: RegistryClock,
 {
     let observation = match completion {
         Ok(completed) => match finish_owner(owner, completed) {
             Ok(finished) => SubmitObservation::Task(finished),
-            Err(error) => SubmitObservation::Failed(SubmitFailure::new(
-                ErrorCode::InternalError,
-                error.to_string(),
-            )),
+            Err(error) => {
+                capacity_permit.retain_for_fail_stop();
+                return send_initial_failure(initial_sender, error);
+            }
         },
-        Err(failure) => owner.fail(failure),
+        Err(failure) => {
+            if failure.capacity_reusable {
+                match owner.rollback_before_running(failure.submit) {
+                    Ok(observation) => observation,
+                    Err(error) => {
+                        capacity_permit.retain_for_fail_stop();
+                        return send_initial_failure(initial_sender, error);
+                    }
+                }
+            } else {
+                capacity_permit.retain_for_fail_stop();
+                owner.fail(failure.submit)
+            }
+        }
     };
     let _ = initial_sender.send(observation);
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn send_initial_failure(initial_sender: oneshot::Sender<SubmitObservation>, error: RegistryError) {
+    let _ = initial_sender.send(SubmitObservation::Failed(SubmitFailure::new(
+        ErrorCode::InternalError,
+        error.to_string(),
+    )));
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -518,6 +628,8 @@ mod tests {
     const TIMEOUT_TASK_ID: &str = "88888888-8888-8888-8888-888888888888";
     const EXEC_FAILURE_CLIENT_REQUEST_ID: &str = "99999999-9999-9999-9999-999999999999";
     const EXEC_FAILURE_TASK_ID: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const CAPACITY_CLIENT_REQUEST_ID: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    const CAPACITY_TASK_ID: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 
     fn payload() -> SubmitTaskPayload {
         SubmitTaskPayload {
@@ -544,6 +656,12 @@ mod tests {
         }
     }
 
+    fn payload_for(client_request_id: &str) -> SubmitTaskPayload {
+        let mut actual = payload();
+        actual.client_request_id = client_request_id.to_owned();
+        actual
+    }
+
     fn request(protocol_version: u32, request_id: &str, payload: SubmitTaskPayload) -> Request {
         Request::SubmitTask {
             protocol_version,
@@ -560,6 +678,20 @@ mod tests {
             started_monotonic: Instant::now(),
             cleanup_timeout: Duration::from_secs(5),
         }
+    }
+
+    fn task_capacity(maximum: u32) -> Arc<TaskCapacity> {
+        Arc::new(TaskCapacity::new(
+            TaskCapacitySettings::new(maximum).unwrap(),
+        ))
+    }
+
+    fn reusable_failure(failure: SubmitFailure) -> ExecutionFailure {
+        ExecutionFailure::new(failure, true)
+    }
+
+    fn retained_failure(failure: SubmitFailure) -> ExecutionFailure {
+        ExecutionFailure::new(failure, false)
     }
 
     fn running(task_id: &str) -> TaskPayload {
@@ -742,6 +874,7 @@ mod tests {
     async fn concurrent_identical_requests_use_the_coordinator_and_start_once() {
         const CALLS: usize = 12;
         let registry = TaskRegistry::new();
+        let capacity = task_capacity(1);
         let start = Arc::new(Barrier::new(CALLS));
         let release = Arc::new(Notify::new());
         let executor_starts = Arc::new(AtomicUsize::new(0));
@@ -749,6 +882,7 @@ mod tests {
 
         for index in 0..CALLS {
             let registry = registry.clone();
+            let capacity = Arc::clone(&capacity);
             let start = Arc::clone(&start);
             let release = Arc::clone(&release);
             let executor_starts = Arc::clone(&executor_starts);
@@ -756,6 +890,7 @@ mod tests {
                 start.wait().await;
                 coordinate_submit(
                     registry,
+                    capacity,
                     request(PROTOCOL_VERSION, REQUEST_ID, payload()),
                     metadata(&format!("33333333-3333-3333-3333-{index:012}")),
                     move |config, running_sender| async move {
@@ -799,6 +934,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn conflicting_coordinator_call_has_zero_executor_side_effects() {
         let registry = TaskRegistry::new();
+        let capacity = task_capacity(1);
         let start = Arc::new(Barrier::new(2));
         let counters = Arc::new([
             [
@@ -816,6 +952,7 @@ mod tests {
 
         for index in 0..2 {
             let registry = registry.clone();
+            let capacity = Arc::clone(&capacity);
             let start = Arc::clone(&start);
             let counters = Arc::clone(&counters);
             handles.push(tokio::spawn(async move {
@@ -826,6 +963,7 @@ mod tests {
                 start.wait().await;
                 let result = coordinate_submit(
                     registry,
+                    capacity,
                     request(PROTOCOL_VERSION, REQUEST_ID, candidate),
                     metadata(&format!("44444444-4444-4444-4444-{index:012}")),
                     {
@@ -877,18 +1015,20 @@ mod tests {
     #[tokio::test]
     async fn failure_before_running_rolls_back_and_allows_a_new_owner() {
         let registry = TaskRegistry::new();
+        let capacity = task_capacity(1);
         let executor_starts = Arc::new(AtomicUsize::new(0));
         let first_starts = Arc::clone(&executor_starts);
         let expected = SubmitFailure::new(ErrorCode::InternalError, "runner start failed");
         let first = coordinate_submit(
             registry.clone(),
+            Arc::clone(&capacity),
             request(PROTOCOL_VERSION, REQUEST_ID, payload()),
             metadata(TASK_ID),
             {
                 let expected = expected.clone();
                 move |_config, _running_sender| async move {
                     first_starts.fetch_add(1, Ordering::SeqCst);
-                    Err::<ExecutionCompletion, _>(expected)
+                    Err::<ExecutionCompletion, _>(reusable_failure(expected))
                 }
             },
         )
@@ -906,6 +1046,7 @@ mod tests {
         let retry_starts = Arc::clone(&executor_starts);
         let retry = coordinate_submit(
             registry.clone(),
+            capacity,
             request(PROTOCOL_VERSION, REQUEST_ID, changed),
             metadata(OTHER_TASK_ID),
             move |config, running_sender| async move {
@@ -925,6 +1066,207 @@ mod tests {
         assert_eq!(executor_starts.load(Ordering::SeqCst), 2);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn capacity_rejects_n_plus_one_without_side_effects_and_reuses_finished_slots() {
+        let registry = TaskRegistry::new();
+        let capacity = task_capacity(2);
+        let release = Arc::new(Notify::new());
+        let side_effects = Arc::new([
+            AtomicUsize::new(0),
+            AtomicUsize::new(0),
+            AtomicUsize::new(0),
+        ]);
+
+        for (client_request_id, task_id) in [
+            (CLIENT_REQUEST_ID, TASK_ID),
+            (NONZERO_CLIENT_REQUEST_ID, NONZERO_TASK_ID),
+        ] {
+            let release = Arc::clone(&release);
+            let side_effects = Arc::clone(&side_effects);
+            let outcome = coordinate_submit(
+                registry.clone(),
+                Arc::clone(&capacity),
+                request(PROTOCOL_VERSION, REQUEST_ID, payload_for(client_request_id)),
+                metadata(task_id),
+                move |config, running_sender| async move {
+                    for counter in side_effects.iter() {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                    running_sender.send(running(&config.task_id)).unwrap();
+                    release.notified().await;
+                    Ok(ExecutionCompletion::Test(finished(&config.task_id)))
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                outcome.observation,
+                SubmitObservation::Task(TaskPayload::Running { .. })
+            ));
+        }
+
+        let rejected_side_effects = Arc::clone(&side_effects);
+        let rejected = timeout(
+            TokioDuration::from_millis(100),
+            coordinate_submit(
+                registry.clone(),
+                Arc::clone(&capacity),
+                request(
+                    PROTOCOL_VERSION,
+                    REQUEST_ID,
+                    payload_for(TIMEOUT_CLIENT_REQUEST_ID),
+                ),
+                metadata(TIMEOUT_TASK_ID),
+                move |_config, _running_sender| async move {
+                    for counter in rejected_side_effects.iter() {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Ok(ExecutionCompletion::Test(finished(TIMEOUT_TASK_ID)))
+                },
+            ),
+        )
+        .await
+        .expect("capacity 거절은 대기하지 않아야 합니다")
+        .unwrap();
+
+        assert_eq!(
+            rejected.observation,
+            SubmitObservation::Failed(SubmitFailure::new(
+                ErrorCode::CapacityExhausted,
+                CAPACITY_EXHAUSTED_MESSAGE,
+            ))
+        );
+        assert_eq!(registry.snapshot(TIMEOUT_TASK_ID), Ok(None));
+        assert_eq!(
+            registry.snapshot_by_client_request_id(TIMEOUT_CLIENT_REQUEST_ID),
+            Ok(None)
+        );
+        for counter in side_effects.iter() {
+            assert_eq!(counter.load(Ordering::SeqCst), 2);
+        }
+
+        release.notify_waiters();
+        timeout(TokioDuration::from_secs(2), async {
+            loop {
+                let first_finished = matches!(
+                    registry.snapshot(TASK_ID).unwrap(),
+                    Some(TaskPayload::Finished { .. })
+                );
+                let second_finished = matches!(
+                    registry.snapshot(NONZERO_TASK_ID).unwrap(),
+                    Some(TaskPayload::Finished { .. })
+                );
+                if first_finished && second_finished {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("정리된 FINISHED 저장 뒤 슬롯이 반환돼야 합니다");
+
+        let retried_side_effects = Arc::clone(&side_effects);
+        let retried = coordinate_submit(
+            registry.clone(),
+            capacity,
+            request(
+                PROTOCOL_VERSION,
+                REQUEST_ID,
+                payload_for(TIMEOUT_CLIENT_REQUEST_ID),
+            ),
+            metadata(TIMEOUT_TASK_ID),
+            move |config, running_sender| async move {
+                for counter in retried_side_effects.iter() {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+                running_sender.send(running(&config.task_id)).unwrap();
+                Ok(ExecutionCompletion::Test(finished(&config.task_id)))
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            retried.observation,
+            SubmitObservation::Task(TaskPayload::Running { .. })
+        ));
+        for counter in side_effects.iter() {
+            assert_eq!(counter.load(Ordering::SeqCst), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_uncertainty_after_running_retains_the_slot() {
+        let registry = TaskRegistry::new();
+        let capacity = task_capacity(1);
+        let fail_now = Arc::new(Notify::new());
+        let executor_starts = Arc::new(AtomicUsize::new(0));
+        let first_starts = Arc::clone(&executor_starts);
+        let first_fail = Arc::clone(&fail_now);
+
+        let first = coordinate_submit(
+            registry.clone(),
+            Arc::clone(&capacity),
+            request(PROTOCOL_VERSION, REQUEST_ID, payload()),
+            metadata(TASK_ID),
+            move |config, running_sender| async move {
+                first_starts.fetch_add(1, Ordering::SeqCst);
+                running_sender.send(running(&config.task_id)).unwrap();
+                first_fail.notified().await;
+                Err(retained_failure(SubmitFailure::new(
+                    ErrorCode::InternalError,
+                    "cleanup uncertain",
+                )))
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            first.observation,
+            SubmitObservation::Task(TaskPayload::Running { .. })
+        ));
+
+        fail_now.notify_one();
+        timeout(TokioDuration::from_secs(1), async {
+            while capacity.retained_for_fail_stop() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("정리 불확실 슬롯이 fail-stop용으로 보존돼야 합니다");
+
+        let second_starts = Arc::clone(&executor_starts);
+        let second = coordinate_submit(
+            registry.clone(),
+            capacity,
+            request(
+                PROTOCOL_VERSION,
+                REQUEST_ID,
+                payload_for(NONZERO_CLIENT_REQUEST_ID),
+            ),
+            metadata(NONZERO_TASK_ID),
+            move |_config, _running_sender| async move {
+                second_starts.fetch_add(1, Ordering::SeqCst);
+                Ok(ExecutionCompletion::Test(finished(NONZERO_TASK_ID)))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            second.observation,
+            SubmitObservation::Failed(SubmitFailure::new(
+                ErrorCode::CapacityExhausted,
+                CAPACITY_EXHAUSTED_MESSAGE,
+            ))
+        );
+        assert_eq!(executor_starts.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            registry.snapshot(TASK_ID).unwrap(),
+            Some(TaskPayload::Running { .. })
+        ));
+        assert_eq!(registry.snapshot(NONZERO_TASK_ID), Ok(None));
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn actual_submit_coordinator_runs_once_and_finishes_after_cleanup() {
@@ -935,8 +1277,10 @@ mod tests {
 
         let environment = SystemProbe::from_environment().check().unwrap();
         let jobs_path = environment.report().delegated_root.join("jobs");
-        let coordinator = SubmitCoordinator::initialize(environment).unwrap();
-        let actual_payload = linux_payload(CLIENT_REQUEST_ID, "/bin/sleep", &["0.2"], 5_000);
+        let coordinator =
+            SubmitCoordinator::initialize(environment, TaskCapacitySettings::new(1).unwrap())
+                .unwrap();
+        let actual_payload = linux_payload(CLIENT_REQUEST_ID, "/bin/sleep", &["2"], 5_000);
 
         let started = Instant::now();
         let first = coordinator
@@ -956,6 +1300,31 @@ mod tests {
             first.observation,
             SubmitObservation::Task(TaskPayload::Running { .. })
         ));
+
+        let capacity_rejected = coordinator
+            .submit(
+                request(
+                    PROTOCOL_VERSION,
+                    REQUEST_ID,
+                    linux_payload(CAPACITY_CLIENT_REQUEST_ID, "/bin/true", &[], 5_000),
+                ),
+                metadata(CAPACITY_TASK_ID),
+                move || ("2026-07-24T10:00:01.500Z".to_owned(), Instant::now()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            capacity_rejected.observation,
+            SubmitObservation::Failed(SubmitFailure::new(
+                ErrorCode::CapacityExhausted,
+                CAPACITY_EXHAUSTED_MESSAGE,
+            ))
+        );
+        assert_eq!(coordinator.snapshot(CAPACITY_TASK_ID), Ok(None));
+        assert_eq!(
+            coordinator.snapshot_by_client_request_id(CAPACITY_CLIENT_REQUEST_ID),
+            Ok(None)
+        );
 
         let second = coordinator
             .submit(

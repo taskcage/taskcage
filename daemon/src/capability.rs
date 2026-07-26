@@ -1,8 +1,16 @@
 //! cgroup 사전 검사 결과를 protocol v1 capability와 submit 차단 조건으로 바꾼다.
 
+use crate::capacity::TaskCapacitySettings;
 use crate::preflight::{CapabilityProbe, PreflightError, VerifiedEnvironment};
 use crate::protocol::{CapabilitiesPayload, ErrorCode, MAX_FRAME_BYTES, PROTOCOL_VERSION};
 
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "UDS handler가 다음 단계에서 사전 검사 결과를 보관합니다"
+    )
+)]
 #[derive(Debug)]
 enum CgroupReadiness {
     Ready(VerifiedEnvironment),
@@ -12,21 +20,35 @@ enum CgroupReadiness {
 /// 같은 사전 검사 결과로 capability 응답과 submit 실행 여부를 결정한다.
 #[derive(Debug)]
 pub struct CapabilityAdapter {
-    max_concurrent_tasks: u32,
+    capacity_settings: TaskCapacitySettings,
     cgroup_readiness: CgroupReadiness,
 }
 
 impl CapabilityAdapter {
-    pub fn from_probe<P>(probe: &P, max_concurrent_tasks: u32) -> Self
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "UDS handler가 다음 단계에서 capability와 submit에 같은 설정을 전달합니다"
+        )
+    )]
+    pub(crate) fn from_probe<P>(probe: &P, capacity_settings: TaskCapacitySettings) -> Self
     where
         P: CapabilityProbe,
     {
-        Self::from_preflight(probe.check(), max_concurrent_tasks)
+        Self::from_preflight(probe.check(), capacity_settings)
     }
 
-    pub fn from_preflight(
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "UDS handler가 다음 단계에서 사전 검사 결과를 보관합니다"
+        )
+    )]
+    pub(crate) fn from_preflight(
         preflight: Result<VerifiedEnvironment, PreflightError>,
-        max_concurrent_tasks: u32,
+        capacity_settings: TaskCapacitySettings,
     ) -> Self {
         let cgroup_readiness = match preflight {
             Ok(environment) => CgroupReadiness::Ready(environment),
@@ -34,7 +56,7 @@ impl CapabilityAdapter {
         };
 
         Self {
-            max_concurrent_tasks,
+            capacity_settings,
             cgroup_readiness,
         }
     }
@@ -44,7 +66,7 @@ impl CapabilityAdapter {
             daemon_version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol_versions: vec![PROTOCOL_VERSION],
             max_frame_bytes: MAX_FRAME_BYTES as u32,
-            max_concurrent_tasks: self.max_concurrent_tasks,
+            max_concurrent_tasks: self.capacity_settings.max_concurrent_tasks(),
             cgroup_v2_ready: matches!(&self.cgroup_readiness, CgroupReadiness::Ready(_)),
         }
     }
@@ -70,10 +92,12 @@ impl CapabilityAdapter {
 mod tests {
     use std::cell::Cell;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use serde_json::Value;
 
     use super::*;
+    use crate::capacity::TaskCapacity;
 
     struct ReadyProbe;
 
@@ -96,7 +120,8 @@ mod tests {
 
     #[test]
     fn ready_probe_produces_only_the_public_capability_fields() {
-        let adapter = CapabilityAdapter::from_probe(&ReadyProbe, 7);
+        let adapter =
+            CapabilityAdapter::from_probe(&ReadyProbe, TaskCapacitySettings::new(7).unwrap());
 
         let payload = adapter.payload();
         let value = serde_json::to_value(&payload).unwrap();
@@ -132,7 +157,8 @@ mod tests {
 
     #[test]
     fn unavailable_probe_rejects_submit_before_any_side_effect() {
-        let adapter = CapabilityAdapter::from_probe(&UnavailableProbe, 7);
+        let adapter =
+            CapabilityAdapter::from_probe(&UnavailableProbe, TaskCapacitySettings::new(7).unwrap());
         let cgroup_creations = Cell::new(0);
         let target_starts = Cell::new(0);
 
@@ -153,5 +179,27 @@ mod tests {
             serde_json::to_string(&ErrorCode::EnvironmentUnavailable).unwrap(),
             r#""ENVIRONMENT_UNAVAILABLE""#
         );
+    }
+
+    #[test]
+    fn reported_maximum_and_actual_permits_share_one_setting() {
+        let settings = TaskCapacitySettings::new(3).unwrap();
+        let adapter = CapabilityAdapter::from_probe(&ReadyProbe, settings);
+        let capacity = Arc::new(TaskCapacity::new(settings));
+        let permits: Vec<_> = (0..3)
+            .map(|_| {
+                capacity
+                    .try_acquire()
+                    .expect("설정한 수만큼 슬롯이 있어야 합니다")
+            })
+            .collect();
+
+        assert_eq!(adapter.payload().max_concurrent_tasks, 3);
+        assert_eq!(
+            capacity.settings().max_concurrent_tasks(),
+            adapter.payload().max_concurrent_tasks
+        );
+        assert!(capacity.try_acquire().is_none());
+        drop(permits);
     }
 }
