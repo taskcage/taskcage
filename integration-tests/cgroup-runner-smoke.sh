@@ -218,3 +218,20 @@ unit_sequence=$((unit_sequence + 1))
   'handlers::tests::actual_handlers_connect_submit_and_get_task_to_the_runner' \
   --exact \
   --nocapture
+
+# cancelTask는 descendant 전체와 출력 reader를 정리한 뒤에만 CANCELLED를 반환한다.
+unit_sequence=$((unit_sequence + 1))
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-task-cancellation-$$-${unit_sequence}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --setenv=TASKCAGE_RUN_LINUX_CANCELLATION_INTEGRATION=1 \
+  --setenv=TASKCAGE_GHOST_BIN="${ghost_bin}" \
+  "${submit_test}" \
+  'handlers::tests::actual_cancel_handler_cleans_descendants_and_preserves_timeout_winner' \
+  --exact \
+  --nocapture

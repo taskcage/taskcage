@@ -15,8 +15,8 @@ use crate::capability::{CapabilityAdapter, CapabilityInitialization};
 use crate::capacity::TaskCapacitySettings;
 use crate::preflight::{PreflightError, VerifiedEnvironment};
 use crate::protocol::{
-    ErrorCode, ErrorPayload, PROTOCOL_VERSION, Request, Response, TaskAcceptedPayload, TaskPayload,
-    TaskState,
+    ErrorCode, ErrorPayload, PROTOCOL_VERSION, Request, Response, TaskAcceptedPayload,
+    TaskCancelledPayload, TaskPayload, TaskState, TerminationReason,
 };
 #[cfg(target_os = "linux")]
 use crate::submit::SubmitCoordinator;
@@ -45,7 +45,7 @@ impl SubmitContext {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RequestHandling {
     Handled(Response),
-    /// cancel handler가 추가될 때까지 유효한 요청을 wire 오류로 바꾸지 않는다.
+    /// 개별 typed helper가 다른 요청 종류를 wire 오류로 바꾸지 않는다.
     Unhandled(Request),
 }
 
@@ -58,6 +58,11 @@ pub(crate) trait ProtocolTaskCore {
     ) -> impl Future<Output = Result<SubmitOutcome, SubmitError>> + Send;
 
     fn snapshot(&self, task_id: &str) -> Result<Option<TaskPayload>, RegistryError>;
+
+    fn cancel(
+        &self,
+        task_id: &str,
+    ) -> impl Future<Output = Result<TaskPayload, RegistryError>> + Send;
 }
 
 #[cfg(target_os = "linux")]
@@ -79,6 +84,13 @@ impl ProtocolTaskCore for SubmitCoordinator {
 
     fn snapshot(&self, task_id: &str) -> Result<Option<TaskPayload>, RegistryError> {
         SubmitCoordinator::snapshot(self, task_id)
+    }
+
+    fn cancel(
+        &self,
+        task_id: &str,
+    ) -> impl Future<Output = Result<TaskPayload, RegistryError>> + Send {
+        SubmitCoordinator::cancel(self, task_id)
     }
 }
 
@@ -171,6 +183,25 @@ impl<C> ProtocolHandlers<C>
 where
     C: ProtocolTaskCore,
 {
+    /// 네 가지 protocol v1 요청을 모두 내부 typed handler 하나로 닫는다.
+    pub(crate) async fn handle_request<F>(&self, request: Request, make_context: F) -> Response
+    where
+        F: FnOnce() -> SubmitContext,
+    {
+        let handling = match request {
+            request @ Request::GetCapabilities { .. } => self.handle_get_capabilities(request),
+            request @ Request::SubmitTask { .. } => self.handle_submit(request, make_context).await,
+            request @ Request::GetTask { .. } => self.handle_get_task(request),
+            request @ Request::CancelTask { .. } => self.handle_cancel(request).await,
+        };
+        match handling {
+            RequestHandling::Handled(response) => response,
+            RequestHandling::Unhandled(_) => {
+                unreachable!("exhaustive dispatcher가 올바른 typed handler를 선택했습니다")
+            }
+        }
+    }
+
     pub(crate) async fn handle_submit<F>(
         &self,
         request: Request,
@@ -245,6 +276,53 @@ where
                 request_id,
                 ErrorCode::TaskNotFound,
                 format!("task was not found: {}", payload.task_id),
+            ),
+            Err(error) => registry_error_response(request_id, error),
+        })
+    }
+
+    pub(crate) async fn handle_cancel(&self, request: Request) -> RequestHandling {
+        let Request::CancelTask {
+            protocol_version,
+            request_id,
+            payload,
+        } = request
+        else {
+            return RequestHandling::Unhandled(request);
+        };
+
+        if let Some(error) = validate_envelope(protocol_version, &request_id) {
+            return RequestHandling::Handled(error);
+        }
+        let result = match &self.state {
+            HandlerState::Ready { core, .. } => core.cancel(&payload.task_id).await,
+            HandlerState::Unavailable { .. } => {
+                Err(RegistryError::TaskNotFound(payload.task_id.clone()))
+            }
+        };
+        RequestHandling::Handled(match result {
+            Ok(TaskPayload::Finished {
+                task_id,
+                termination_reason: TerminationReason::Cancelled,
+                ..
+            }) => Response::TaskCancelled {
+                protocol_version: PROTOCOL_VERSION,
+                request_id,
+                payload: TaskCancelledPayload {
+                    task_id,
+                    state: TaskState::Finished,
+                    termination_reason: TerminationReason::Cancelled,
+                },
+            },
+            Ok(TaskPayload::Finished { task_id, .. }) => error_response(
+                request_id,
+                ErrorCode::TaskAlreadyFinished,
+                format!("task is already finished: {task_id}"),
+            ),
+            Ok(TaskPayload::Running { task_id, .. }) => error_response(
+                request_id,
+                ErrorCode::InternalError,
+                format!("cancel completed without a FINISHED result: {task_id}"),
             ),
             Err(error) => registry_error_response(request_id, error),
         })
@@ -378,10 +456,23 @@ mod tests {
     const EXEC_FAILURE_CLIENT_REQUEST_ID: &str = "88888888-8888-8888-8888-888888888888";
     #[cfg(target_os = "linux")]
     const EXEC_FAILURE_TASK_ID: &str = "99999999-9999-9999-9999-999999999999";
+    #[cfg(target_os = "linux")]
+    const CANCEL_CLIENT_REQUEST_ID: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    #[cfg(target_os = "linux")]
+    const CANCEL_TASK_ID: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    #[cfg(target_os = "linux")]
+    const CANCEL_REQUEST_ID: &str = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+    #[cfg(target_os = "linux")]
+    const SECOND_CANCEL_REQUEST_ID: &str = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+    #[cfg(target_os = "linux")]
+    const TIMEOUT_CLIENT_REQUEST_ID: &str = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+    #[cfg(target_os = "linux")]
+    const TIMEOUT_TASK_ID: &str = "ffffffff-ffff-ffff-ffff-ffffffffffff";
 
     #[derive(Debug, Default)]
     struct FakeCore {
         submit_result: Mutex<Option<Result<SubmitOutcome, SubmitError>>>,
+        cancel_result: Mutex<Option<Result<TaskPayload, RegistryError>>>,
         snapshots: Mutex<HashMap<String, TaskPayload>>,
         submit_calls: AtomicUsize,
     }
@@ -397,6 +488,13 @@ mod tests {
         fn with_snapshots(snapshots: impl IntoIterator<Item = (String, TaskPayload)>) -> Self {
             Self {
                 snapshots: Mutex::new(snapshots.into_iter().collect()),
+                ..Self::default()
+            }
+        }
+
+        fn with_cancel(result: Result<TaskPayload, RegistryError>) -> Self {
+            Self {
+                cancel_result: Mutex::new(Some(result)),
                 ..Self::default()
             }
         }
@@ -422,6 +520,19 @@ mod tests {
 
         fn snapshot(&self, task_id: &str) -> Result<Option<TaskPayload>, RegistryError> {
             Ok(self.snapshots.lock().unwrap().get(task_id).cloned())
+        }
+
+        fn cancel(
+            &self,
+            _task_id: &str,
+        ) -> impl Future<Output = Result<TaskPayload, RegistryError>> + Send {
+            let result = self
+                .cancel_result
+                .lock()
+                .unwrap()
+                .take()
+                .expect("가짜 cancel 결과가 필요합니다");
+            async move { result }
         }
     }
 
@@ -477,6 +588,71 @@ mod tests {
                 stderr_tail_max_bytes: 1,
             },
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_payload(
+        client_request_id: &str,
+        program: &str,
+        args: &[String],
+        wall_time_limit_ms: u64,
+    ) -> SubmitTaskPayload {
+        let mut payload = submit_payload();
+        payload.client_request_id = client_request_id.to_owned();
+        payload.command.program = program.to_owned();
+        payload.command.args = args.to_vec();
+        payload.command.working_directory = "/".to_owned();
+        payload.limits.cpu_max.quota_micros = 50_000;
+        payload.limits.cpu_max.period_micros = 100_000;
+        payload.limits.memory_max_bytes = 64 * 1024 * 1024;
+        payload.limits.pids_max = 8;
+        payload.limits.wall_time_limit_ms = wall_time_limit_ms;
+        payload.output.stdout_tail_max_bytes = 1_024;
+        payload.output.stderr_tail_max_bytes = 1_024;
+        payload
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn wait_for_ghost_processes(path: &std::path::Path) -> (u32, u32) {
+        timeout(TokioDuration::from_secs(5), async {
+            loop {
+                if let Ok(contents) = fs::read_to_string(path) {
+                    let mut child = None;
+                    let mut grandchild = None;
+                    for line in contents.lines() {
+                        if let Some(value) = line.strip_prefix("child=") {
+                            child = value.parse().ok();
+                        }
+                        if let Some(value) = line.strip_prefix("grandchild=") {
+                            grandchild = value.parse().ok();
+                        }
+                    }
+                    if let (Some(child), Some(grandchild)) = (child, grandchild) {
+                        return (child, grandchild);
+                    }
+                }
+                tokio::time::sleep(TokioDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("ghost child와 grandchild가 준비돼야 합니다")
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn assert_process_gone(pid: u32) {
+        timeout(TokioDuration::from_secs(2), async {
+            loop {
+                let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+                if result == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                {
+                    return;
+                }
+                tokio::time::sleep(TokioDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("취소 뒤 PID {pid}가 남아 있습니다"));
     }
 
     fn submit_request(request_id: &str, payload: SubmitTaskPayload) -> Request {
@@ -541,6 +717,24 @@ mod tests {
                 stderr_truncated: false,
             },
         }
+    }
+
+    fn cancelled_for(task_id: &str) -> TaskPayload {
+        let mut payload = finished_for(task_id);
+        let TaskPayload::Finished {
+            termination_reason,
+            process,
+            ..
+        } = &mut payload
+        else {
+            unreachable!()
+        };
+        *termination_reason = TerminationReason::Cancelled;
+        *process = ProcessResult {
+            exit_code: None,
+            signal: Some("SIGKILL".to_owned()),
+        };
+        payload
     }
 
     fn handled(handling: RequestHandling) -> Response {
@@ -819,29 +1013,163 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn cancel_request_stays_unhandled_for_the_next_typed_handler() {
-        let handlers = ready_handlers(FakeCore::default(), 1);
-        let request = Request::CancelTask {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: REQUEST_ID.to_owned(),
-            payload: TaskIdPayload {
-                task_id: TASK_ID.to_owned(),
-            },
-        };
+    #[tokio::test]
+    async fn cancel_returns_task_cancelled_only_for_a_stored_cancelled_result() {
+        let handlers = ready_handlers(FakeCore::with_cancel(Ok(cancelled_for(TASK_ID))), 1);
+        let response = handled(
+            handlers
+                .handle_cancel(Request::CancelTask {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: REQUEST_ID.to_owned(),
+                    payload: TaskIdPayload {
+                        task_id: TASK_ID.to_owned(),
+                    },
+                })
+                .await,
+        );
+        assert_eq!(
+            response,
+            Response::TaskCancelled {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: REQUEST_ID.to_owned(),
+                payload: TaskCancelledPayload {
+                    task_id: TASK_ID.to_owned(),
+                    state: TaskState::Finished,
+                    termination_reason: TerminationReason::Cancelled,
+                },
+            }
+        );
 
-        assert_eq!(
-            handlers.handle_get_capabilities(request.clone()),
-            RequestHandling::Unhandled(request.clone())
+        let finished = ready_handlers(FakeCore::with_cancel(Ok(finished_for(TASK_ID))), 1);
+        let response = handled(
+            finished
+                .handle_cancel(Request::CancelTask {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: OTHER_REQUEST_ID.to_owned(),
+                    payload: TaskIdPayload {
+                        task_id: TASK_ID.to_owned(),
+                    },
+                })
+                .await,
         );
-        assert_eq!(
-            handlers.handle_get_task(request.clone()),
-            RequestHandling::Unhandled(request)
-        );
+        assert_error(response, ErrorCode::TaskAlreadyFinished, false);
     }
 
     #[tokio::test]
-    async fn submit_handler_does_not_consume_cancel_request_or_make_context() {
+    async fn cancel_maps_missing_and_finished_registry_errors_without_calling_context() {
+        for (error, expected) in [
+            (
+                RegistryError::TaskNotFound(TASK_ID.to_owned()),
+                ErrorCode::TaskNotFound,
+            ),
+            (
+                RegistryError::TaskAlreadyFinished(TASK_ID.to_owned()),
+                ErrorCode::TaskAlreadyFinished,
+            ),
+        ] {
+            let handlers = ready_handlers(FakeCore::with_cancel(Err(error)), 1);
+            let response = handlers
+                .handle_request(
+                    Request::CancelTask {
+                        protocol_version: PROTOCOL_VERSION,
+                        request_id: REQUEST_ID.to_owned(),
+                        payload: TaskIdPayload {
+                            task_id: TASK_ID.to_owned(),
+                        },
+                    },
+                    || panic!("cancel은 submit 문맥을 만들면 안 됩니다"),
+                )
+                .await;
+            assert_error(response, expected, false);
+        }
+    }
+
+    #[tokio::test]
+    async fn exhaustive_dispatcher_handles_all_four_protocol_requests() {
+        let core = FakeCore {
+            submit_result: Mutex::new(Some(Ok(SubmitOutcome {
+                request_id: REQUEST_ID.to_owned(),
+                task_id: TASK_ID.to_owned(),
+                effective_limits: submit_payload().limits.clone(),
+                observation: SubmitObservation::Task(running()),
+            }))),
+            cancel_result: Mutex::new(Some(Ok(cancelled_for(TASK_ID)))),
+            snapshots: Mutex::new(HashMap::from([(TASK_ID.to_owned(), running())])),
+            submit_calls: AtomicUsize::new(0),
+        };
+        let handlers = ready_handlers(core, 1);
+
+        assert!(matches!(
+            handlers
+                .handle_request(
+                    Request::GetCapabilities {
+                        protocol_version: PROTOCOL_VERSION,
+                        request_id: REQUEST_ID.to_owned(),
+                        payload: EmptyPayload {},
+                    },
+                    || panic!("capability는 submit 문맥을 만들면 안 됩니다"),
+                )
+                .await,
+            Response::Capabilities { .. }
+        ));
+        assert!(matches!(
+            handlers
+                .handle_request(submit_request(REQUEST_ID, submit_payload()), context,)
+                .await,
+            Response::TaskAccepted { .. }
+        ));
+        assert!(matches!(
+            handlers
+                .handle_request(
+                    Request::GetTask {
+                        protocol_version: PROTOCOL_VERSION,
+                        request_id: REQUEST_ID.to_owned(),
+                        payload: TaskIdPayload {
+                            task_id: TASK_ID.to_owned(),
+                        },
+                    },
+                    || panic!("getTask는 submit 문맥을 만들면 안 됩니다"),
+                )
+                .await,
+            Response::Task { .. }
+        ));
+        assert!(matches!(
+            handlers
+                .handle_request(
+                    Request::CancelTask {
+                        protocol_version: PROTOCOL_VERSION,
+                        request_id: REQUEST_ID.to_owned(),
+                        payload: TaskIdPayload {
+                            task_id: TASK_ID.to_owned(),
+                        },
+                    },
+                    || panic!("cancel은 submit 문맥을 만들면 안 됩니다"),
+                )
+                .await,
+            Response::TaskCancelled { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_rejects_invalid_cancel_version_before_calling_core() {
+        let handlers = ready_handlers(FakeCore::with_cancel(Ok(cancelled_for(TASK_ID))), 1);
+        let response = handlers
+            .handle_request(
+                Request::CancelTask {
+                    protocol_version: 2,
+                    request_id: REQUEST_ID.to_owned(),
+                    payload: TaskIdPayload {
+                        task_id: TASK_ID.to_owned(),
+                    },
+                },
+                || panic!("cancel은 submit 문맥을 만들면 안 됩니다"),
+            )
+            .await;
+        assert_error(response, ErrorCode::UnsupportedProtocolVersion, false);
+    }
+
+    #[tokio::test]
+    async fn typed_submit_handler_still_leaves_cancel_for_the_dispatcher() {
         let handlers = ready_handlers(FakeCore::default(), 1);
         let request = Request::CancelTask {
             protocol_version: PROTOCOL_VERSION,
@@ -990,6 +1318,209 @@ mod tests {
         assert_eq!(
             remaining_jobs, 0,
             "handler 실행 뒤 작업 cgroup이 남아 있습니다"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn actual_cancel_handler_cleans_descendants_and_preserves_timeout_winner() {
+        if std::env::var_os("TASKCAGE_RUN_LINUX_CANCELLATION_INTEGRATION").is_none() {
+            eprintln!("NOT EXECUTED: 실제 cgroup v2 위임 환경이 필요합니다");
+            return;
+        }
+
+        let ghost_program = std::env::var("TASKCAGE_GHOST_BIN").unwrap();
+        let ready_path =
+            std::env::temp_dir().join(format!("taskcage-cancel-ready-{}", std::process::id()));
+        let _ = fs::remove_file(&ready_path);
+
+        let environment = SystemProbe::from_environment().check().unwrap();
+        let jobs_path = environment.report().delegated_root.join("jobs");
+        let handlers =
+            ProtocolHandlers::initialize(Ok(environment), TaskCapacitySettings::new(1).unwrap())
+                .unwrap();
+
+        let ghost_payload = linux_payload(
+            CANCEL_CLIENT_REQUEST_ID,
+            &ghost_program,
+            &[
+                "--hold-parent".to_owned(),
+                ready_path.to_string_lossy().into_owned(),
+            ],
+            30_000,
+        );
+        let submitted = handlers
+            .handle_request(submit_request(REQUEST_ID, ghost_payload), || {
+                context_for(CANCEL_TASK_ID)
+            })
+            .await;
+        assert!(matches!(
+            submitted,
+            Response::TaskAccepted {
+                payload: TaskAcceptedPayload {
+                    state: TaskState::Running,
+                    ..
+                },
+                ..
+            }
+        ));
+
+        let (child_pid, grandchild_pid) = wait_for_ghost_processes(&ready_path).await;
+        let first_cancel = handlers.handle_request(
+            Request::CancelTask {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: CANCEL_REQUEST_ID.to_owned(),
+                payload: TaskIdPayload {
+                    task_id: CANCEL_TASK_ID.to_owned(),
+                },
+            },
+            || panic!("cancel은 submit 문맥을 만들면 안 됩니다"),
+        );
+        let second_cancel = handlers.handle_request(
+            Request::CancelTask {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: SECOND_CANCEL_REQUEST_ID.to_owned(),
+                payload: TaskIdPayload {
+                    task_id: CANCEL_TASK_ID.to_owned(),
+                },
+            },
+            || panic!("cancel은 submit 문맥을 만들면 안 됩니다"),
+        );
+        let (first_cancel, second_cancel) = timeout(TokioDuration::from_secs(5), async {
+            tokio::join!(first_cancel, second_cancel)
+        })
+        .await
+        .expect("동시 cancel은 전체 정리 뒤 응답해야 합니다");
+        for response in [first_cancel, second_cancel] {
+            assert!(matches!(
+                response,
+                Response::TaskCancelled {
+                    payload: TaskCancelledPayload {
+                        state: TaskState::Finished,
+                        termination_reason: TerminationReason::Cancelled,
+                        ..
+                    },
+                    ..
+                }
+            ));
+        }
+
+        let cancelled = handlers
+            .handle_request(
+                Request::GetTask {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: OTHER_REQUEST_ID.to_owned(),
+                    payload: TaskIdPayload {
+                        task_id: CANCEL_TASK_ID.to_owned(),
+                    },
+                },
+                || panic!("getTask는 submit 문맥을 만들면 안 됩니다"),
+            )
+            .await;
+        assert!(matches!(
+            cancelled,
+            Response::Task {
+                payload: TaskPayload::Finished {
+                    termination_reason: TerminationReason::Cancelled,
+                    process: ProcessResult {
+                        exit_code: None,
+                        signal: Some(_),
+                    },
+                    ..
+                },
+                ..
+            }
+        ));
+        assert_process_gone(child_pid).await;
+        assert_process_gone(grandchild_pid).await;
+        fs::remove_file(&ready_path).unwrap();
+
+        let late_cancel = handlers
+            .handle_request(
+                Request::CancelTask {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: CANCEL_REQUEST_ID.to_owned(),
+                    payload: TaskIdPayload {
+                        task_id: CANCEL_TASK_ID.to_owned(),
+                    },
+                },
+                || panic!("cancel은 submit 문맥을 만들면 안 됩니다"),
+            )
+            .await;
+        assert_error(late_cancel, ErrorCode::TaskAlreadyFinished, false);
+
+        let missing_cancel = handlers
+            .handle_request(
+                Request::CancelTask {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: CANCEL_REQUEST_ID.to_owned(),
+                    payload: TaskIdPayload {
+                        task_id: "abababab-abab-abab-abab-abababababab".to_owned(),
+                    },
+                },
+                || panic!("cancel은 submit 문맥을 만들면 안 됩니다"),
+            )
+            .await;
+        assert_error(missing_cancel, ErrorCode::TaskNotFound, false);
+
+        let timeout_payload = linux_payload(
+            TIMEOUT_CLIENT_REQUEST_ID,
+            "/bin/sleep",
+            &["30".to_owned()],
+            100,
+        );
+        let timeout_submit = handlers
+            .handle_request(submit_request(REQUEST_ID, timeout_payload), || {
+                context_for(TIMEOUT_TASK_ID)
+            })
+            .await;
+        assert!(matches!(timeout_submit, Response::TaskAccepted { .. }));
+        tokio::time::sleep(TokioDuration::from_millis(200)).await;
+        let timeout_cancel = handlers
+            .handle_request(
+                Request::CancelTask {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: CANCEL_REQUEST_ID.to_owned(),
+                    payload: TaskIdPayload {
+                        task_id: TIMEOUT_TASK_ID.to_owned(),
+                    },
+                },
+                || panic!("cancel은 submit 문맥을 만들면 안 됩니다"),
+            )
+            .await;
+        assert_error(timeout_cancel, ErrorCode::TaskAlreadyFinished, false);
+
+        let timed_out = handlers
+            .handle_request(
+                Request::GetTask {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: OTHER_REQUEST_ID.to_owned(),
+                    payload: TaskIdPayload {
+                        task_id: TIMEOUT_TASK_ID.to_owned(),
+                    },
+                },
+                || panic!("getTask는 submit 문맥을 만들면 안 됩니다"),
+            )
+            .await;
+        assert!(matches!(
+            timed_out,
+            Response::Task {
+                payload: TaskPayload::Finished {
+                    termination_reason: TerminationReason::TimedOut,
+                    ..
+                },
+                ..
+            }
+        ));
+
+        let remaining_jobs = fs::read_dir(jobs_path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("job-"))
+            .count();
+        assert_eq!(
+            remaining_jobs, 0,
+            "cancel과 timeout 뒤 작업 cgroup이 남아 있습니다"
         );
     }
 }

@@ -54,6 +54,8 @@ Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 
     작업 cgroup을 남기지 않으며, 기존 멱등 요청은 같은 작업을 공유한다.
 14. typed protocol handler가 capability, 정상 submit, `getTask`와 exec 시작 실패를 기존 실행
     코어에 연결하며 정리 뒤 작업 cgroup을 남기지 않는다.
+15. 동시에 들어온 `cancelTask`가 한 번의 whole-cgroup 종료를 공유하고, child·grandchild와 출력
+    reader 정리 뒤 `CANCELLED`를 저장하며 timeout이 먼저 기록된 경우 `TIMED_OUT`을 유지한다.
 
 실행 방법:
 

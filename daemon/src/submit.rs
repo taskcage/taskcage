@@ -22,6 +22,8 @@ use self::registry::{RegistryClock, SubmitExecutionOwner, SubmitReservation, Tas
 #[cfg(any(target_os = "linux", test))]
 pub(crate) use self::registry::{RegistryError, SubmitFailure, SubmitObservation};
 #[cfg(any(target_os = "linux", test))]
+use crate::cancellation::{CancellationRuntime, RunningCancellation, cancellation_channel};
+#[cfg(any(target_os = "linux", test))]
 use crate::capacity::{TaskCapacity, TaskCapacityPermit, TaskCapacitySettings};
 #[cfg(target_os = "linux")]
 use crate::preflight::VerifiedEnvironment;
@@ -188,7 +190,7 @@ impl SubmitCoordinator {
             request_id,
             validated,
             metadata,
-            move |config, running_sender| async move {
+            move |config, running_sender, cancellation| async move {
                 runner
                     .run_task(
                         RunnerPermit::new(),
@@ -202,6 +204,7 @@ impl SubmitCoordinator {
                             budget: config.budget,
                         },
                         running_sender,
+                        cancellation,
                         finished_time,
                     )
                     .await
@@ -219,6 +222,11 @@ impl SubmitCoordinator {
             },
         )
         .await
+    }
+
+    pub(crate) async fn cancel(&self, task_id: &str) -> Result<TaskPayload, RegistryError> {
+        let finished = self.registry.request_cancel(task_id)?.wait().await;
+        Ok(finished)
     }
 
     #[cfg_attr(
@@ -262,7 +270,9 @@ async fn coordinate_submit<C, E, Fut>(
 ) -> Result<SubmitOutcome, SubmitError>
 where
     C: RegistryClock + Send + 'static,
-    E: FnOnce(SubmitExecutionConfig, oneshot::Sender<TaskPayload>) -> Fut + Send + 'static,
+    E: FnOnce(SubmitExecutionConfig, oneshot::Sender<TaskPayload>, CancellationRuntime) -> Fut
+        + Send
+        + 'static,
     Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>> + Send + 'static,
 {
     // 검증은 Registry 예약과 Runner side effect보다 먼저 끝낸다.
@@ -284,7 +294,9 @@ async fn coordinate_validated_submit<C, E, Fut>(
 ) -> Result<SubmitOutcome, SubmitError>
 where
     C: RegistryClock + Send + 'static,
-    E: FnOnce(SubmitExecutionConfig, oneshot::Sender<TaskPayload>) -> Fut + Send + 'static,
+    E: FnOnce(SubmitExecutionConfig, oneshot::Sender<TaskPayload>, CancellationRuntime) -> Fut
+        + Send
+        + 'static,
     Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>> + Send + 'static,
 {
     let effective_limits = validated.payload().limits.clone();
@@ -350,11 +362,12 @@ async fn run_owner<C, E, Fut>(
     capacity_permit: TaskCapacityPermit,
 ) where
     C: RegistryClock,
-    E: FnOnce(SubmitExecutionConfig, oneshot::Sender<TaskPayload>) -> Fut,
+    E: FnOnce(SubmitExecutionConfig, oneshot::Sender<TaskPayload>, CancellationRuntime) -> Fut,
     Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>>,
 {
     let (running_sender, mut running_receiver) = oneshot::channel();
-    let execution = executor(config, running_sender);
+    let (cancellation_runtime, running_cancellation) = cancellation_channel();
+    let execution = executor(config, running_sender, cancellation_runtime);
     tokio::pin!(execution);
     tokio::select! {
         biased;
@@ -364,6 +377,7 @@ async fn run_owner<C, E, Fut>(
                     owner,
                     running,
                     execution,
+                    running_cancellation,
                     initial_sender,
                     capacity_permit,
                 ).await,
@@ -380,6 +394,7 @@ async fn run_owner<C, E, Fut>(
                 Ok(running) => finish_after_running(
                     owner,
                     running,
+                    running_cancellation,
                     completion,
                     initial_sender,
                     capacity_permit,
@@ -400,13 +415,14 @@ async fn run_after_running<C, Fut>(
     owner: SubmitExecutionOwner<C>,
     running: TaskPayload,
     execution: Fut,
+    cancellation: RunningCancellation,
     initial_sender: oneshot::Sender<SubmitObservation>,
     capacity_permit: TaskCapacityPermit,
 ) where
     C: RegistryClock,
     Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>>,
 {
-    let running = match owner.publish_running(running) {
+    let running = match owner.publish_running_with_cancellation(running, cancellation) {
         Ok(running) => running,
         Err(error) => {
             let failure = SubmitFailure::new(ErrorCode::InternalError, error.to_string());
@@ -436,13 +452,14 @@ async fn run_after_running<C, Fut>(
 fn finish_after_running<C>(
     owner: SubmitExecutionOwner<C>,
     running: TaskPayload,
+    cancellation: RunningCancellation,
     completion: Result<ExecutionCompletion, ExecutionFailure>,
     initial_sender: oneshot::Sender<SubmitObservation>,
     capacity_permit: TaskCapacityPermit,
 ) where
     C: RegistryClock,
 {
-    let running = match owner.publish_running(running) {
+    let running = match owner.publish_running_with_cancellation(running, cancellation) {
         Ok(running) => running,
         Err(error) => {
             let failure = SubmitFailure::new(ErrorCode::InternalError, error.to_string());
@@ -771,6 +788,18 @@ mod tests {
         }
     }
 
+    fn cancelled(task_id: &str) -> TaskPayload {
+        let mut payload = finished(task_id);
+        let TaskPayload::Finished {
+            termination_reason, ..
+        } = &mut payload
+        else {
+            unreachable!()
+        };
+        *termination_reason = TerminationReason::Cancelled;
+        payload
+    }
+
     #[cfg(target_os = "linux")]
     fn linux_payload(
         client_request_id: &str,
@@ -935,7 +964,7 @@ mod tests {
                     capacity,
                     request(PROTOCOL_VERSION, REQUEST_ID, payload()),
                     metadata(&format!("33333333-3333-3333-3333-{index:012}")),
-                    move |config, running_sender| async move {
+                    move |config, running_sender, _cancellation| async move {
                         executor_starts.fetch_add(1, Ordering::SeqCst);
                         running_sender.send(running(&config.task_id)).unwrap();
                         release.notified().await;
@@ -1010,7 +1039,7 @@ mod tests {
                     metadata(&format!("44444444-4444-4444-4444-{index:012}")),
                     {
                         let counters = Arc::clone(&counters);
-                        move |config, running_sender| async move {
+                        move |config, running_sender, _cancellation| async move {
                             for counter in &counters[index] {
                                 counter.fetch_add(1, Ordering::SeqCst);
                             }
@@ -1068,7 +1097,7 @@ mod tests {
             metadata(TASK_ID),
             {
                 let expected = expected.clone();
-                move |_config, _running_sender| async move {
+                move |_config, _running_sender, _cancellation| async move {
                     first_starts.fetch_add(1, Ordering::SeqCst);
                     Err::<ExecutionCompletion, _>(reusable_failure(expected))
                 }
@@ -1091,7 +1120,7 @@ mod tests {
             capacity,
             request(PROTOCOL_VERSION, REQUEST_ID, changed),
             metadata(OTHER_TASK_ID),
-            move |config, running_sender| async move {
+            move |config, running_sender, _cancellation| async move {
                 retry_starts.fetch_add(1, Ordering::SeqCst);
                 running_sender.send(running(&config.task_id)).unwrap();
                 Ok(ExecutionCompletion::Test(finished(&config.task_id)))
@@ -1130,7 +1159,7 @@ mod tests {
                 Arc::clone(&capacity),
                 request(PROTOCOL_VERSION, REQUEST_ID, payload_for(client_request_id)),
                 metadata(task_id),
-                move |config, running_sender| async move {
+                move |config, running_sender, _cancellation| async move {
                     for counter in side_effects.iter() {
                         counter.fetch_add(1, Ordering::SeqCst);
                     }
@@ -1159,7 +1188,7 @@ mod tests {
                     payload_for(TIMEOUT_CLIENT_REQUEST_ID),
                 ),
                 metadata(TIMEOUT_TASK_ID),
-                move |_config, _running_sender| async move {
+                move |_config, _running_sender, _cancellation| async move {
                     for counter in rejected_side_effects.iter() {
                         counter.fetch_add(1, Ordering::SeqCst);
                     }
@@ -1217,7 +1246,7 @@ mod tests {
                 payload_for(TIMEOUT_CLIENT_REQUEST_ID),
             ),
             metadata(TIMEOUT_TASK_ID),
-            move |config, running_sender| async move {
+            move |config, running_sender, _cancellation| async move {
                 for counter in retried_side_effects.iter() {
                     counter.fetch_add(1, Ordering::SeqCst);
                 }
@@ -1236,6 +1265,117 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancellation_keeps_capacity_until_cleanup_and_finished_storage() {
+        let registry = TaskRegistry::new();
+        let capacity = task_capacity(1);
+        let cleanup_started = Arc::new(Notify::new());
+        let cleanup_release = Arc::new(Notify::new());
+        let cancel_actions = Arc::new(AtomicUsize::new(0));
+
+        let first = coordinate_submit(
+            registry.clone(),
+            Arc::clone(&capacity),
+            request(PROTOCOL_VERSION, REQUEST_ID, payload()),
+            metadata(TASK_ID),
+            {
+                let cleanup_started = Arc::clone(&cleanup_started);
+                let cleanup_release = Arc::clone(&cleanup_release);
+                let cancel_actions = Arc::clone(&cancel_actions);
+                move |config, running_sender, cancellation| async move {
+                    running_sender.send(running(&config.task_id)).unwrap();
+                    cancellation.cancelled().await;
+                    cancel_actions.fetch_add(1, Ordering::SeqCst);
+                    cleanup_started.notify_one();
+                    cleanup_release.notified().await;
+                    Ok(ExecutionCompletion::Test(cancelled(&config.task_id)))
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            first.observation,
+            SubmitObservation::Task(TaskPayload::Running { .. })
+        ));
+
+        let first_cancel = registry.request_cancel(TASK_ID).unwrap();
+        let second_cancel = registry.request_cancel(TASK_ID).unwrap();
+        timeout(TokioDuration::from_secs(1), cleanup_started.notified())
+            .await
+            .expect("cancel trigger 뒤 내부 cleanup이 시작돼야 합니다");
+        assert_eq!(cancel_actions.load(Ordering::SeqCst), 1);
+
+        let mut first_cancel_wait = Box::pin(first_cancel.wait());
+        assert!(
+            timeout(TokioDuration::from_millis(10), &mut first_cancel_wait)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            registry.snapshot(TASK_ID).unwrap(),
+            Some(TaskPayload::Running { .. })
+        ));
+
+        let rejected_starts = Arc::new(AtomicUsize::new(0));
+        let rejected_counter = Arc::clone(&rejected_starts);
+        let rejected = coordinate_submit(
+            registry.clone(),
+            Arc::clone(&capacity),
+            request(
+                PROTOCOL_VERSION,
+                REQUEST_ID,
+                payload_for(NONZERO_CLIENT_REQUEST_ID),
+            ),
+            metadata(NONZERO_TASK_ID),
+            move |_config, _running_sender, _cancellation| async move {
+                rejected_counter.fetch_add(1, Ordering::SeqCst);
+                Ok(ExecutionCompletion::Test(finished(NONZERO_TASK_ID)))
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rejected.observation,
+            SubmitObservation::Failed(SubmitFailure {
+                code: ErrorCode::CapacityExhausted,
+                ..
+            })
+        ));
+        assert_eq!(rejected_starts.load(Ordering::SeqCst), 0);
+
+        cleanup_release.notify_one();
+        let expected = cancelled(TASK_ID);
+        assert_eq!(first_cancel_wait.await, expected);
+        assert_eq!(second_cancel.wait().await, expected);
+        assert_eq!(registry.snapshot(TASK_ID), Ok(Some(expected)));
+
+        let reused_starts = Arc::new(AtomicUsize::new(0));
+        let reused_counter = Arc::clone(&reused_starts);
+        let reused = coordinate_submit(
+            registry,
+            capacity,
+            request(
+                PROTOCOL_VERSION,
+                REQUEST_ID,
+                payload_for(NONZERO_CLIENT_REQUEST_ID),
+            ),
+            metadata(NONZERO_TASK_ID),
+            move |config, running_sender, _cancellation| async move {
+                reused_counter.fetch_add(1, Ordering::SeqCst);
+                running_sender.send(running(&config.task_id)).unwrap();
+                Ok(ExecutionCompletion::Test(finished(&config.task_id)))
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            reused.observation,
+            SubmitObservation::Task(TaskPayload::Running { .. })
+        ));
+        assert_eq!(reused_starts.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn cleanup_uncertainty_after_running_retains_the_slot() {
         let registry = TaskRegistry::new();
@@ -1250,7 +1390,7 @@ mod tests {
             Arc::clone(&capacity),
             request(PROTOCOL_VERSION, REQUEST_ID, payload()),
             metadata(TASK_ID),
-            move |config, running_sender| async move {
+            move |config, running_sender, _cancellation| async move {
                 first_starts.fetch_add(1, Ordering::SeqCst);
                 running_sender.send(running(&config.task_id)).unwrap();
                 first_fail.notified().await;
@@ -1286,7 +1426,7 @@ mod tests {
                 payload_for(NONZERO_CLIENT_REQUEST_ID),
             ),
             metadata(NONZERO_TASK_ID),
-            move |_config, _running_sender| async move {
+            move |_config, _running_sender, _cancellation| async move {
                 second_starts.fetch_add(1, Ordering::SeqCst);
                 Ok(ExecutionCompletion::Test(finished(NONZERO_TASK_ID)))
             },
