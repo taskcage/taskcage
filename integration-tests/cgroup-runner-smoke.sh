@@ -15,9 +15,11 @@ if ! command -v systemd-run >/dev/null 2>&1; then
 fi
 
 taskcage_systemd=(systemd-run)
+taskcage_systemctl=(systemctl)
 if [[ "${EUID}" -ne 0 ]]; then
   if sudo -n true >/dev/null 2>&1; then
     taskcage_systemd=(sudo -n systemd-run)
+    taskcage_systemctl=(sudo -n systemctl)
   else
     echo "SKIP: 일회성 위임 서비스를 만들 권한이 없습니다" >&2
     exit 77
@@ -292,3 +294,43 @@ unit_sequence=$((unit_sequence + 1))
   'submit::tests::actual_fail_stop_cleans_all_active_cgroups_and_blocks_new_execution' \
   --exact \
   --nocapture
+
+# 실제 serve process가 UDS 요청 중 fail-stop에 들어가 deadline 안에 0이 아닌 코드로 종료한다.
+process_e2e_test=""
+while IFS= read -r artifact; do
+  if [[ "${artifact}" == *'"target":{"kind":["test"]'* &&
+        "${artifact}" == *'"name":"fail_stop_process_e2e"'* &&
+        "${artifact}" == *'"executable":"'* ]]; then
+    process_e2e_test="${artifact#*\"executable\":\"}"
+    process_e2e_test="${process_e2e_test%%\"*}"
+  fi
+done < <(cargo test -p taskcaged --test fail_stop_process_e2e --no-run --message-format=json)
+if [[ -z "${process_e2e_test}" || ! -x "${process_e2e_test}" ]]; then
+  echo "FAIL: 실제 fail-stop process E2E 실행 파일을 찾지 못했습니다" >&2
+  exit 1
+fi
+
+unit_sequence=$((unit_sequence + 1))
+fail_stop_process_unit="taskcage-fail-stop-process-$$-${unit_sequence}"
+cleanup_fail_stop_process_unit() {
+  "${taskcage_systemctl[@]}" stop "${fail_stop_process_unit}" >/dev/null 2>&1 || true
+  "${taskcage_systemctl[@]}" reset-failed "${fail_stop_process_unit}" >/dev/null 2>&1 || true
+}
+trap cleanup_fail_stop_process_unit EXIT INT TERM
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="${fail_stop_process_unit}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --property=TimeoutStopSec=10s \
+  --setenv=TASKCAGE_RUN_FAIL_STOP_PROCESS_E2E=1 \
+  --setenv=TASKCAGE_FAIL_STOP_PROCESS_BIN="${taskcage_bin}" \
+  --setenv=TASKCAGE_FAIL_STOP_PROCESS_GHOST_BIN="${ghost_bin}" \
+  "${process_e2e_test}" \
+  'actual_serve_process_exits_nonzero_after_fail_stop_deadline' \
+  --exact \
+  --nocapture
+trap - EXIT INT TERM
