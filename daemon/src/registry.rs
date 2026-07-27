@@ -130,6 +130,14 @@ where
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn poison_state_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.state.lock().unwrap();
+            panic!("injected registry state failure");
+        }));
+    }
+
     /// clientRequestId 확인과 새 예약 등록을 같은 잠금 구간에서 결정한다.
     #[cfg(test)]
     pub(crate) fn reserve_submit(

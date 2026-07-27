@@ -1126,3 +1126,163 @@ fn run_failed(
         cleanup_errors,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::capacity::{TaskCapacity, TaskCapacitySettings};
+
+    use super::*;
+
+    #[derive(Clone, Copy, Debug)]
+    enum InjectedCleanupFault {
+        PendingCloneAbort,
+        ExecGateCleanup,
+        CgroupKill,
+        DirectChildReap,
+        PopulatedZero,
+        Statistics,
+        CgroupRemoval,
+        StdoutReader,
+        StderrReader,
+    }
+
+    impl InjectedCleanupFault {
+        fn stage(self) -> &'static str {
+            match self {
+                Self::PendingCloneAbort => "pending clone3 child 중단",
+                Self::ExecGateCleanup => "exec gate 실패 뒤 정리",
+                Self::CgroupKill => "cgroup.kill",
+                Self::DirectChildReap => "direct child 회수",
+                Self::PopulatedZero => "populated 0 확인",
+                Self::Statistics => "통계 수집",
+                Self::CgroupRemoval => "작업 cgroup 제거",
+                Self::StdoutReader => "stdout reader 회수",
+                Self::StderrReader => "stderr reader 회수",
+            }
+        }
+
+        fn uncleaned(self) -> Vec<&'static str> {
+            match self {
+                Self::PendingCloneAbort => vec!["pending child", "작업 cgroup"],
+                Self::ExecGateCleanup => vec!["exec gate child", "작업 cgroup"],
+                Self::CgroupKill | Self::PopulatedZero | Self::Statistics | Self::CgroupRemoval => {
+                    vec!["작업 cgroup"]
+                }
+                Self::DirectChildReap => vec!["direct child"],
+                Self::StdoutReader => vec!["stdout reader"],
+                Self::StderrReader => vec!["stderr reader"],
+            }
+        }
+    }
+
+    const CLEANUP_FAULTS: [InjectedCleanupFault; 9] = [
+        InjectedCleanupFault::PendingCloneAbort,
+        InjectedCleanupFault::ExecGateCleanup,
+        InjectedCleanupFault::CgroupKill,
+        InjectedCleanupFault::DirectChildReap,
+        InjectedCleanupFault::PopulatedZero,
+        InjectedCleanupFault::Statistics,
+        InjectedCleanupFault::CgroupRemoval,
+        InjectedCleanupFault::StdoutReader,
+        InjectedCleanupFault::StderrReader,
+    ];
+
+    #[test]
+    fn injected_runtime_cleanup_faults_fail_stop_without_finished_or_permit_reuse() {
+        for fault in CLEANUP_FAULTS {
+            let clock_calls = Arc::new(AtomicUsize::new(0));
+            let base = Instant::now();
+            let clock = {
+                let clock_calls = Arc::clone(&clock_calls);
+                Arc::new(move || {
+                    clock_calls.fetch_add(1, Ordering::SeqCst);
+                    base
+                })
+            };
+            let fail_stop = FailStopCoordinator::with_test_clock(
+                crate::fail_stop::FailStopSettings::new(Duration::from_secs(5)).unwrap(),
+                clock,
+            );
+            let active = fail_stop
+                .try_admit()
+                .unwrap()
+                .register(format!("task-{fault:?}"))
+                .unwrap();
+            let capacity = Arc::new(TaskCapacity::new(TaskCapacitySettings::new(1).unwrap()));
+            let permit = capacity.try_acquire().unwrap();
+            let lifecycle = SingleTaskLifecycle::running(
+                format!("task-{fault:?}"),
+                "submitted".to_owned(),
+                "started".to_owned(),
+                base,
+            );
+            let failure = uncertain_failure(
+                &format!("task-{fault:?}"),
+                fault.stage(),
+                "injected secret command and environment",
+                fault.uncleaned(),
+            );
+
+            assert!(failure.block_future_runs);
+            assert!(!failure.cleanup_complete);
+            assert!(!failure.report.stage.contains("secret"));
+            assert!(
+                failure
+                    .report
+                    .uncleaned
+                    .iter()
+                    .all(|value| !value.contains("secret"))
+            );
+            let deadline = fail_stop.activate(failure.report);
+            let repeated = fail_stop.activate(CleanupFailureReport::new(
+                "later-task",
+                "later failure",
+                vec!["작업 cgroup"],
+                "retry",
+            ));
+            permit.retain_for_fail_stop();
+            drop(active);
+
+            assert_eq!(deadline, repeated);
+            assert_eq!(clock_calls.load(Ordering::SeqCst), 1);
+            assert!(fail_stop.try_admit().is_none());
+            assert_eq!(fail_stop.active_count(), 1);
+            assert_eq!(capacity.retained_for_fail_stop(), 1);
+            assert!(capacity.try_acquire().is_none());
+            assert!(matches!(lifecycle.snapshot(), TaskPayload::Running { .. }));
+        }
+    }
+
+    #[test]
+    fn concurrent_cleanup_faults_keep_every_unresolved_execution_active() {
+        let fail_stop = FailStopCoordinator::new(
+            crate::fail_stop::FailStopSettings::new(Duration::from_secs(5)).unwrap(),
+        );
+        let active = (0..3)
+            .map(|index| {
+                fail_stop
+                    .try_admit()
+                    .unwrap()
+                    .register(format!("task-{index}"))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        for (index, fault) in CLEANUP_FAULTS.into_iter().take(3).enumerate() {
+            let failure = uncertain_failure(
+                &format!("task-{index}"),
+                fault.stage(),
+                "injected",
+                fault.uncleaned(),
+            );
+            fail_stop.activate(failure.report);
+        }
+        drop(active);
+
+        assert!(fail_stop.is_fail_stopping());
+        assert_eq!(fail_stop.active_count(), 3);
+        assert!(fail_stop.try_admit().is_none());
+    }
+}

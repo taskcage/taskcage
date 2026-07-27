@@ -974,6 +974,7 @@ mod tests {
         events: Vec<String>,
         deadlines: Vec<Instant>,
         fail_kill: Option<usize>,
+        fail_populated: Option<usize>,
         fail_remove: Option<usize>,
         finished: bool,
     }
@@ -989,6 +990,7 @@ mod tests {
                 events: Vec::new(),
                 deadlines: Vec::new(),
                 fail_kill: None,
+                fail_populated: None,
                 fail_remove: None,
                 finished: false,
             }
@@ -1033,7 +1035,15 @@ mod tests {
         ) -> Result<bool, StartupCgroupError> {
             self.record(deadline);
             self.events.push(format!("poll:{index}"));
-            Ok(self.populated[index].pop_front().unwrap_or(false))
+            if self.fail_populated == Some(index) {
+                Err(StartupCgroupError::new(
+                    "잔여 작업 빈 상태 확인",
+                    self.paths[index].clone(),
+                    "injected",
+                ))
+            } else {
+                Ok(self.populated[index].pop_front().unwrap_or(false))
+            }
         }
 
         fn remove_job(
@@ -1109,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn kill_and_remove_failures_stop_before_startup_can_continue() {
+    fn injected_recovery_failures_stop_before_startup_can_continue() {
         let deadline = MonotonicDeadline::from_now(Duration::from_secs(1)).unwrap();
         let mut kill_failure = FakeBackend::new(vec![vec![false]]);
         kill_failure.fail_kill = Some(0);
@@ -1121,6 +1131,17 @@ mod tests {
         );
         assert!(!kill_failure.finished);
 
+        let mut populated_failure = FakeBackend::new(vec![vec![true]]);
+        populated_failure.fail_populated = Some(0);
+        assert_eq!(
+            recover_with_backend(&mut populated_failure, deadline)
+                .unwrap_err()
+                .stage(),
+            "잔여 작업 빈 상태 확인"
+        );
+        assert_eq!(populated_failure.events, ["kill:0", "poll:0"]);
+        assert!(!populated_failure.finished);
+
         let mut remove_failure = FakeBackend::new(vec![vec![false]]);
         remove_failure.fail_remove = Some(0);
         assert_eq!(
@@ -1129,6 +1150,7 @@ mod tests {
                 .stage(),
             "잔여 작업 cgroup 제거"
         );
+        assert_eq!(remove_failure.events, ["kill:0", "poll:0", "remove:0"]);
         assert!(!remove_failure.finished);
     }
 

@@ -847,6 +847,25 @@ mod tests {
     use std::num::NonZeroUsize;
 
     #[test]
+    fn injected_stdout_and_stderr_reader_failures_stay_independent() {
+        for stream in ["stdout", "stderr"] {
+            let error = join_output_reader(
+                stream,
+                Ok(Err(io::Error::other(format!("injected {stream} failure")))),
+            )
+            .unwrap_err();
+
+            assert!(matches!(
+                error,
+                ExecutorError::OutputRead {
+                    stream: actual,
+                    ..
+                } if actual == stream
+            ));
+        }
+    }
+
+    #[test]
     fn prepares_shell_free_argv() {
         let command = PreparedCommand::new(
             vec![OsString::from("/bin/echo"), OsString::from("hello world")],
