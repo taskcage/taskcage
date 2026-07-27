@@ -541,7 +541,7 @@ fn new_task_id() -> String {
 mod tests {
     use std::collections::BTreeMap;
     use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::{Notify, oneshot};
@@ -559,6 +559,7 @@ mod tests {
 
     const FIRST_REQUEST_ID: &str = "11111111-1111-1111-1111-111111111111";
     const SECOND_REQUEST_ID: &str = "22222222-2222-2222-2222-222222222222";
+    static TEST_SOCKET_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     struct TestSocketPath {
         directory: PathBuf,
@@ -567,19 +568,15 @@ mod tests {
 
     impl TestSocketPath {
         fn new(label: &str) -> Self {
+            let sequence = TEST_SOCKET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             let directory = std::env::current_dir()
                 .unwrap()
                 .join("target")
-                .join("taskcage-server-tests")
-                .join(format!(
-                    "taskcage-uds-{label}-{}-{}",
-                    std::process::id(),
-                    new_task_id()
-                ));
+                .join(format!("tcs-{label}-{}-{sequence}", std::process::id()));
             std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
             std::fs::create_dir(&directory).unwrap();
             std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let socket = directory.join("taskcaged.sock");
+            let socket = directory.join("s");
             Self { directory, socket }
         }
 
@@ -742,7 +739,9 @@ mod tests {
             let mut stream = connect(&first_path).await;
             exchange(&mut stream, &capability_request(FIRST_REQUEST_ID)).await
         });
-        first_started.notified().await;
+        timeout(Duration::from_secs(2), first_started.notified())
+            .await
+            .expect("첫 연결 handler가 제한 시간 안에 시작돼야 합니다");
         let mut second = connect(&path.socket).await;
         let second_response = timeout(
             Duration::from_millis(200),
@@ -782,7 +781,9 @@ mod tests {
         write_json_frame(&mut stream, &capability_request(FIRST_REQUEST_ID))
             .await
             .unwrap();
-        started.notified().await;
+        timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("연결 handler가 제한 시간 안에 시작돼야 합니다");
 
         shutdown.send(()).unwrap();
         timeout(Duration::from_secs(1), server)
@@ -878,7 +879,9 @@ mod tests {
         write_json_frame(&mut stream, &capability_request(FIRST_REQUEST_ID))
             .await
             .unwrap();
-        started.notified().await;
+        timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("fail-stop 대상 handler가 제한 시간 안에 시작돼야 합니다");
         fail_stop.activate(crate::fail_stop::CleanupFailureReport::new(
             "task",
             "시험 정리",

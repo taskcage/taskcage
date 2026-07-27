@@ -633,7 +633,6 @@ fn c_string(value: &OsStr, path: &Path) -> Result<CString, StartupError> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
     use std::fs;
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
     use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
@@ -844,11 +843,17 @@ mod tests {
     fn preserves_a_socket_replaced_before_unlink() {
         let runtime = TestRuntime::new("replaced");
         drop(bind_owner_only(&runtime.socket));
-        let replacement = RefCell::new(None);
+        let original_inode = fs::symlink_metadata(&runtime.socket).unwrap().ino();
+        let replacement_path = runtime.directory.join("replacement.sock");
+        let replacement = bind_owner_only(&replacement_path);
+        assert_ne!(
+            original_inode,
+            fs::symlink_metadata(&replacement_path).unwrap().ino()
+        );
 
         let error = StartupOwnership::acquire_with_hook(&runtime.socket, || {
             fs::remove_file(&runtime.socket).unwrap();
-            *replacement.borrow_mut() = Some(bind_owner_only(&runtime.socket));
+            fs::rename(&replacement_path, &runtime.socket).unwrap();
         })
         .unwrap_err();
 
@@ -859,7 +864,7 @@ mod tests {
                 .file_type()
                 .is_socket()
         );
-        drop(replacement.into_inner());
+        drop(replacement);
     }
 
     #[test]
