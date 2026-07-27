@@ -188,6 +188,13 @@ if [[ -z "${submit_test}" || ! -x "${submit_test}" ]]; then
   echo "FAIL: submit 조정 경로와 Runner 통합 시험 실행 파일을 찾지 못했습니다" >&2
   exit 1
 fi
+
+# 비정상 종료는 lock FD를 해제하고, 다음 시작은 같은 UID·0600·동일 inode의 stale socket만 제거한다.
+"${submit_test}" \
+  'startup::tests::abrupt_exit_releases_lock_and_leaves_only_a_recoverable_socket' \
+  --exact \
+  --nocapture
+
 unit_sequence=$((unit_sequence + 1))
 "${taskcage_systemd[@]}" \
   --quiet \

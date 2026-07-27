@@ -19,6 +19,7 @@ use crate::deadline::MonotonicDeadline;
 use crate::fail_stop::FailStopCoordinator;
 use crate::handlers::{ProtocolHandlers, SubmitContext};
 use crate::protocol::{ErrorCode, ErrorPayload, PROTOCOL_VERSION, Request, Response};
+use crate::startup::StartupOwnership;
 use crate::submit::{SubmitCoordinator, SubmitMetadata};
 
 type DispatchFuture = Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
@@ -46,6 +47,10 @@ pub(crate) enum ServerError {
     },
     #[error("daemon socket mode가 0600이 아닙니다: {path}, mode={mode:o}")]
     UnexpectedMode { path: PathBuf, mode: u32 },
+    #[error("daemon socket owner가 현재 daemon과 다릅니다: {path}, owner={owner}")]
+    UnexpectedOwner { path: PathBuf, owner: u32 },
+    #[error("daemon socket의 link count가 1이 아닙니다: {path}, links={links}")]
+    UnexpectedLinks { path: PathBuf, links: u64 },
     #[error("daemon socket 연결을 받지 못했습니다")]
     Accept(#[source] io::Error),
     #[error("daemon shutdown 신호를 처리하지 못했습니다")]
@@ -116,12 +121,26 @@ impl BoundSocket {
             return Err(ServerError::OwnershipChanged(path.to_path_buf()));
         }
         let identity = SocketIdentity::from_metadata(&current);
+        let owner = current.uid();
+        if owner != unsafe { libc::geteuid() } {
+            return Err(ServerError::UnexpectedOwner {
+                path: path.to_path_buf(),
+                owner,
+            });
+        }
         let mode = current.mode() & 0o777;
         if mode != 0o600 {
             let _ = remove_owned_path(path, identity);
             return Err(ServerError::UnexpectedMode {
                 path: path.to_path_buf(),
                 mode,
+            });
+        }
+        let links = current.nlink();
+        if links != 1 {
+            return Err(ServerError::UnexpectedLinks {
+                path: path.to_path_buf(),
+                links,
             });
         }
 
@@ -177,7 +196,7 @@ fn remove_owned_path(path: &Path, identity: SocketIdentity) -> Result<(), Server
 }
 
 pub(crate) async fn serve_protocol_until<S>(
-    socket_path: &Path,
+    startup: StartupOwnership,
     cleanup_timeout: Duration,
     handlers: Arc<ProtocolHandlers<SubmitCoordinator>>,
     shutdown: S,
@@ -196,7 +215,7 @@ where
     });
 
     let result = serve_socket_until_fail_stop(
-        socket_path,
+        &startup,
         dispatch,
         shutdown,
         Arc::clone(handlers.fail_stop()),
@@ -206,19 +225,21 @@ where
     if !matches!(result, Err(ServerError::FailStop { .. })) {
         handlers.wait_idle().await;
     }
+    // 실행 coordinator의 마지막 cleanup이 끝난 뒤에만 daemon 생존 기간 lock을 해제한다.
+    drop(startup);
     result
 }
 
 #[cfg(test)]
 async fn serve_socket_until<S>(
-    socket_path: &Path,
+    startup: StartupOwnership,
     dispatch: Dispatch,
     shutdown: S,
 ) -> Result<(), ServerError>
 where
     S: Future<Output = io::Result<()>>,
 {
-    let mut socket = BoundSocket::bind(socket_path)?;
+    let mut socket = BoundSocket::bind(startup.socket_path())?;
     let listener = socket.take_listener();
     let result = accept_until_shutdown(listener, dispatch, shutdown).await;
     let cleanup = socket.cleanup();
@@ -226,7 +247,7 @@ where
 }
 
 async fn serve_socket_until_fail_stop<S>(
-    socket_path: &Path,
+    startup: &StartupOwnership,
     dispatch: Dispatch,
     shutdown: S,
     fail_stop: Arc<FailStopCoordinator>,
@@ -234,7 +255,7 @@ async fn serve_socket_until_fail_stop<S>(
 where
     S: Future<Output = io::Result<()>>,
 {
-    let mut socket = BoundSocket::bind(socket_path)?;
+    let mut socket = BoundSocket::bind(startup.socket_path())?;
     let listener = socket.take_listener();
     let result = accept_until_shutdown_or_fail_stop(listener, dispatch, shutdown, fail_stop).await;
     let cleanup = socket.cleanup();
@@ -519,7 +540,7 @@ fn new_task_id() -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -546,14 +567,24 @@ mod tests {
 
     impl TestSocketPath {
         fn new(label: &str) -> Self {
-            let directory = std::env::temp_dir().join(format!(
-                "taskcage-uds-{label}-{}-{}",
-                std::process::id(),
-                new_task_id()
-            ));
+            let directory = std::env::current_dir()
+                .unwrap()
+                .join("target")
+                .join("taskcage-server-tests")
+                .join(format!(
+                    "taskcage-uds-{label}-{}-{}",
+                    std::process::id(),
+                    new_task_id()
+                ));
+            std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
             std::fs::create_dir(&directory).unwrap();
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
             let socket = directory.join("taskcaged.sock");
             Self { directory, socket }
+        }
+
+        fn lock(&self) -> PathBuf {
+            self.directory.join(".taskcaged.lock")
         }
     }
 
@@ -566,6 +597,7 @@ mod tests {
                     let _ = std::fs::remove_file(&self.socket);
                 }
             }
+            let _ = std::fs::remove_file(self.lock());
             let _ = std::fs::remove_dir(&self.directory);
         }
     }
@@ -599,8 +631,9 @@ mod tests {
         tokio::task::JoinHandle<Result<(), ServerError>>,
     ) {
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let startup = StartupOwnership::acquire(&path).unwrap();
         let server = tokio::spawn(async move {
-            serve_socket_until(&path, dispatch, async move {
+            serve_socket_until(startup, dispatch, async move {
                 let _ = shutdown_receiver.await;
                 Ok(())
             })
@@ -614,9 +647,10 @@ mod tests {
         dispatch: Dispatch,
         fail_stop: Arc<FailStopCoordinator>,
     ) -> tokio::task::JoinHandle<Result<(), ServerError>> {
+        let startup = StartupOwnership::acquire(&path).unwrap();
         tokio::spawn(async move {
             serve_socket_until_fail_stop(
-                &path,
+                &startup,
                 dispatch,
                 std::future::pending::<io::Result<()>>(),
                 fail_stop,
@@ -967,10 +1001,16 @@ mod tests {
         let _stream = connect(&path.socket).await;
         let mode = std::fs::symlink_metadata(&path.socket).unwrap().mode() & 0o777;
         assert_eq!(mode, 0o600);
+        assert!(matches!(
+            StartupOwnership::acquire(&path.socket),
+            Err(crate::startup::StartupError::LockHeld(_))
+        ));
 
         shutdown.send(()).unwrap();
         server.await.unwrap().unwrap();
         assert!(!path.socket.exists());
+        assert!(path.lock().exists());
+        StartupOwnership::acquire(&path.socket).unwrap();
     }
 
     #[test]
@@ -1091,6 +1131,9 @@ mod tests {
             return;
         }
 
+        let path = TestSocketPath::new("actual-cgroup");
+        let startup = StartupOwnership::acquire(&path.socket).unwrap();
+        assert!(!path.socket.exists());
         let environment = SystemProbe::from_environment().check().unwrap();
         let jobs_path = environment.report().delegated_root.join("jobs");
         let handlers = Arc::new(
@@ -1103,13 +1146,11 @@ mod tests {
             )
             .unwrap(),
         );
-        let path = TestSocketPath::new("actual-cgroup");
-        let server_path = path.socket.clone();
         let server_handlers = Arc::clone(&handlers);
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         let server = tokio::spawn(async move {
             serve_protocol_until(
-                &server_path,
+                startup,
                 Duration::from_secs(5),
                 server_handlers,
                 async move {
