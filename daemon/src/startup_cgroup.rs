@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::cgroup::{CgroupPaths, validate_job_id};
+use crate::cgroup::{CgroupPaths, StartupCgroupPlacement, validate_job_id};
 use crate::deadline::MonotonicDeadline;
 
 const CGROUP2_SUPER_MAGIC: libc::c_long = 0x6367_7270;
@@ -51,11 +51,20 @@ impl StartupCgroupError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StartupRecoveryReport {
     pub(crate) removed_jobs: usize,
+    pub(crate) placement: StartupCgroupPlacement,
 }
 
 /// stale socket 소유권을 얻은 뒤, preflight보다 먼저 호출해야 한다.
 pub(crate) fn recover_from_environment(
     timeout: Duration,
+) -> Result<StartupRecoveryReport, StartupCgroupError> {
+    let configured = std::env::var_os("TASKCAGE_CGROUP_ROOT").map(PathBuf::from);
+    recover(timeout, configured)
+}
+
+fn recover(
+    timeout: Duration,
+    configured: Option<PathBuf>,
 ) -> Result<StartupRecoveryReport, StartupCgroupError> {
     let deadline = MonotonicDeadline::from_now(timeout).ok_or_else(|| {
         StartupCgroupError::new(
@@ -64,7 +73,7 @@ pub(crate) fn recover_from_environment(
             "0이거나 표현할 수 없는 시간 예산입니다",
         )
     })?;
-    let mut backend = SystemRecovery::prepare(deadline)?;
+    let mut backend = SystemRecovery::prepare(deadline, configured)?;
     recover_with_backend(&mut backend, deadline)
 }
 
@@ -86,7 +95,10 @@ trait RecoveryBackend {
         index: usize,
         deadline: MonotonicDeadline,
     ) -> Result<(), StartupCgroupError>;
-    fn finish_structure(&mut self, deadline: MonotonicDeadline) -> Result<(), StartupCgroupError>;
+    fn finish_structure(
+        &mut self,
+        deadline: MonotonicDeadline,
+    ) -> Result<StartupCgroupPlacement, StartupCgroupError>;
 
     fn pause(&mut self, duration: Duration) {
         thread::sleep(duration);
@@ -136,10 +148,11 @@ fn recover_with_backend<B: RecoveryBackend>(
         backend.remove_job(index, deadline)?;
     }
     ensure_time(deadline, "manager와 jobs 구조 정리", Path::new("jobs"))?;
-    backend.finish_structure(deadline)?;
+    let placement = backend.finish_structure(deadline)?;
 
     Ok(StartupRecoveryReport {
         removed_jobs: job_count,
+        placement,
     })
 }
 
@@ -216,11 +229,14 @@ struct SystemRecovery {
     manager: Option<Directory>,
     jobs: Option<Directory>,
     job_entries: Vec<Directory>,
+    placement: StartupCgroupPlacement,
 }
 
 impl SystemRecovery {
-    fn prepare(deadline: MonotonicDeadline) -> Result<Self, StartupCgroupError> {
-        let configured = std::env::var_os("TASKCAGE_CGROUP_ROOT").map(PathBuf::from);
+    fn prepare(
+        deadline: MonotonicDeadline,
+        configured: Option<PathBuf>,
+    ) -> Result<Self, StartupCgroupError> {
         let configured_descriptor = match configured.as_deref() {
             Some(path) => Some(open_absolute_directory(path, "위임 root 열기")?),
             None => None,
@@ -230,15 +246,16 @@ impl SystemRecovery {
             "cgroup 위임 경로 확인",
             configured.as_deref().unwrap_or(Path::new("/sys/fs/cgroup")),
         )?;
-        let paths = CgroupPaths::resolve(configured.as_deref()).map_err(|error| {
-            StartupCgroupError::new(
-                "cgroup 위임 경로 확인",
-                configured
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup")),
-                error.to_string(),
-            )
-        })?;
+        let (paths, placement) =
+            CgroupPaths::resolve_startup(configured.as_deref()).map_err(|error| {
+                StartupCgroupError::new(
+                    "cgroup 위임 경로 확인",
+                    configured
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup")),
+                    error.to_string(),
+                )
+            })?;
         let root_descriptor = match configured_descriptor {
             Some(descriptor) => {
                 let canonical = open_absolute_directory(paths.root(), "위임 root 신원 확인")?;
@@ -282,7 +299,20 @@ impl SystemRecovery {
 
         if let Some(manager) = &manager {
             validate_leaf_cgroup(manager, "manager cgroup 구조 확인")?;
-            require_direct_processes_empty(manager, "manager 직접 프로세스 확인")?;
+            match placement {
+                StartupCgroupPlacement::DelegatedRoot => {
+                    require_direct_processes_empty(manager, "manager 직접 프로세스 확인")?;
+                }
+                StartupCgroupPlacement::ExistingManager => {
+                    require_only_current_process(manager, "manager 직접 프로세스 확인")?;
+                }
+            }
+        } else if placement == StartupCgroupPlacement::ExistingManager {
+            return Err(StartupCgroupError::new(
+                "manager cgroup 구조 확인",
+                paths.manager(),
+                "현재 membership에 해당하는 manager cgroup을 찾지 못했습니다",
+            ));
         }
 
         let mut job_entries = Vec::new();
@@ -326,6 +356,7 @@ impl SystemRecovery {
             manager,
             jobs,
             job_entries,
+            placement,
         })
     }
 
@@ -398,19 +429,33 @@ impl RecoveryBackend for SystemRecovery {
         remove_identical_directory(jobs, &self.job_entries[index])
     }
 
-    fn finish_structure(&mut self, deadline: MonotonicDeadline) -> Result<(), StartupCgroupError> {
+    fn finish_structure(
+        &mut self,
+        deadline: MonotonicDeadline,
+    ) -> Result<StartupCgroupPlacement, StartupCgroupError> {
         if let Some(jobs) = &self.jobs {
             ensure_time(deadline, "jobs cgroup 제거", &jobs.path)?;
             self.remove_parent(jobs)?;
         }
-        if let Some(manager) = &self.manager {
-            ensure_time(deadline, "manager cgroup 제거", &manager.path)?;
-            self.remove_parent(manager)?;
+        if self.placement == StartupCgroupPlacement::DelegatedRoot {
+            if let Some(manager) = &self.manager {
+                ensure_time(deadline, "manager cgroup 제거", &manager.path)?;
+                self.remove_parent(manager)?;
+            }
+        } else if let Some(manager) = &self.manager {
+            ensure_time(deadline, "manager cgroup 재사용 확인", &manager.path)?;
+            validate_leaf_cgroup(manager, "manager cgroup 재사용 확인")?;
+            require_only_current_process(manager, "manager 직접 프로세스 재확인")?;
         }
         ensure_time(deadline, "위임 root 최종 확인", &self.root.path)?;
         let entries = read_directory(&self.root)?;
         validate_regular_entries(&self.root, &entries)?;
-        reject_unexpected_directories(&self.root, &entries, &[])
+        let allowed = match self.placement {
+            StartupCgroupPlacement::DelegatedRoot => &[][..],
+            StartupCgroupPlacement::ExistingManager => &["manager"][..],
+        };
+        reject_unexpected_directories(&self.root, &entries, allowed)?;
+        Ok(self.placement)
     }
 }
 
@@ -700,6 +745,24 @@ fn require_direct_processes_empty(
             stage,
             directory.path.join("cgroup.procs"),
             "TaskCage job 바깥의 직접 프로세스가 있어 종료할 수 없습니다",
+        ))
+    }
+}
+
+fn require_only_current_process(
+    directory: &Directory,
+    stage: &'static str,
+) -> Result<(), StartupCgroupError> {
+    let processes = read_control(directory, "cgroup.procs", stage)?;
+    let mut entries = processes.split_whitespace();
+    let expected = std::process::id().to_string();
+    if entries.next() == Some(expected.as_str()) && entries.next().is_none() {
+        Ok(())
+    } else {
+        Err(StartupCgroupError::new(
+            stage,
+            directory.path.join("cgroup.procs"),
+            "현재 daemon 외의 직접 프로세스가 있어 manager를 재사용할 수 없습니다",
         ))
     }
 }
@@ -994,11 +1057,11 @@ mod tests {
         fn finish_structure(
             &mut self,
             deadline: MonotonicDeadline,
-        ) -> Result<(), StartupCgroupError> {
+        ) -> Result<StartupCgroupPlacement, StartupCgroupError> {
             self.record(deadline);
             self.events.push("finish".to_owned());
             self.finished = true;
-            Ok(())
+            Ok(StartupCgroupPlacement::DelegatedRoot)
         }
 
         fn pause(&mut self, _duration: Duration) {}
@@ -1104,6 +1167,48 @@ mod tests {
     }
 
     #[test]
+    fn existing_manager_requires_only_the_current_daemon_and_is_preserved() {
+        let root_path = temporary_path("existing-manager");
+        let manager_path = root_path.join("manager");
+        std::fs::create_dir_all(&manager_path).unwrap();
+        std::fs::write(
+            manager_path.join("cgroup.procs"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+
+        let root = directory_for_test(&root_path);
+        let manager = directory_for_test(&manager_path);
+        require_only_current_process(&manager, "test").unwrap();
+        let mut recovery = SystemRecovery {
+            root,
+            manager: Some(manager),
+            jobs: None,
+            job_entries: Vec::new(),
+            placement: StartupCgroupPlacement::ExistingManager,
+        };
+        let deadline = MonotonicDeadline::from_now(Duration::from_secs(1)).unwrap();
+
+        assert_eq!(
+            recovery.finish_structure(deadline).unwrap(),
+            StartupCgroupPlacement::ExistingManager
+        );
+        assert!(manager_path.is_dir());
+
+        std::fs::write(
+            manager_path.join("cgroup.procs"),
+            format!("{}\n999999\n", std::process::id()),
+        )
+        .unwrap();
+        let manager = directory_for_test(&manager_path);
+        assert!(require_only_current_process(&manager, "test").is_err());
+
+        std::fs::remove_file(manager_path.join("cgroup.procs")).unwrap();
+        std::fs::remove_dir(manager_path).unwrap();
+        std::fs::remove_dir(root_path).unwrap();
+    }
+
+    #[test]
     fn unexpected_file_directory_and_symlink_are_preserved() {
         let root_path = temporary_path("unexpected");
         std::fs::create_dir_all(&root_path).unwrap();
@@ -1187,8 +1292,9 @@ mod tests {
         let ghost = std::env::var_os("TASKCAGE_STARTUP_RECOVERY_GHOST_BIN")
             .expect("ghost fixture 경로가 필요합니다");
         let paths = CgroupPaths::resolve(None).unwrap();
-        std::fs::create_dir(paths.manager()).unwrap();
-        std::fs::create_dir(paths.jobs()).unwrap();
+        let environment = SystemProbe::from_environment().check().unwrap();
+        let manager = CgroupManager::initialize(environment).unwrap();
+        assert_eq!(manager.root(), paths.root());
         let empty = paths.jobs().join("job-empty");
         let running = paths.jobs().join("job-running");
         std::fs::create_dir(&empty).unwrap();
@@ -1212,9 +1318,10 @@ mod tests {
         };
         thread::sleep(Duration::from_millis(100));
 
-        let report = recover_from_environment(Duration::from_secs(5)).unwrap();
+        let report = recover(Duration::from_secs(5), Some(paths.root().to_path_buf())).unwrap();
         assert_eq!(report.removed_jobs, 2);
-        assert!(!paths.manager().exists());
+        assert_eq!(report.placement, StartupCgroupPlacement::ExistingManager);
+        assert!(paths.manager().exists());
         assert!(!paths.jobs().exists());
         assert!(!running.exists());
 
@@ -1225,7 +1332,9 @@ mod tests {
             .unwrap();
         process.finish_output_until(cleanup_deadline).await.unwrap();
 
-        let environment = SystemProbe::from_environment().check().unwrap();
+        let environment = SystemProbe::with_root(paths.root())
+            .check_after_recovery(report.placement)
+            .unwrap();
         let manager = CgroupManager::initialize(environment).unwrap();
         assert_eq!(manager.root(), paths.root());
     }

@@ -200,7 +200,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
                     removed_jobs = report.removed_jobs,
                     "잔여 TaskCage 작업 cgroup 복구를 완료했습니다"
                 );
-                Ok(())
+                Ok(report)
             }
             Err(error) => {
                 tracing::error!(
@@ -212,7 +212,11 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
                 Err(Error::Startup(error.to_string()))
             }
         },
-        || SystemProbe::from_environment().check().map_err(Error::from),
+        |report| {
+            SystemProbe::from_environment()
+                .check_after_recovery(report.placement)
+                .map_err(Error::from)
+        },
     )?;
     let fail_stop = FailStopCoordinator::new(
         FailStopSettings::new(config.fail_stop_timeout)
@@ -247,12 +251,12 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn run_startup_steps<T>(
-    recover: impl FnOnce() -> Result<()>,
-    preflight: impl FnOnce() -> Result<T>,
+fn run_startup_steps<R, T>(
+    recover: impl FnOnce() -> Result<R>,
+    preflight: impl FnOnce(R) -> Result<T>,
 ) -> Result<T> {
-    recover()?;
-    preflight()
+    let recovered = recover()?;
+    preflight(recovered)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -379,9 +383,10 @@ mod tests {
         let result = run_startup_steps(
             || {
                 order.borrow_mut().push("recovery");
-                Ok(())
+                Ok(7)
             },
-            || {
+            |recovered| {
+                assert_eq!(recovered, 7);
                 order.borrow_mut().push("preflight");
                 Ok(42)
             },
@@ -395,13 +400,13 @@ mod tests {
     #[test]
     fn recovery_failure_blocks_preflight_and_listener_preparation() {
         let preflight_called = RefCell::new(false);
-        let result = run_startup_steps::<()>(
+        let result = run_startup_steps::<(), ()>(
             || {
                 Err(Error::InvalidArgument(
                     "injected recovery failure".to_owned(),
                 ))
             },
-            || {
+            |_| {
                 *preflight_called.borrow_mut() = true;
                 Ok(())
             },

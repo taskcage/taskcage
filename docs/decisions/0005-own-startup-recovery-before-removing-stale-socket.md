@@ -102,6 +102,17 @@ daemon 시작은 다음 순서를 지킨다.
 필수 제어 파일을 fail-closed로 먼저 확인한다. 이 제한된 확인은 target 실행 readiness를 뜻하지 않으며,
 잔여 정리 뒤 4단계의 전체 사전 검사를 대체하지 않는다.
 
+crash 뒤 위임 root에 `manager`와 `jobs`가 남으면 cgroup v2의 no-internal-process 제약 때문에 supervisor가
+새 daemon을 비어 있지 않은 위임 root로 바로 옮기지 못할 수 있다. 이때는 설정으로 부모 위임 root를
+명시했고 새 daemon의 실제 membership이 정확히 그 root의 바로 아래 `manager`인 경우만 시작 복구를
+허용한다. 복구는 `manager/cgroup.procs`에 현재 daemon 하나만 있는지 확인하고 manager의 신원과 leaf
+구조를 다시 검증한 뒤, 형제 `jobs` 아래의 잔여 작업을 정리한다. 검증된 기존 manager는 제거하지 않고
+4단계의 전체 사전 검사와 이후 daemon 격리에 재사용한다.
+
+부모 위임 root가 명시되지 않았거나, 실제 membership이 다른 하위 cgroup이거나, manager에 다른 직접
+프로세스가 있거나, manager 신원과 구조를 확인할 수 없으면 재사용하지 않고 startup 오류로 종료한다.
+이 예외는 기존 manager 하나에만 적용되며 임의의 조상·후손 경로를 위임 root로 추론하지 않는다.
+
 어느 단계에서든 소유권, 판정 또는 복구가 실패하면 socket을 bind하거나 요청을 받지 않고 0이 아닌
 startup 오류로 종료한다. 이 실패는 protocol 응답이 아니므로 새 wire 오류 코드를 추가하지 않는다.
 
@@ -138,6 +149,9 @@ startup 오류로 종료한다. 이 실패는 protocol 응답이 아니므로 �
 - group·other가 쓸 수 있거나 신뢰하지 않는 owner의 부모 디렉터리에서 시작을 거절하는지 확인한다.
 - socket 복구 뒤 잔여 cgroup의 `populated 0`과 제거를 확인하고, 전체 preflight와 bind가 그 뒤에만
   실행되는지 확인한다.
+- crash 뒤 새 daemon을 명시된 위임 root의 기존 `manager`에 시작해 manager는 보존하고 형제 `jobs`의
+  잔여 작업만 정리한 뒤 전체 preflight와 bind가 진행되는지 확인한다. manager에 다른 프로세스가 있거나
+  다른 하위 cgroup에서 시작하면 요청을 받지 않는지도 확인한다.
 - 정상 종료는 자신이 bind한 socket만 제거하고 lock 파일은 남기며, crash 뒤 다음 시작이 복구하는지
   실제 Ubuntu 24.04 cgroup v2와 UDS 환경에서 확인한다.
 
@@ -149,8 +163,8 @@ startup 오류로 종료한다. 이 실패는 protocol 응답이 아니므로 �
   runtime 디렉터리와 서로 다른 위임 cgroup root를 사용해야 한다.
 - 같은 UID의 다른 프로세스 또는 root가 의도적으로 경로를 바꾸는 공격은 막지 않는다. 더 강한 호출자·
   파일 격리가 필요하면 별도 sandbox와 서비스 정책이 필요하다.
-- stale socket 복구와 잔여 cgroup 복구 구현 및 Linux 통합 시험은 후속 작업이다. 현재 구현은 기존
-  경로가 있으면 계속 시작을 거절한다.
+- stale socket과 잔여 cgroup 복구는 구현되어 있다. 실제 daemon crash 뒤 기존 manager 재사용과 잔여
+  실행 제거는 Ubuntu 24.04 재시작 E2E에서 계속 검증한다.
 - Registry는 메모리 기반이므로 시작 복구가 이전 snapshot이나 idempotency mapping을 되살리지 않는다.
 
 ## 관련 작업

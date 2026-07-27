@@ -378,6 +378,10 @@ SDK는 응답 유실이나 재연결 뒤 같은 작업을 재전송할 수 있�
   근거로 사용할 수 있다. 삭제 직전에 device·inode를 포함한 신원을 다시 확인한다.
 - 잔여 cgroup의 `populated 0`과 제거를 확인한 뒤 전체 cgroup 사전 검사를 새로 통과하기 전에는 요청을
   수락하거나 준비됐다고 보고하지 않는다.
+- crash 뒤 새 daemon이 설정으로 명시된 위임 root의 정확한 `manager`에서 시작한 경우에는 현재 daemon
+  외의 직접 프로세스와 예상 밖 하위 구조가 없음을 확인한 뒤 그 manager를 보존하고 형제 `jobs`의 잔여
+  작업을 정리한다. 부모 root가 명시되지 않았거나 다른 하위 cgroup이면 안전하게 추론하지 않고 시작을
+  거절한다.
 - 소유권 확인, stale 판정, socket 복구, cgroup 복구 또는 사전 검사에 실패하면 socket을 bind하거나
   신규 작업을 시작하지 않고 startup 오류로 종료한다. 이는 새 protocol 오류 코드가 아니다.
 - MVP Registry는 메모리 기반이므로 재시작 전 작업 snapshot과 idempotency mapping을 복구하지

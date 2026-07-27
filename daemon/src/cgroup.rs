@@ -31,6 +31,12 @@ use crate::preflight::VerifiedEnvironment;
 pub const DEFAULT_CGROUP_MOUNT: &str = "/sys/fs/cgroup";
 pub const SELF_CGROUP_FILE: &str = "/proc/self/cgroup";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupCgroupPlacement {
+    DelegatedRoot,
+    ExistingManager,
+}
+
 #[derive(Debug, Error)]
 pub enum CgroupPathError {
     #[error("{operation} 작업이 {path:?}에서 실패했습니다")]
@@ -152,6 +158,21 @@ impl CgroupPaths {
 
     /// 설정으로 받은 경로가 있으면 그 경로를 사용하고, 없으면 현재 경로를 찾는다.
     pub fn resolve(root_override: Option<&Path>) -> Result<Self, CgroupPathError> {
+        let (paths, placement) = Self::resolve_startup(root_override)?;
+        if placement == StartupCgroupPlacement::DelegatedRoot {
+            Ok(paths)
+        } else {
+            Err(CgroupPathError::ConfiguredRootMismatch {
+                configured: paths.root,
+                actual: paths.manager,
+            })
+        }
+    }
+
+    /// 시작 복구에서만 설정 root 또는 그 바로 아래 manager membership을 구분한다.
+    pub(crate) fn resolve_startup(
+        root_override: Option<&Path>,
+    ) -> Result<(Self, StartupCgroupPlacement), CgroupPathError> {
         let mount_path = Path::new(DEFAULT_CGROUP_MOUNT);
         let mount = fs::canonicalize(mount_path)
             .map_err(|source| io_error("cgroup 마운트 경로 확인", mount_path, source))?;
@@ -168,19 +189,27 @@ impl CgroupPaths {
         if !root.starts_with(&mount) {
             return Err(CgroupPathError::RootOutsideMount { root, mount });
         }
-        if root != actual_root {
+        let manager = root.join("manager");
+        let placement = if root == actual_root {
+            StartupCgroupPlacement::DelegatedRoot
+        } else if root_override.is_some() && manager == actual_root {
+            StartupCgroupPlacement::ExistingManager
+        } else {
             return Err(CgroupPathError::ConfiguredRootMismatch {
                 configured: root,
                 actual: actual_root,
             });
-        }
+        };
 
-        Ok(Self {
-            manager: root.join("manager"),
-            jobs: root.join("jobs"),
-            mount,
-            root,
-        })
+        Ok((
+            Self {
+                manager,
+                jobs: root.join("jobs"),
+                mount,
+                root,
+            },
+            placement,
+        ))
     }
 
     pub fn mount(&self) -> &Path {
