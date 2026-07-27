@@ -118,6 +118,11 @@ impl FailStopCoordinator {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_clock(settings: FailStopSettings, now: Arc<Clock>) -> Arc<Self> {
+        Self::with_clock(settings, now)
+    }
+
     pub(crate) fn try_admit(self: &Arc<Self>) -> Option<FailStopAdmission<'_>> {
         let state = self.lock_state();
         if matches!(state.phase, Phase::Healthy) {
@@ -269,15 +274,21 @@ impl Drop for ActiveExecution {
 mod tests {
     use super::*;
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
     #[test]
     fn first_report_creates_one_deadline_and_later_reports_do_not_extend_it() {
         let base = Instant::now();
         let now = Arc::new(Mutex::new(base));
+        let clock_calls = Arc::new(AtomicUsize::new(0));
         let clock = {
             let now = Arc::clone(&now);
-            Arc::new(move || *now.lock().unwrap()) as Arc<Clock>
+            let clock_calls = Arc::clone(&clock_calls);
+            Arc::new(move || {
+                clock_calls.fetch_add(1, Ordering::SeqCst);
+                *now.lock().unwrap()
+            }) as Arc<Clock>
         };
         let coordinator = FailStopCoordinator::with_clock(
             FailStopSettings::new(Duration::from_secs(10)).unwrap(),
@@ -299,6 +310,7 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(first.at(), base + Duration::from_secs(10));
+        assert_eq!(clock_calls.load(Ordering::SeqCst), 1);
         assert_eq!(coordinator.first_report().unwrap().task_id, "first");
     }
 

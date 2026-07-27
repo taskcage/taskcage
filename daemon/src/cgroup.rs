@@ -821,7 +821,52 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn partial_configuration_failure_removes_job_before_target_start() {
+    fn failure_after_job_creation_removes_job_before_target_start() {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "taskcage-cgroup-created-failure-test-{}-{sequence}",
+            std::process::id()
+        ));
+        let jobs = root.join("jobs");
+        fs::create_dir_all(&jobs).unwrap();
+        let manager = CgroupManager {
+            paths: CgroupPaths {
+                mount: root.clone(),
+                root: root.clone(),
+                manager: root.join("manager"),
+                jobs: jobs.clone(),
+            },
+        };
+        let limits = CgroupLimits {
+            memory_max_bytes: NonZeroU64::new(1).unwrap(),
+            max_processes: NonZeroU64::new(1).unwrap(),
+            cpu: CpuLimit {
+                quota_micros: NonZeroU64::new(1).unwrap(),
+                period_micros: NonZeroU64::new(1).unwrap(),
+            },
+        };
+        let target_starts = std::cell::Cell::new(0);
+
+        let result = manager
+            .create_job_with("created-failure", limits, |path, _| {
+                Err::<(File, KernelEvents), _>(cgroup_io_error(
+                    "injected after creation",
+                    path,
+                    io::Error::other("injected"),
+                ))
+            })
+            .map(|_| target_starts.set(target_starts.get() + 1));
+
+        assert!(result.is_err());
+        assert_eq!(target_starts.get(), 0);
+        assert!(!jobs.join("job-created-failure").exists());
+        fs::remove_dir(&jobs).unwrap();
+        fs::remove_dir(&root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn limit_read_back_failure_removes_job_before_target_start() {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "taskcage-cgroup-rollback-test-{}-{sequence}",

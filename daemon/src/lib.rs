@@ -398,21 +398,23 @@ mod tests {
     }
 
     #[test]
-    fn recovery_failure_blocks_preflight_and_listener_preparation() {
-        let preflight_called = RefCell::new(false);
-        let result = run_startup_steps::<(), ()>(
-            || {
-                Err(Error::InvalidArgument(
-                    "injected recovery failure".to_owned(),
-                ))
-            },
-            |_| {
-                *preflight_called.borrow_mut() = true;
-                Ok(())
-            },
-        );
+    fn injected_startup_recovery_failures_block_preflight_and_listener_preparation() {
+        for stage in ["cgroup.kill", "populated 0", "cgroup 제거"] {
+            let preflight_called = RefCell::new(false);
+            let result = run_startup_steps::<(), ()>(
+                || {
+                    Err(Error::InvalidArgument(format!(
+                        "injected startup {stage} failure"
+                    )))
+                },
+                |_| {
+                    *preflight_called.borrow_mut() = true;
+                    Ok(())
+                },
+            );
 
-        assert!(matches!(result, Err(Error::InvalidArgument(_))));
-        assert!(!preflight_called.into_inner());
+            assert!(matches!(result, Err(Error::InvalidArgument(_))));
+            assert!(!preflight_called.into_inner());
+        }
     }
 }

@@ -1289,10 +1289,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(first.observation, SubmitObservation::Failed(expected));
+        assert_eq!(registry.snapshot(TASK_ID), Ok(None));
         assert_eq!(
             registry.snapshot_by_client_request_id(CLIENT_REQUEST_ID),
             Ok(None)
         );
+        assert!(capacity.try_acquire().is_some());
 
         let mut changed = payload();
         changed.command.args.push("retry".to_owned());
@@ -1317,6 +1319,67 @@ mod tests {
             SubmitObservation::Task(TaskPayload::Running { .. })
         ));
         assert_eq!(executor_starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn injected_finished_storage_failure_enters_fail_stop_and_retains_capacity() {
+        let registry = TaskRegistry::new();
+        let capacity = task_capacity(1);
+        let release = Arc::new(Notify::new());
+        let clock_calls = Arc::new(AtomicUsize::new(0));
+        let base = Instant::now();
+        let clock = {
+            let clock_calls = Arc::clone(&clock_calls);
+            Arc::new(move || {
+                clock_calls.fetch_add(1, Ordering::SeqCst);
+                base
+            })
+        };
+        let fail_stop = FailStopCoordinator::with_test_clock(
+            FailStopSettings::new(Duration::from_secs(5)).unwrap(),
+            clock,
+        );
+        let outcome = coordinate_validated_submit(
+            registry.clone(),
+            Arc::clone(&capacity),
+            Arc::clone(&fail_stop),
+            REQUEST_ID.to_owned(),
+            ValidatedSubmit::try_from_payload(payload()).unwrap(),
+            metadata(TASK_ID),
+            {
+                let release = Arc::clone(&release);
+                move |config, running_sender, _cancellation| async move {
+                    running_sender.send(running(&config.task_id)).unwrap();
+                    release.notified().await;
+                    Ok(ExecutionCompletion::Test(finished(&config.task_id)))
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            outcome.observation,
+            SubmitObservation::Task(TaskPayload::Running { .. })
+        ));
+
+        registry.poison_state_for_test();
+        release.notify_one();
+        timeout(TokioDuration::from_secs(1), async {
+            while !fail_stop.is_fail_stopping() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("FINISHED 저장 실패가 fail-stop을 시작해야 합니다");
+
+        assert_eq!(clock_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(capacity.retained_for_fail_stop(), 1);
+        assert!(capacity.try_acquire().is_none());
+        assert_eq!(fail_stop.active_count(), 1);
+        let report = fail_stop.first_report().unwrap();
+        assert_eq!(report.stage, "활성 실행 소유권 종료");
+        assert!(!format!("{report:?}").contains("/usr/bin/true"));
+        assert!(!format!("{report:?}").contains("LANG"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
