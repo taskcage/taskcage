@@ -34,14 +34,30 @@ pub async fn read_frame<R>(reader: &mut R) -> Result<Vec<u8>, FrameError>
 where
     R: AsyncRead + Unpin,
 {
+    read_frame_or_eof(reader).await?.ok_or_else(|| {
+        FrameError::Io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "frame length prefix가 없습니다",
+        ))
+    })
+}
+
+/// 다음 frame을 읽되 prefix를 전혀 받기 전의 정상 연결 종료는 별도로 구분한다.
+pub async fn read_frame_or_eof<R>(reader: &mut R) -> Result<Option<Vec<u8>>, FrameError>
+where
+    R: AsyncRead + Unpin,
+{
     let mut prefix = [0_u8; LENGTH_PREFIX_BYTES];
-    reader.read_exact(&mut prefix).await?;
+    if reader.read(&mut prefix[..1]).await? == 0 {
+        return Ok(None);
+    }
+    reader.read_exact(&mut prefix[1..]).await?;
     let length = u32::from_be_bytes(prefix) as usize;
     validate_length(length)?;
 
     let mut payload = vec![0_u8; length];
     reader.read_exact(&mut payload).await?;
-    Ok(payload)
+    Ok(Some(payload))
 }
 
 pub async fn read_json_frame<R, T>(reader: &mut R) -> Result<T, FrameError>
@@ -277,6 +293,21 @@ mod tests {
         assert!(matches!(
             read_frame(&mut receiver).await,
             Err(FrameError::TooLarge { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn distinguishes_clean_eof_from_an_incomplete_prefix() {
+        let (sender, mut receiver) = duplex(8);
+        drop(sender);
+        assert_eq!(read_frame_or_eof(&mut receiver).await.unwrap(), None);
+
+        let (mut sender, mut receiver) = duplex(8);
+        sender.write_all(&[0, 0]).await.unwrap();
+        drop(sender);
+        assert!(matches!(
+            read_frame_or_eof(&mut receiver).await,
+            Err(FrameError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof
         ));
     }
 

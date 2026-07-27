@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use thiserror::Error;
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TaskCapacitySettings {
@@ -44,6 +45,7 @@ pub(crate) struct TaskCapacity {
     settings: TaskCapacitySettings,
     in_use: AtomicU32,
     retained_for_fail_stop: AtomicU32,
+    idle: Notify,
 }
 
 impl TaskCapacity {
@@ -52,6 +54,7 @@ impl TaskCapacity {
             settings,
             in_use: AtomicU32::new(0),
             retained_for_fail_stop: AtomicU32::new(0),
+            idle: Notify::new(),
         }
     }
 
@@ -84,6 +87,19 @@ impl TaskCapacity {
         }
     }
 
+    /// 신규 연결을 닫은 정상 shutdown에서 이미 시작된 작업 lifecycle이 끝날 때까지 기다린다.
+    pub(crate) async fn wait_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.in_use.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn retained_for_fail_stop(&self) -> u32 {
         self.retained_for_fail_stop.load(Ordering::Acquire)
@@ -113,6 +129,9 @@ impl Drop for TaskCapacityPermit {
         }
         let previous = self.capacity.in_use.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "반환할 작업 실행 슬롯이 있어야 합니다");
+        if previous == 1 {
+            self.capacity.idle.notify_waiters();
+        }
     }
 }
 
@@ -146,5 +165,28 @@ mod tests {
         capacity.try_acquire().unwrap().retain_for_fail_stop();
 
         assert!(capacity.try_acquire().is_none());
+    }
+
+    #[tokio::test]
+    async fn idle_waiter_finishes_only_after_the_last_permit_returns() {
+        let capacity = Arc::new(TaskCapacity::new(TaskCapacitySettings::new(2).unwrap()));
+        let first = capacity.try_acquire().unwrap();
+        let second = capacity.try_acquire().unwrap();
+
+        let waiting_capacity = Arc::clone(&capacity);
+        let mut waiting = Box::pin(async move { waiting_capacity.wait_idle().await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        drop(first);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        drop(second);
+        waiting.await;
     }
 }
