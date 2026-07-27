@@ -1,13 +1,5 @@
 //! protocol v1 typed 요청을 기존 capability, submit과 Registry 경계에 연결한다.
 
-#![cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "UDS listener가 다음 단계에서 typed handler를 호출합니다"
-    )
-)]
-
 use std::future::Future;
 use std::time::Instant;
 
@@ -167,15 +159,17 @@ impl<C> ProtocolHandlers<C> {
 
 #[cfg(target_os = "linux")]
 impl ProtocolHandlers<SubmitCoordinator> {
-    #[allow(
-        dead_code,
-        reason = "UDS listener가 다음 단계에서 production handler를 초기화합니다"
-    )]
     pub(crate) fn initialize(
         preflight: Result<VerifiedEnvironment, PreflightError>,
         capacity_settings: TaskCapacitySettings,
     ) -> crate::Result<Self> {
         Self::initialize_with(preflight, capacity_settings, SubmitCoordinator::initialize)
+    }
+
+    pub(crate) async fn wait_idle(&self) {
+        if let HandlerState::Ready { core, .. } = &self.state {
+            core.wait_idle().await;
+        }
     }
 }
 

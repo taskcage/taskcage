@@ -56,6 +56,8 @@ Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 
     코어에 연결하며 정리 뒤 작업 cgroup을 남기지 않는다.
 15. 동시에 들어온 `cancelTask`가 한 번의 whole-cgroup 종료를 공유하고, child·grandchild와 출력
     reader 정리 뒤 `CANCELLED`를 저장하며 timeout이 먼저 기록된 경우 `TIMED_OUT`을 유지한다.
+16. owner-only Unix domain socket에서 네 요청을 frame으로 처리하고, 연결 중단 뒤에도 작업을 계속
+    실행하며 submit/getTask polling과 cancel 뒤 작업 cgroup과 socket을 남기지 않는다.
 
 실행 방법:
 

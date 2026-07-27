@@ -49,13 +49,6 @@ pub(crate) enum RegistryError {
 }
 
 impl RegistryError {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "UDS handler가 Registry 오류를 기존 wire code로 바꿀 때 사용합니다"
-        )
-    )]
     pub(crate) fn error_code(&self) -> Option<ErrorCode> {
         match self {
             Self::IdempotencyConflict(_) => Some(ErrorCode::IdempotencyConflict),
@@ -598,6 +591,8 @@ impl SubmitWaiter {
         loop {
             // 알림 등록을 먼저 해 publish와 상태 확인 사이의 missed wakeup을 막는다.
             let notified = self.signal.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(observation) = self.signal.current() {
                 return observation;
             }

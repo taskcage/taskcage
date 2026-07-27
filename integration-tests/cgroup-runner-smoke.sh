@@ -203,6 +203,22 @@ unit_sequence=$((unit_sequence + 1))
   --exact \
   --nocapture
 
+# 실제 UDS frame이 capability, submit, getTask와 cancel을 같은 실행 코어에 연결한다.
+unit_sequence=$((unit_sequence + 1))
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-uds-server-$$-${unit_sequence}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --setenv=TASKCAGE_RUN_LINUX_UDS_INTEGRATION=1 \
+  "${submit_test}" \
+  'server::tests::actual_uds_server_runs_disconnect_poll_and_cancel_through_cgroups' \
+  --exact \
+  --nocapture
+
 # typed protocol handler가 기존 capability, submit coordinator와 Registry를 그대로 사용한다.
 unit_sequence=$((unit_sequence + 1))
 "${taskcage_systemd[@]}" \

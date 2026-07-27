@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use taskcaged::cgroup::{CgroupLimits, CpuLimit};
 use taskcaged::output::CaptureLimits;
-use taskcaged::{Error, RunOnceConfig};
+use taskcaged::{DaemonConfig, Error, RunOnceConfig};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_CLEANUP_MILLIS: u64 = 5_000;
@@ -22,7 +22,13 @@ async fn main() -> taskcaged::Result<()> {
 
     let mut args = env::args_os().skip(1);
     match args.next().as_deref() {
-        None => taskcaged::run().await,
+        None => Err(Error::InvalidArgument(
+            "서비스 실행에는 serve와 명시적 socket 설정이 필요합니다".to_owned(),
+        )),
+        Some(command) if command == OsStr::new("serve") => {
+            let config = parse_serve(args.collect())?;
+            taskcaged::run(config).await
+        }
         Some(command) if command == OsStr::new("check-environment") => {
             if args.next().is_some() {
                 return Err(Error::InvalidArgument(
@@ -40,9 +46,50 @@ async fn main() -> taskcaged::Result<()> {
             Ok(())
         }
         Some(other) => Err(Error::InvalidArgument(format!(
-            "알 수 없는 명령입니다: {other:?}; check-environment 또는 run-once를 사용하세요"
+            "알 수 없는 명령입니다: {other:?}; serve, check-environment 또는 run-once를 사용하세요"
         ))),
     }
+}
+
+fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
+    let mut socket_path = None;
+    let mut max_concurrent_tasks = None;
+    let mut cleanup_timeout_ms = None;
+    let mut index = 0;
+    while index < args.len() {
+        let name = args[index].to_str().ok_or_else(|| {
+            Error::InvalidArgument("serve 옵션 이름은 UTF-8이어야 합니다".to_owned())
+        })?;
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| Error::InvalidArgument(format!("{name} 옵션 값이 없습니다")))?;
+        match name {
+            "--socket" if socket_path.is_none() => socket_path = Some(PathBuf::from(value)),
+            "--max-concurrent-tasks" if max_concurrent_tasks.is_none() => {
+                max_concurrent_tasks = Some(parse_number(name, value)?);
+            }
+            "--cleanup-timeout-ms" if cleanup_timeout_ms.is_none() => {
+                cleanup_timeout_ms = Some(parse_number(name, value)?);
+            }
+            "--socket" | "--max-concurrent-tasks" | "--cleanup-timeout-ms" => {
+                return Err(Error::InvalidArgument(format!(
+                    "serve 옵션이 중복되었습니다: {name}"
+                )));
+            }
+            _ => {
+                return Err(Error::InvalidArgument(format!(
+                    "알 수 없는 serve 옵션입니다: {name}"
+                )));
+            }
+        }
+        index += 2;
+    }
+
+    DaemonConfig::new(
+        required_option("socket", socket_path)?,
+        required_option("max-concurrent-tasks", max_concurrent_tasks)?,
+        Duration::from_millis(required_option("cleanup-timeout-ms", cleanup_timeout_ms)?),
+    )
 }
 
 fn parse_run_once(args: Vec<OsString>) -> taskcaged::Result<RunOnceConfig> {
@@ -231,6 +278,56 @@ fn generate_job_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serve_requires_an_explicit_absolute_socket_and_internal_limits() {
+        let socket = std::env::temp_dir().join("taskcaged.sock");
+        let config = parse_serve(vec![
+            OsString::from("--socket"),
+            socket.into_os_string(),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("2"),
+            OsString::from("--cleanup-timeout-ms"),
+            OsString::from("5000"),
+        ])
+        .unwrap();
+        assert!(format!("{config:?}").contains("max_concurrent_tasks: 2"));
+
+        let error = parse_serve(vec![
+            OsString::from("--socket"),
+            OsString::from("relative.sock"),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("2"),
+            OsString::from("--cleanup-timeout-ms"),
+            OsString::from("5000"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("절대 경로"));
+    }
+
+    #[test]
+    fn serve_rejects_zero_or_missing_settings() {
+        let socket = std::env::temp_dir().join("taskcaged.sock");
+        let error = parse_serve(vec![
+            OsString::from("--socket"),
+            socket.clone().into_os_string(),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("0"),
+            OsString::from("--cleanup-timeout-ms"),
+            OsString::from("5000"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("0보다 커야"));
+
+        let error = parse_serve(vec![
+            OsString::from("--socket"),
+            socket.into_os_string(),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("1"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("cleanup-timeout-ms 옵션은 필수"));
+    }
 
     #[test]
     fn command_after_separator_is_not_reparsed() {

@@ -34,6 +34,8 @@ impl CancellationRuntime {
         loop {
             // 알림 등록을 먼저 해 cancel 관찰과 상태 확인 사이의 missed wakeup을 막는다.
             let notified = self.state.cancel_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.state.terminal.snapshot().first() == Some(ControlTrigger::Cancelled) {
                 return;
             }
@@ -88,6 +90,8 @@ impl CancellationWaiter {
     pub(crate) async fn wait(self) -> TaskPayload {
         loop {
             let notified = self.state.finished_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(finished) = self.state.lock_finished().clone() {
                 return finished;
             }

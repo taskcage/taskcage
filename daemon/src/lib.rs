@@ -24,6 +24,8 @@ pub mod protocol;
 pub mod resource_budget;
 #[cfg(target_os = "linux")]
 mod runner;
+#[cfg(target_os = "linux")]
+mod server;
 #[cfg_attr(
     not(target_os = "linux"),
     allow(dead_code, reason = "protocol task 실행은 Linux에서만 제공됩니다")
@@ -32,18 +34,25 @@ mod submit;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+#[cfg(test)]
 use std::future::Future;
 use std::io;
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use cancellation::cancellation_channel;
 #[cfg(target_os = "linux")]
+use capacity::TaskCapacitySettings;
+#[cfg(target_os = "linux")]
 use cgroup::CgroupManager;
 use cgroup::{CgroupError, CgroupLimits, JobStats};
 #[cfg(target_os = "linux")]
 use executor::{ExecutorError, PreparedCommand};
+#[cfg(target_os = "linux")]
+use handlers::ProtocolHandlers;
 use output::CaptureLimits;
 use preflight::{CapabilityProbe, CapabilityReport, PreflightError, SystemProbe};
 use protocol::TaskOutput;
@@ -79,6 +88,8 @@ pub enum Error {
     CleanupUncertain,
     #[error("작업 lifecycle 결과를 만들지 못했습니다: {0}")]
     TaskLifecycle(String),
+    #[error("UDS 서버가 실패했습니다: {0}")]
+    Server(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -99,6 +110,44 @@ pub struct RunOnceConfig {
     pub command: Vec<OsString>,
 }
 
+#[derive(Debug, Clone)]
+/// 서비스 daemon이 사용할 명시적 socket과 내부 실행 설정이다.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub struct DaemonConfig {
+    socket_path: PathBuf,
+    max_concurrent_tasks: u32,
+    cleanup_timeout: Duration,
+}
+
+impl DaemonConfig {
+    pub fn new(
+        socket_path: PathBuf,
+        max_concurrent_tasks: u32,
+        cleanup_timeout: Duration,
+    ) -> Result<Self> {
+        if !socket_path.is_absolute() {
+            return Err(Error::InvalidArgument(
+                "daemon socket 경로는 절대 경로여야 합니다".to_owned(),
+            ));
+        }
+        if max_concurrent_tasks == 0 {
+            return Err(Error::InvalidArgument(
+                "max-concurrent-tasks 값은 0보다 커야 합니다".to_owned(),
+            ));
+        }
+        if cleanup_timeout.is_zero() {
+            return Err(Error::InvalidArgument(
+                "cleanup-timeout-ms 값은 0보다 커야 합니다".to_owned(),
+            ));
+        }
+        Ok(Self {
+            socket_path,
+            max_concurrent_tasks,
+            cleanup_timeout,
+        })
+    }
+}
+
 /// 개발용 `run-once` CLI 진단 결과다. protocol v1의 `task` wire payload가 아니다.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,18 +163,40 @@ pub struct RunOnceReport {
     pub cleanup_complete: bool,
 }
 
-/// 지원 환경을 먼저 확인한 뒤 운영체제의 종료 신호가 올 때까지 데몬을 실행한다.
-pub async fn run() -> Result<()> {
-    let environment = SystemProbe::from_environment().check()?;
-    let report = environment.report();
-    tracing::info!(
-        root = %report.delegated_root.display(),
-        manager = %report.manager_cgroup.display(),
-        "cgroup 사전 검사를 통과했습니다"
-    );
-    // 실제 소켓 서버가 붙으면 이 성공 값을 실행기 상태가 소유한다.
-    let _environment = environment;
-    run_until(shutdown_signal()).await.map_err(Error::Signal)
+/// 명시적 UDS 설정으로 protocol v1 daemon을 실행한다.
+#[cfg(target_os = "linux")]
+pub async fn run(config: DaemonConfig) -> Result<()> {
+    let capacity_settings = TaskCapacitySettings::new(config.max_concurrent_tasks)
+        .map_err(|error| Error::InvalidArgument(error.to_string()))?;
+    let preflight = SystemProbe::from_environment().check();
+    match &preflight {
+        Ok(environment) => tracing::info!(
+            root = %environment.report().delegated_root.display(),
+            manager = %environment.report().manager_cgroup.display(),
+            "cgroup 사전 검사를 통과했습니다"
+        ),
+        Err(error) => tracing::warn!(
+            cause = %error,
+            "cgroup 실행은 사용할 수 없지만 capability 조회를 위해 UDS를 시작합니다"
+        ),
+    }
+    let handlers = Arc::new(ProtocolHandlers::initialize(preflight, capacity_settings)?);
+    tracing::info!(socket = %config.socket_path.display(), "TaskCage daemon started");
+    let result = server::serve_protocol_until(
+        &config.socket_path,
+        config.cleanup_timeout,
+        handlers,
+        shutdown_signal(),
+    )
+    .await
+    .map_err(|error| Error::Server(error.to_string()));
+    tracing::info!(socket = %config.socket_path.display(), "TaskCage daemon stopped");
+    result
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn run(_config: DaemonConfig) -> Result<()> {
+    Err(Error::UnsupportedPlatform)
 }
 
 /// 서비스 시작 전 cgroup 기능과 권한을 한 번에 확인한다.
@@ -199,7 +270,7 @@ pub async fn run_once(_config: RunOnceConfig) -> Result<RunOnceReport> {
     Err(Error::UnsupportedPlatform)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 async fn shutdown_signal() -> io::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
 
@@ -210,11 +281,7 @@ async fn shutdown_signal() -> io::Result<()> {
     }
 }
 
-#[cfg(not(unix))]
-async fn shutdown_signal() -> io::Result<()> {
-    tokio::signal::ctrl_c().await
-}
-
+#[cfg(test)]
 async fn run_until<F>(shutdown: F) -> io::Result<()>
 where
     F: Future<Output = io::Result<()>>,

@@ -118,13 +118,6 @@ impl ExecutionFailure {
 
 /// UDS handler가 사용할 단일 submit 진입점이다. Registry와 Runner는 외부에 따로 노출하지 않는다.
 #[cfg(target_os = "linux")]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "UDS handler가 다음 단계에서 이 단일 진입점을 소유합니다"
-    )
-)]
 #[derive(Debug)]
 pub(crate) struct SubmitCoordinator {
     registry: TaskRegistry<MonotonicClock>,
@@ -134,13 +127,6 @@ pub(crate) struct SubmitCoordinator {
 
 #[cfg(target_os = "linux")]
 impl SubmitCoordinator {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "UDS handler가 다음 단계에서 이 단일 진입점을 소유합니다"
-        )
-    )]
     pub(crate) fn initialize(
         environment: VerifiedEnvironment,
         capacity_settings: TaskCapacitySettings,
@@ -229,10 +215,10 @@ impl SubmitCoordinator {
         Ok(finished)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "getTask handler가 다음 단계에서 사용합니다")
-    )]
+    pub(crate) async fn wait_idle(&self) {
+        self.capacity.wait_idle().await;
+    }
+
     pub(crate) fn snapshot(&self, task_id: &str) -> Result<Option<TaskPayload>, RegistryError> {
         self.registry.snapshot(task_id)
     }

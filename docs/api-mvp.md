@@ -26,6 +26,10 @@ MVP는 단일 Linux 호스트에서 Java 17+ SDK와 `taskcaged`가 통신하는 
 - 전송 계층은 Unix domain socket의 `SOCK_STREAM`이다.
 - SDK는 소켓 경로를 설정할 수 있어야 한다. 기본 경로는 배포 설정의 책임이며 이 명세에서 고정하지 않는다.
 - 하나의 연결에서는 요청과 응답을 순서대로 처리한다. 동시 호출은 별도 연결 또는 순서를 보장하는 연결 풀을 사용한다.
+- 데몬은 socket 절대 경로를 서비스 설정으로 명시적으로 받으며 UID/GID를 임의로 바꾸지 않는다.
+- MVP socket mode는 owner-only `0600`이다.
+- 기존 경로가 일반 파일, symlink, 활성 socket 또는 stale socket이면 삭제하지 않고 시작을 거절한다.
+- 정상 종료에서는 자신이 성공적으로 bind한 동일한 socket만 제거한다. crash 뒤 stale socket 처리는 startup recovery 범위다.
 
 ### 프레임
 
