@@ -833,6 +833,25 @@ mod tests {
         owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
     }
 
+    #[test]
+    fn restart_does_not_restore_old_tasks_or_idempotency_mapping() {
+        let previous = TaskRegistry::new();
+        let previous_owner = reserve_owner(&previous, submit_payload(), TASK_ID);
+        previous_owner.publish_running(running(TASK_ID)).unwrap();
+
+        let restarted = TaskRegistry::new();
+        assert_eq!(restarted.snapshot(TASK_ID), Ok(None));
+        assert_eq!(
+            restarted.snapshot_by_client_request_id(CLIENT_REQUEST_ID),
+            Ok(None)
+        );
+        let new_owner = reserve_owner(&restarted, submit_payload(), OTHER_TASK_ID);
+        assert_eq!(new_owner.task_id(), OTHER_TASK_ID);
+
+        previous_owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        new_owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+    }
+
     #[tokio::test]
     async fn running_cancel_waiters_finish_only_after_cancelled_snapshot_is_stored() {
         let (registry, _) = registry();

@@ -30,6 +30,8 @@ mod runner;
 mod server;
 #[cfg(target_os = "linux")]
 mod startup;
+#[cfg(target_os = "linux")]
+mod startup_cgroup;
 #[cfg_attr(
     not(target_os = "linux"),
     allow(dead_code, reason = "protocol task 실행은 Linux에서만 제공됩니다")
@@ -68,6 +70,8 @@ use runner::{ExecutionConfig, execute};
 use serde::Serialize;
 #[cfg(target_os = "linux")]
 use startup::StartupOwnership;
+#[cfg(target_os = "linux")]
+use startup_cgroup::recover_from_environment;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -189,9 +193,27 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         .map_err(|error| Error::Startup(error.to_string()))?;
     let capacity_settings = TaskCapacitySettings::new(config.max_concurrent_tasks)
         .map_err(|error| Error::InvalidArgument(error.to_string()))?;
-    // stale socket 복구만으로 listener를 열지 않는다. 잔여 cgroup 복구가 추가되면 이 지점에서
-    // 끝내야 하며, 현재는 preflight와 manager 준비가 기존 manager/jobs를 재사용하지 않고 실패한다.
-    let environment = SystemProbe::from_environment().check()?;
+    let environment = run_startup_steps(
+        || match recover_from_environment(config.cleanup_timeout) {
+            Ok(report) => {
+                tracing::info!(
+                    removed_jobs = report.removed_jobs,
+                    "잔여 TaskCage 작업 cgroup 복구를 완료했습니다"
+                );
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!(
+                    stage = error.stage(),
+                    remaining_path = %error.remaining_path().display(),
+                    error = %error,
+                    "잔여 TaskCage 작업 cgroup 복구에 실패했습니다"
+                );
+                Err(Error::Startup(error.to_string()))
+            }
+        },
+        || SystemProbe::from_environment().check().map_err(Error::from),
+    )?;
     let fail_stop = FailStopCoordinator::new(
         FailStopSettings::new(config.fail_stop_timeout)
             .map_err(|error| Error::InvalidArgument(error.to_string()))?,
@@ -222,6 +244,15 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         tracing::error!(socket = %config.socket_path.display(), "TaskCage daemon stopped with an error");
     }
     result
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn run_startup_steps<T>(
+    recover: impl FnOnce() -> Result<()>,
+    preflight: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    recover()?;
+    preflight()
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -326,6 +357,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     #[tokio::test]
     async fn stops_after_shutdown_signal() {
@@ -339,5 +371,43 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn startup_recovery_must_finish_before_preflight() {
+        let order = RefCell::new(Vec::new());
+        let result = run_startup_steps(
+            || {
+                order.borrow_mut().push("recovery");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("preflight");
+                Ok(42)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result, 42);
+        assert_eq!(order.into_inner(), ["recovery", "preflight"]);
+    }
+
+    #[test]
+    fn recovery_failure_blocks_preflight_and_listener_preparation() {
+        let preflight_called = RefCell::new(false);
+        let result = run_startup_steps::<()>(
+            || {
+                Err(Error::InvalidArgument(
+                    "injected recovery failure".to_owned(),
+                ))
+            },
+            || {
+                *preflight_called.borrow_mut() = true;
+                Ok(())
+            },
+        );
+
+        assert!(matches!(result, Err(Error::InvalidArgument(_))));
+        assert!(!preflight_called.into_inner());
     }
 }

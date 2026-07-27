@@ -195,6 +195,23 @@ fi
   --exact \
   --nocapture
 
+# stale socket 소유권 획득 뒤 잔여 job 전체를 정리해야 preflight와 UDS 단계로 진행한다.
+unit_sequence=$((unit_sequence + 1))
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-startup-cgroup-recovery-$$-${unit_sequence}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --setenv=TASKCAGE_RUN_LINUX_STARTUP_RECOVERY_INTEGRATION=1 \
+  --setenv=TASKCAGE_STARTUP_RECOVERY_GHOST_BIN="${ghost_bin}" \
+  "${submit_test}" \
+  'startup_cgroup::tests::actual_recovery_kills_descendants_removes_jobs_and_allows_preflight' \
+  --exact \
+  --nocapture
+
 unit_sequence=$((unit_sequence + 1))
 "${taskcage_systemd[@]}" \
   --quiet \
