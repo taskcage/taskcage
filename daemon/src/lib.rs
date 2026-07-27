@@ -28,6 +28,8 @@ pub mod resource_budget;
 mod runner;
 #[cfg(target_os = "linux")]
 mod server;
+#[cfg(target_os = "linux")]
+mod startup;
 #[cfg_attr(
     not(target_os = "linux"),
     allow(dead_code, reason = "protocol task 실행은 Linux에서만 제공됩니다")
@@ -64,6 +66,8 @@ use protocol::TaskOutput;
 #[cfg(target_os = "linux")]
 use runner::{ExecutionConfig, execute};
 use serde::Serialize;
+#[cfg(target_os = "linux")]
+use startup::StartupOwnership;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -95,6 +99,9 @@ pub enum Error {
     TaskLifecycle(String),
     #[error("UDS 서버가 실패했습니다: {0}")]
     Server(String),
+    #[cfg(target_os = "linux")]
+    #[error("daemon 시작 복구가 실패했습니다: {0}")]
+    Startup(String),
     #[error("정리 불확실 fail-stop으로 daemon을 종료합니다: taskId={task_id}, stage={stage}")]
     FailStop { task_id: String, stage: String },
 }
@@ -178,41 +185,37 @@ pub struct RunOnceReport {
 /// 명시적 UDS 설정으로 protocol v1 daemon을 실행한다.
 #[cfg(target_os = "linux")]
 pub async fn run(config: DaemonConfig) -> Result<()> {
+    let startup = StartupOwnership::acquire(&config.socket_path)
+        .map_err(|error| Error::Startup(error.to_string()))?;
     let capacity_settings = TaskCapacitySettings::new(config.max_concurrent_tasks)
         .map_err(|error| Error::InvalidArgument(error.to_string()))?;
-    let preflight = SystemProbe::from_environment().check();
+    // stale socket 복구만으로 listener를 열지 않는다. 잔여 cgroup 복구가 추가되면 이 지점에서
+    // 끝내야 하며, 현재는 preflight와 manager 준비가 기존 manager/jobs를 재사용하지 않고 실패한다.
+    let environment = SystemProbe::from_environment().check()?;
     let fail_stop = FailStopCoordinator::new(
         FailStopSettings::new(config.fail_stop_timeout)
             .map_err(|error| Error::InvalidArgument(error.to_string()))?,
     );
-    match &preflight {
-        Ok(environment) => tracing::info!(
-            root = %environment.report().delegated_root.display(),
-            manager = %environment.report().manager_cgroup.display(),
-            "cgroup 사전 검사를 통과했습니다"
-        ),
-        Err(error) => tracing::warn!(
-            cause = %error,
-            "cgroup 실행은 사용할 수 없지만 capability 조회를 위해 UDS를 시작합니다"
-        ),
-    }
+    tracing::info!(
+        root = %environment.report().delegated_root.display(),
+        manager = %environment.report().manager_cgroup.display(),
+        "cgroup 사전 검사를 통과했습니다"
+    );
     let handlers = Arc::new(ProtocolHandlers::initialize(
-        preflight,
+        Ok(environment),
         capacity_settings,
         fail_stop,
     )?);
     tracing::info!(socket = %config.socket_path.display(), "TaskCage daemon started");
-    let result = server::serve_protocol_until(
-        &config.socket_path,
-        config.cleanup_timeout,
-        handlers,
-        shutdown_signal(),
-    )
-    .await
-    .map_err(|error| match error {
-        server::ServerError::FailStop { task_id, stage } => Error::FailStop { task_id, stage },
-        other => Error::Server(other.to_string()),
-    });
+    let result =
+        server::serve_protocol_until(startup, config.cleanup_timeout, handlers, shutdown_signal())
+            .await
+            .map_err(|error| match error {
+                server::ServerError::FailStop { task_id, stage } => {
+                    Error::FailStop { task_id, stage }
+                }
+                other => Error::Server(other.to_string()),
+            });
     if result.is_ok() {
         tracing::info!(socket = %config.socket_path.display(), "TaskCage daemon stopped");
     } else {

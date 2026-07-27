@@ -60,6 +60,8 @@ Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 
     실행하며 submit/getTask polling과 cancel 뒤 작업 cgroup과 socket을 남기지 않는다.
 17. 정리 불확실성 주입 뒤 신규 실행을 차단하고 동시에 실행 중인 모든 작업을 whole-cgroup으로
     정리하며, 안전한 결과만 `DAEMON_ERROR`로 저장하고 작업 cgroup을 남기지 않는다.
+18. daemon 생존 기간 lock이 동시 시작을 막고, 비정상 종료로 lock이 해제된 뒤 검증된 stale socket만
+    제거하며 preflight와 실행 코어 준비 전에는 listener를 열지 않는다.
 
 실행 방법:
 
