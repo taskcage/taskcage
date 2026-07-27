@@ -334,3 +334,43 @@ trap cleanup_fail_stop_process_unit EXIT INT TERM
   --exact \
   --nocapture
 trap - EXIT INT TERM
+
+# 실제 daemon crash 뒤 stale socket과 잔여 실행을 다음 serve process가 요청 수락 전에 복구한다.
+restart_recovery_test=""
+while IFS= read -r artifact; do
+  if [[ "${artifact}" == *'"target":{"kind":["test"]'* &&
+        "${artifact}" == *'"name":"restart_recovery_e2e"'* &&
+        "${artifact}" == *'"executable":"'* ]]; then
+    restart_recovery_test="${artifact#*\"executable\":\"}"
+    restart_recovery_test="${restart_recovery_test%%\"*}"
+  fi
+done < <(cargo test -p taskcaged --test restart_recovery_e2e --no-run --message-format=json)
+if [[ -z "${restart_recovery_test}" || ! -x "${restart_recovery_test}" ]]; then
+  echo "FAIL: 실제 restart recovery E2E 실행 파일을 찾지 못했습니다" >&2
+  exit 1
+fi
+
+unit_sequence=$((unit_sequence + 1))
+restart_recovery_unit="taskcage-restart-recovery-$$-${unit_sequence}"
+cleanup_restart_recovery_unit() {
+  "${taskcage_systemctl[@]}" stop "${restart_recovery_unit}" >/dev/null 2>&1 || true
+  "${taskcage_systemctl[@]}" reset-failed "${restart_recovery_unit}" >/dev/null 2>&1 || true
+}
+trap cleanup_restart_recovery_unit EXIT INT TERM
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="${restart_recovery_unit}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --property=TimeoutStopSec=10s \
+  --setenv=TASKCAGE_RUN_RESTART_RECOVERY_E2E=1 \
+  --setenv=TASKCAGE_RESTART_RECOVERY_BIN="${taskcage_bin}" \
+  --setenv=TASKCAGE_RESTART_RECOVERY_GHOST_BIN="${ghost_bin}" \
+  "${restart_recovery_test}" \
+  'actual_restart_recovers_stale_socket_and_residual_execution' \
+  --exact \
+  --nocapture
+trap - EXIT INT TERM
