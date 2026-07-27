@@ -352,6 +352,32 @@ trap cleanup_fail_stop_process_unit EXIT INT TERM
   --nocapture
 trap - EXIT INT TERM
 
+# 정상 shutdown이 먼저 선택된 뒤 cleanup 불확실성이 발생해도 같은 fail-stop deadline으로 비정상 종료한다.
+unit_sequence=$((unit_sequence + 1))
+shutdown_fail_stop_unit="taskcage-shutdown-fail-stop-$$-${unit_sequence}"
+cleanup_shutdown_fail_stop_unit() {
+  "${taskcage_systemctl[@]}" stop "${shutdown_fail_stop_unit}" >/dev/null 2>&1 || true
+  "${taskcage_systemctl[@]}" reset-failed "${shutdown_fail_stop_unit}" >/dev/null 2>&1 || true
+}
+trap cleanup_shutdown_fail_stop_unit EXIT INT TERM
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="${shutdown_fail_stop_unit}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --property=TimeoutStopSec=12s \
+  --setenv=TASKCAGE_RUN_FAIL_STOP_PROCESS_E2E=1 \
+  --setenv=TASKCAGE_FAIL_STOP_PROCESS_BIN="${taskcage_bin}" \
+  --setenv=TASKCAGE_FAIL_STOP_PROCESS_GHOST_BIN="${ghost_bin}" \
+  "${process_e2e_test}" \
+  'actual_shutdown_drain_switches_to_fail_stop_and_exits_nonzero' \
+  --exact \
+  --nocapture
+trap - EXIT INT TERM
+
 # 실제 daemon crash 뒤 stale socket과 잔여 실행을 다음 serve process가 요청 수락 전에 복구한다.
 restart_recovery_test=""
 while IFS= read -r artifact; do

@@ -292,8 +292,23 @@ impl FailStopCoordinator {
         self.lock_state().active.len()
     }
 
-    pub(crate) async fn active_changed(&self) {
-        self.active_changed.notified().await;
+    /// 활성 실행이 모두 정리되거나 기존 fail-stop deadline이 끝날 때까지만 기다린다.
+    pub(crate) async fn wait_until_inactive(&self, deadline: MonotonicDeadline) {
+        loop {
+            let changed = self.active_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.active_count() == 0 {
+                return;
+            }
+            let Some(remaining) = deadline.remaining() else {
+                return;
+            };
+            tokio::select! {
+                _ = changed => {}
+                _ = tokio::time::sleep(remaining) => return,
+            }
+        }
     }
 
     pub(crate) fn first_report(&self) -> Option<CleanupFailureReport> {

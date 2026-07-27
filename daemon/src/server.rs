@@ -221,13 +221,63 @@ where
         Arc::clone(handlers.fail_stop()),
     )
     .await;
-    // 연결 task를 닫아도 coordinator가 시작한 실행은 독립적으로 cleanup을 끝낸다.
-    if !matches!(result, Err(ServerError::FailStop { .. })) {
-        handlers.wait_idle().await;
+    if result.is_ok() {
+        tracing::info!("정상 shutdown drain을 시작합니다");
     }
-    // 실행 coordinator의 마지막 cleanup이 끝난 뒤에만 daemon 생존 기간 lock을 해제한다.
+    let idle_handlers = Arc::clone(&handlers);
+    finish_protocol_serve(
+        startup,
+        result,
+        async move { idle_handlers.wait_idle().await },
+        Arc::clone(handlers.fail_stop()),
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownDrain {
+    Idle,
+    FailStop(MonotonicDeadline),
+}
+
+async fn finish_protocol_serve<I>(
+    startup: StartupOwnership,
+    result: Result<(), ServerError>,
+    idle: I,
+    fail_stop: Arc<FailStopCoordinator>,
+) -> Result<(), ServerError>
+where
+    I: Future<Output = ()>,
+{
+    let result = if matches!(result, Err(ServerError::FailStop { .. })) {
+        result
+    } else {
+        match wait_for_shutdown_drain(idle, &fail_stop).await {
+            ShutdownDrain::Idle => result,
+            ShutdownDrain::FailStop(deadline) => {
+                fail_stop.wait_until_inactive(deadline).await;
+                Err(fail_stop_error(&fail_stop))
+            }
+        }
+    };
+    // 실행 coordinator의 마지막 정상 cleanup 또는 fail-stop drain 뒤에 lock을 해제한다.
     drop(startup);
     result
+}
+
+async fn wait_for_shutdown_drain<I>(idle: I, fail_stop: &FailStopCoordinator) -> ShutdownDrain
+where
+    I: Future<Output = ()>,
+{
+    tokio::pin!(idle);
+    tokio::select! {
+        biased;
+        deadline = fail_stop.activated() => ShutdownDrain::FailStop(deadline),
+        () = &mut idle => match fail_stop.deadline() {
+            Some(deadline) => ShutdownDrain::FailStop(deadline),
+            None => ShutdownDrain::Idle,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -348,14 +398,18 @@ where
         Stop::FailStop(deadline) => {
             let coordinator = fail_stop.expect("fail-stop 대기가 활성화돼 있어야 합니다");
             drain_fail_stop_connections(&mut connections, &coordinator, deadline).await;
-            let report = coordinator
-                .first_report()
-                .expect("최초 fail-stop 보고가 있어야 합니다");
-            Err(ServerError::FailStop {
-                task_id: report.task_id,
-                stage: report.stage.to_owned(),
-            })
+            Err(fail_stop_error(&coordinator))
         }
+    }
+}
+
+fn fail_stop_error(fail_stop: &FailStopCoordinator) -> ServerError {
+    let report = fail_stop
+        .first_report()
+        .expect("최초 fail-stop 보고가 있어야 합니다");
+    ServerError::FailStop {
+        task_id: report.task_id,
+        stage: report.stage.to_owned(),
     }
 }
 
@@ -371,8 +425,11 @@ async fn drain_fail_stop_connections(
     fail_stop: &FailStopCoordinator,
     deadline: MonotonicDeadline,
 ) {
+    let active = fail_stop.wait_until_inactive(deadline);
+    tokio::pin!(active);
+    let mut active_finished = false;
     loop {
-        if connections.is_empty() && fail_stop.active_count() == 0 {
+        if connections.is_empty() && active_finished {
             break;
         }
         let Some(remaining) = deadline.remaining() else {
@@ -384,7 +441,7 @@ async fn drain_fail_stop_connections(
                     log_connection_result(result);
                 }
             }
-            _ = fail_stop.active_changed() => {}
+            () = &mut active, if !active_finished => active_finished = true,
             _ = tokio::time::sleep(remaining) => break,
         }
     }
@@ -548,7 +605,7 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     use super::*;
-    use crate::capacity::TaskCapacitySettings;
+    use crate::capacity::{TaskCapacity, TaskCapacitySettings};
     use crate::codec::read_json_frame;
     use crate::preflight::{CapabilityProbe, SystemProbe};
     use crate::protocol::{
@@ -792,6 +849,189 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!path.socket.exists());
+    }
+
+    #[tokio::test]
+    async fn normal_shutdown_drain_waits_for_idle_and_releases_startup_ownership() {
+        let path = TestSocketPath::new("normal-drain");
+        let startup = StartupOwnership::acquire(&path.socket).unwrap();
+        let capacity = Arc::new(TaskCapacity::new(TaskCapacitySettings::new(1).unwrap()));
+        let permit = capacity.try_acquire().unwrap();
+        let fail_stop = FailStopCoordinator::new(
+            crate::fail_stop::FailStopSettings::new(Duration::from_secs(1)).unwrap(),
+        );
+        let (entered_sender, entered_receiver) = oneshot::channel();
+        let waiting_capacity = Arc::clone(&capacity);
+        let waiting_fail_stop = Arc::clone(&fail_stop);
+        let drain = tokio::spawn(async move {
+            finish_protocol_serve(
+                startup,
+                Ok(()),
+                async move {
+                    let _ = entered_sender.send(());
+                    waiting_capacity.wait_idle().await;
+                },
+                waiting_fail_stop,
+            )
+            .await
+        });
+
+        entered_receiver.await.unwrap();
+        assert!(matches!(
+            StartupOwnership::acquire(&path.socket),
+            Err(crate::startup::StartupError::LockHeld(_))
+        ));
+        drop(permit);
+
+        assert!(
+            timeout(Duration::from_secs(1), drain)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
+        );
+        assert!(capacity.try_acquire().is_some());
+        StartupOwnership::acquire(&path.socket).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_switches_to_the_existing_fail_stop_deadline() {
+        let path = TestSocketPath::new("fail-stop-after-shutdown");
+        let startup = StartupOwnership::acquire(&path.socket).unwrap();
+        let capacity = Arc::new(TaskCapacity::new(TaskCapacitySettings::new(1).unwrap()));
+        let permit = capacity.try_acquire().unwrap();
+        let clock_calls = Arc::new(AtomicUsize::new(0));
+        let base = Instant::now();
+        let fail_stop = FailStopCoordinator::with_test_clock(
+            crate::fail_stop::FailStopSettings::new(Duration::from_secs(1)).unwrap(),
+            {
+                let clock_calls = Arc::clone(&clock_calls);
+                Arc::new(move || {
+                    clock_calls.fetch_add(1, Ordering::SeqCst);
+                    base
+                })
+            },
+        );
+        let active = fail_stop
+            .try_admit()
+            .unwrap()
+            .register("shutdown-task".to_owned())
+            .unwrap();
+        let (entered_sender, entered_receiver) = oneshot::channel();
+        let waiting_capacity = Arc::clone(&capacity);
+        let waiting_fail_stop = Arc::clone(&fail_stop);
+        let drain = tokio::spawn(async move {
+            finish_protocol_serve(
+                startup,
+                Ok(()),
+                async move {
+                    let _ = entered_sender.send(());
+                    waiting_capacity.wait_idle().await;
+                },
+                waiting_fail_stop,
+            )
+            .await
+        });
+
+        entered_receiver.await.unwrap();
+        let deadline = fail_stop.activate(crate::fail_stop::CleanupFailureReport::new(
+            "shutdown-task",
+            "shutdown 뒤 정리",
+            vec!["작업 cgroup"],
+            "실패",
+        ));
+        permit.retain_for_fail_stop();
+        active.complete();
+
+        let result = timeout(Duration::from_secs(1), drain)
+            .await
+            .expect("shutdown drain이 기존 fail-stop deadline으로 전환돼야 합니다")
+            .unwrap();
+        assert!(matches!(
+            result,
+            Err(ServerError::FailStop { task_id, stage })
+                if task_id == "shutdown-task" && stage == "shutdown 뒤 정리"
+        ));
+        assert_eq!(fail_stop.deadline(), Some(deadline));
+        assert_eq!(clock_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(capacity.retained_for_fail_stop(), 1);
+        assert!(capacity.try_acquire().is_none());
+        StartupOwnership::acquire(&path.socket).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_observes_an_already_active_fail_stop() {
+        let path = TestSocketPath::new("already-fail-stopping");
+        let startup = StartupOwnership::acquire(&path.socket).unwrap();
+        let capacity = Arc::new(TaskCapacity::new(TaskCapacitySettings::new(1).unwrap()));
+        capacity.try_acquire().unwrap().retain_for_fail_stop();
+        let fail_stop = FailStopCoordinator::new(
+            crate::fail_stop::FailStopSettings::new(Duration::from_secs(1)).unwrap(),
+        );
+        let deadline = fail_stop.activate(crate::fail_stop::CleanupFailureReport::new(
+            "already-active",
+            "shutdown 진입 전 정리",
+            vec!["작업 cgroup"],
+            "실패",
+        ));
+        let waiting_capacity = Arc::clone(&capacity);
+
+        let result = timeout(
+            Duration::from_secs(1),
+            finish_protocol_serve(
+                startup,
+                Ok(()),
+                async move { waiting_capacity.wait_idle().await },
+                Arc::clone(&fail_stop),
+            ),
+        )
+        .await
+        .expect("이미 활성화된 fail-stop을 즉시 관찰해야 합니다");
+
+        assert!(matches!(result, Err(ServerError::FailStop { .. })));
+        assert_eq!(fail_stop.deadline(), Some(deadline));
+        StartupOwnership::acquire(&path.socket).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fail_stop_wins_when_idle_and_activation_become_ready_together() {
+        let path = TestSocketPath::new("idle-fail-stop-race");
+        let startup = StartupOwnership::acquire(&path.socket).unwrap();
+        let capacity = Arc::new(TaskCapacity::new(TaskCapacitySettings::new(1).unwrap()));
+        let permit = capacity.try_acquire().unwrap();
+        let fail_stop = FailStopCoordinator::new(
+            crate::fail_stop::FailStopSettings::new(Duration::from_secs(1)).unwrap(),
+        );
+        let (entered_sender, entered_receiver) = oneshot::channel();
+        let waiting_capacity = Arc::clone(&capacity);
+        let waiting_fail_stop = Arc::clone(&fail_stop);
+        let drain = tokio::spawn(async move {
+            finish_protocol_serve(
+                startup,
+                Ok(()),
+                async move {
+                    let _ = entered_sender.send(());
+                    waiting_capacity.wait_idle().await;
+                },
+                waiting_fail_stop,
+            )
+            .await
+        });
+
+        entered_receiver.await.unwrap();
+        fail_stop.activate(crate::fail_stop::CleanupFailureReport::new(
+            "race-task",
+            "동시 완료 경쟁",
+            Vec::new(),
+            "fail-stop 유지",
+        ));
+        drop(permit);
+
+        assert!(matches!(
+            timeout(Duration::from_secs(1), drain).await.unwrap().unwrap(),
+            Err(ServerError::FailStop { task_id, .. }) if task_id == "race-task"
+        ));
+        StartupOwnership::acquire(&path.socket).unwrap();
     }
 
     #[tokio::test]

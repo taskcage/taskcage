@@ -65,6 +65,8 @@ Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 
 19. cgroup membership 확인 뒤 fail-stop이 먼저 완료되면 exec gate와 `RUNNING`을 열지 않고 pending
     child와 작업 cgroup을 정리하며 Registry 예약을 되돌리고 실행 슬롯을 fail-stop 종료까지 보존한다.
     exec commit이 먼저 완료된 작업은 활성 whole-cgroup 정리 대상에 계속 포함한다.
+20. 정상 shutdown이 listener를 먼저 닫은 뒤 cleanup 불확실성이 발생해도 기존 fail-stop deadline으로
+    전환해 실제 daemon process가 0이 아닌 코드로 종료하고 lock과 잔여 process를 남기지 않는다.
 
 실행 방법:
 
