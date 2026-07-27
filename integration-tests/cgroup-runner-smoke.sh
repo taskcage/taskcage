@@ -34,6 +34,7 @@ true_bin="$(type -P true)"
 false_bin="$(type -P false)"
 env_bin="$(type -P env)"
 sleep_bin="$(type -P sleep)"
+touch_bin="$(type -P touch)"
 unit_sequence=0
 taskcage_limits=(
   --memory-bytes 67108864
@@ -226,6 +227,23 @@ unit_sequence=$((unit_sequence + 1))
   --setenv=TASKCAGE_RUN_LINUX_SUBMIT_INTEGRATION=1 \
   "${submit_test}" \
   'submit::tests::actual_submit_coordinator_runs_once_and_finishes_after_cleanup' \
+  --exact \
+  --nocapture
+
+# 준비 단계가 길어져도 startedAt과 wallTimeMs는 exec gate commit에서 시작한다.
+unit_sequence=$((unit_sequence + 1))
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-task-start-timing-$$-${unit_sequence}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --setenv=TASKCAGE_RUN_LINUX_TASK_TIMING_INTEGRATION=1 \
+  --setenv=TASKCAGE_TIMING_MARKER_BIN="${touch_bin}" \
+  "${submit_test}" \
+  'submit::tests::actual_task_timing_begins_after_exec_gate_commit' \
   --exact \
   --nocapture
 

@@ -67,6 +67,9 @@ Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 
     exec commit이 먼저 완료된 작업은 활성 whole-cgroup 정리 대상에 계속 포함한다.
 20. 정상 shutdown이 listener를 먼저 닫은 뒤 cleanup 불확실성이 발생해도 기존 fail-stop deadline으로
     전환해 실제 daemon process가 0이 아닌 코드로 종료하고 lock과 잔여 process를 남기지 않는다.
+21. 요청 수신 뒤 cgroup과 pending child 준비가 지연되어도 시작 clock은 exec gate commit 뒤 한 번만
+    호출되며, `RUNNING.startedAt`과 `FINISHED.timing.startedAt`이 같고 준비 시간은 `wallTimeMs`에
+    포함되지 않는다.
 
 실행 방법:
 

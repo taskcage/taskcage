@@ -231,6 +231,14 @@ SDK는 응답 유실이나 재연결 뒤 같은 작업을 재전송할 수 있�
 
 `taskAccepted`는 데몬이 작업 cgroup을 만들고 모든 제한을 설정한 뒤, 외부 명령을 해당 cgroup 안에서 시작한 후에만 반환한다. 실행 파일 또는 작업 디렉터리 문제로 `execve`가 시작되지 못하면 `taskAccepted`를 반환하지 않고, 정리를 마친 `task`/`FINISHED` 응답을 같은 요청의 직접 응답으로 반환한다. 이때 `terminationReason`은 `EXECUTION_FAILED`이고 `process.exitCode`와 `process.signal`은 모두 `null`이다. `execve`가 성공한 뒤 명령이 매우 빨리 종료해도 먼저 `taskAccepted`를 반환한다.
 
+`submittedAt`은 유효한 `submitTask` 요청을 데몬이 받은 시각이다. `startedAt`은 cgroup 준비, 제한
+적용과 read-back, pending `clone3` child의 cgroup 소속 확인을 끝낸 뒤 부모가 exec 시작 gate 신호를
+성공적으로 기록한 시각이다. 이 gate commit과 같은 단조시간에서 `wallTimeLimitMs`의 절대 deadline을
+만든다. `RUNNING` 공개는 별도 사건이며 child의 `execve` 성공을 확인한 뒤에만 수행한다. gate를 열기
+전에 실패하거나 fail-stop이 먼저 확정되면 시작 시각과 `RUNNING`을 만들지 않는다. gate commit 뒤
+`execve`가 실패하면 그 commit 시각을 `startedAt`으로 사용한 `EXECUTION_FAILED` 결과를 정리 뒤
+반환한다.
+
 `effectiveLimits`는 실제 cgroup에 적용된 값이며 요청값과 다르면 데몬은 작업을 수락하지 않고 `LIMIT_EXCEEDS_POLICY` 오류를 반환한다. 슬롯이 없으면 데몬은 작업을 만들지 않고 `CAPACITY_EXHAUSTED` 오류를 반환한다. 같은 `clientRequestId` 재전송에는 새 작업 대신 기존 `taskId`와 현재 상태를 반환한다.
 
 ### `getTask`
@@ -289,7 +297,9 @@ SDK는 응답 유실이나 재연결 뒤 같은 작업을 재전송할 수 있�
 }
 ```
 
-- `wallTimeMs`는 실행 시작부터 종료 확정까지의 단조 시간 차이다.
+- `wallTimeMs`는 exec 시작 gate commit의 단조시간부터 종료와 cleanup 확정 시각까지의 차이다.
+  cgroup 준비, 제한 적용과 pending `clone3` 대기 시간은 포함하지 않는다. timeout 뒤 whole-cgroup
+  cleanup과 결과 확정 시간은 포함하므로 `wallTimeMs`가 `wallTimeLimitMs`보다 클 수 있다.
 - `cpuTimeMicros`와 `memoryPeakBytes`는 cgroup 통계에서 수집한다.
 - `exitCode`와 `signal`은 해당하지 않으면 `null`이다.
 - `signal`은 Linux 표준 signal의 정식 이름을 사용한다. 예를 들어 9는 `SIGKILL`, 11은 `SIGSEGV`, 15는 `SIGTERM`이다. realtime signal은 `SIGRTMIN` 또는 `SIGRTMIN+N` 형태로 반환한다.

@@ -72,6 +72,8 @@ use serde::Serialize;
 use startup::StartupOwnership;
 #[cfg(target_os = "linux")]
 use startup_cgroup::recover_from_environment;
+#[cfg(target_os = "linux")]
+use submit::{TaskStartTime, TaskStartTimeSource};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -305,7 +307,8 @@ pub async fn run_once(config: RunOnceConfig) -> Result<RunOnceReport> {
         },
         cancellation,
         None,
-        || {},
+        TaskStartTimeSource::new(|| TaskStartTime::new(String::new(), std::time::Instant::now())),
+        |_| {},
     )
     .await
     .map_err(|failure| failure.into_error())?;
