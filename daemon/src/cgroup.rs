@@ -264,7 +264,7 @@ fn parse_unified_membership(contents: &str) -> Result<PathBuf, CgroupPathError> 
     Ok(PathBuf::from(path))
 }
 
-fn validate_job_id(job_id: &str) -> Result<(), CgroupPathError> {
+pub(crate) fn validate_job_id(job_id: &str) -> Result<(), CgroupPathError> {
     let valid = !job_id.is_empty()
         && job_id.len() <= 64
         && job_id
