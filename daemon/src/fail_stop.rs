@@ -2,7 +2,7 @@
 
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -79,7 +79,26 @@ enum Phase {
 #[derive(Debug)]
 struct State {
     phase: Phase,
-    active: HashSet<String>,
+    active: HashMap<String, StartState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartState {
+    Pending,
+    Committing,
+    Committed,
+    Failed,
+}
+
+#[derive(Debug)]
+pub(crate) enum StartCommitError<E> {
+    FailStopping(MonotonicDeadline),
+    NotActive(String),
+    AlreadyResolved {
+        task_id: String,
+        state: &'static str,
+    },
+    Gate(E),
 }
 
 pub(crate) struct FailStopCoordinator {
@@ -88,6 +107,8 @@ pub(crate) struct FailStopCoordinator {
     activated: Notify,
     active_changed: Notify,
     now: Arc<Clock>,
+    #[cfg(test)]
+    before_start_commit: Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>,
 }
 
 impl fmt::Debug for FailStopCoordinator {
@@ -110,11 +131,13 @@ impl FailStopCoordinator {
             settings,
             state: Mutex::new(State {
                 phase: Phase::Healthy,
-                active: HashSet::new(),
+                active: HashMap::new(),
             }),
             activated: Notify::new(),
             active_changed: Notify::new(),
             now,
+            #[cfg(test)]
+            before_start_commit: Mutex::new(None),
         })
     }
 
@@ -136,6 +159,7 @@ impl FailStopCoordinator {
     }
 
     pub(crate) fn activate(&self, report: CleanupFailureReport) -> MonotonicDeadline {
+        let logged_report = report.clone();
         let mut state = self.lock_state();
         if let Phase::FailStopping { deadline, .. } = state.phase {
             return deadline;
@@ -145,20 +169,100 @@ impl FailStopCoordinator {
         let deadline = MonotonicDeadline::from_start(now, self.settings.timeout())
             // 설정 생성 때 검증했지만 플랫폼 Instant 범위 끝에 도달했다면 즉시 종료한다.
             .unwrap_or_else(|| MonotonicDeadline::expired_at(now));
-        tracing::error!(
-            task_id = %report.task_id,
-            stage = report.stage,
-            uncleaned = ?report.uncleaned,
-            retry = report.retry,
-            "작업 정리를 증명하지 못해 process-wide fail-stop을 시작합니다"
-        );
         state.phase = Phase::FailStopping {
             deadline,
             first_report: report,
         };
         drop(state);
         self.activated.notify_waiters();
+        tracing::error!(
+            task_id = %logged_report.task_id,
+            stage = logged_report.stage,
+            uncleaned = ?logged_report.uncleaned,
+            retry = logged_report.retry,
+            "작업 정리를 증명하지 못해 process-wide fail-stop을 시작합니다"
+        );
         deadline
+    }
+
+    /// fail-stop 전환과 exec gate 개방은 같은 상태 잠금에서 순서를 하나로 확정한다.
+    pub(crate) fn commit_start<T, E>(
+        &self,
+        task_id: &str,
+        commit_gate: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, StartCommitError<E>> {
+        #[cfg(test)]
+        self.run_before_start_commit_hook();
+
+        let mut state = self.lock_state();
+        if let Phase::FailStopping { deadline, .. } = state.phase {
+            return Err(StartCommitError::FailStopping(deadline));
+        }
+
+        let Some(start_state) = state.active.get_mut(task_id) else {
+            return Err(StartCommitError::NotActive(task_id.to_owned()));
+        };
+        match start_state {
+            StartState::Pending => {}
+            StartState::Committing => {
+                return Err(StartCommitError::AlreadyResolved {
+                    task_id: task_id.to_owned(),
+                    state: "committing",
+                });
+            }
+            StartState::Committed => {
+                return Err(StartCommitError::AlreadyResolved {
+                    task_id: task_id.to_owned(),
+                    state: "committed",
+                });
+            }
+            StartState::Failed => {
+                return Err(StartCommitError::AlreadyResolved {
+                    task_id: task_id.to_owned(),
+                    state: "failed",
+                });
+            }
+        }
+
+        *start_state = StartState::Committing;
+        match commit_gate() {
+            Ok(committed) => {
+                *start_state = StartState::Committed;
+                Ok(committed)
+            }
+            Err(error) => {
+                *start_state = StartState::Failed;
+                Err(StartCommitError::Gate(error))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_before_start_commit_hook(&self, hook: Arc<dyn Fn() + Send + Sync + 'static>) {
+        *self
+            .before_start_commit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn run_before_start_commit_hook(&self) {
+        let hook = self
+            .before_start_commit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_is_committed(&self, task_id: &str) -> bool {
+        matches!(
+            self.lock_state().active.get(task_id),
+            Some(StartState::Committed)
+        )
     }
 
     pub(crate) fn is_fail_stopping(&self) -> bool {
@@ -200,7 +304,7 @@ impl FailStopCoordinator {
     }
 
     fn complete(&self, task_id: &str) {
-        let removed = self.lock_state().active.remove(task_id);
+        let removed = self.lock_state().active.remove(task_id).is_some();
         debug_assert!(removed, "완료할 활성 실행 소유권이 있어야 합니다");
         if removed {
             // 대기자가 등록되기 직전에 완료돼도 조기 종료 재확인을 놓치지 않는다.
@@ -225,9 +329,12 @@ impl FailStopAdmission<'_> {
         mut self,
         task_id: String,
     ) -> Result<ActiveExecution, ActiveExecutionError> {
-        if !self.state.active.insert(task_id.clone()) {
+        if self.state.active.contains_key(&task_id) {
             return Err(ActiveExecutionError::DuplicateTask(task_id));
         }
+        self.state
+            .active
+            .insert(task_id.clone(), StartState::Pending);
         Ok(ActiveExecution {
             coordinator: Arc::clone(self.coordinator),
             task_id,
@@ -388,6 +495,223 @@ mod tests {
         assert!(coordinator.try_admit().is_none());
         active.complete();
         assert_eq!(coordinator.active_count(), 0);
+    }
+
+    #[test]
+    fn fail_stop_wins_before_start_without_running_the_gate_commit() {
+        let coordinator =
+            FailStopCoordinator::new(FailStopSettings::new(Duration::from_secs(1)).unwrap());
+        let active = coordinator
+            .try_admit()
+            .unwrap()
+            .register("task".to_owned())
+            .unwrap();
+        let deadline = coordinator.activate(CleanupFailureReport::new(
+            "other-task",
+            "시험",
+            vec!["cgroup"],
+            "실패",
+        ));
+        let gate_calls = AtomicUsize::new(0);
+
+        let result = coordinator.commit_start("task", || {
+            gate_calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<(), ()>(())
+        });
+
+        assert!(matches!(
+            result,
+            Err(StartCommitError::FailStopping(actual)) if actual == deadline
+        ));
+        assert_eq!(gate_calls.load(Ordering::SeqCst), 0);
+        assert!(!coordinator.start_is_committed("task"));
+        active.complete();
+    }
+
+    #[test]
+    fn start_commit_wins_before_fail_stop_and_stays_active() {
+        let coordinator =
+            FailStopCoordinator::new(FailStopSettings::new(Duration::from_secs(1)).unwrap());
+        let active = coordinator
+            .try_admit()
+            .unwrap()
+            .register("task".to_owned())
+            .unwrap();
+        let gate_calls = AtomicUsize::new(0);
+
+        coordinator
+            .commit_start("task", || {
+                gate_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        coordinator.activate(CleanupFailureReport::new(
+            "other-task",
+            "시험",
+            vec!["cgroup"],
+            "실패",
+        ));
+
+        assert_eq!(gate_calls.load(Ordering::SeqCst), 1);
+        assert!(coordinator.start_is_committed("task"));
+        assert_eq!(coordinator.active_count(), 1);
+        active.complete();
+    }
+
+    #[test]
+    fn concurrent_start_commits_open_the_gate_once() {
+        let coordinator =
+            FailStopCoordinator::new(FailStopSettings::new(Duration::from_secs(1)).unwrap());
+        let active = coordinator
+            .try_admit()
+            .unwrap()
+            .register("task".to_owned())
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let gate_calls = Arc::new(AtomicUsize::new(0));
+        let handles = (0..2)
+            .map(|_| {
+                let coordinator = Arc::clone(&coordinator);
+                let barrier = Arc::clone(&barrier);
+                let gate_calls = Arc::clone(&gate_calls);
+                thread::spawn(move || {
+                    barrier.wait();
+                    coordinator.commit_start("task", || {
+                        gate_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok::<(), ()>(())
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(gate_calls.load(Ordering::SeqCst), 1);
+        assert!(results.iter().any(|result| matches!(
+            result,
+            Err(StartCommitError::AlreadyResolved {
+                state: "committed",
+                ..
+            })
+        )));
+        active.complete();
+    }
+
+    #[test]
+    fn unregistered_task_cannot_commit_start() {
+        let coordinator =
+            FailStopCoordinator::new(FailStopSettings::new(Duration::from_secs(1)).unwrap());
+        let gate_calls = AtomicUsize::new(0);
+
+        let result = coordinator.commit_start("missing", || {
+            gate_calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<(), ()>(())
+        });
+
+        assert!(
+            matches!(result, Err(StartCommitError::NotActive(task_id)) if task_id == "missing")
+        );
+        assert_eq!(gate_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn failed_gate_commit_cannot_be_retried() {
+        let coordinator =
+            FailStopCoordinator::new(FailStopSettings::new(Duration::from_secs(1)).unwrap());
+        let active = coordinator
+            .try_admit()
+            .unwrap()
+            .register("task".to_owned())
+            .unwrap();
+        let gate_calls = AtomicUsize::new(0);
+
+        let first = coordinator.commit_start("task", || {
+            gate_calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>("gate failed")
+        });
+        let second = coordinator.commit_start("task", || {
+            gate_calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<(), &str>(())
+        });
+
+        assert!(matches!(first, Err(StartCommitError::Gate("gate failed"))));
+        assert!(matches!(
+            second,
+            Err(StartCommitError::AlreadyResolved {
+                state: "failed",
+                ..
+            })
+        ));
+        assert_eq!(gate_calls.load(Ordering::SeqCst), 1);
+        active.complete();
+    }
+
+    #[test]
+    fn panicked_gate_commit_stays_non_retryable_after_lock_poison() {
+        let coordinator =
+            FailStopCoordinator::new(FailStopSettings::new(Duration::from_secs(1)).unwrap());
+        let active = coordinator
+            .try_admit()
+            .unwrap()
+            .register("task".to_owned())
+            .unwrap();
+        let retry_calls = AtomicUsize::new(0);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = coordinator.commit_start("task", || -> Result<(), ()> {
+                panic!("gate commit panic 주입");
+            });
+        }));
+        let retry = coordinator.commit_start("task", || {
+            retry_calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<(), ()>(())
+        });
+
+        assert!(panic.is_err());
+        assert!(matches!(
+            retry,
+            Err(StartCommitError::AlreadyResolved {
+                state: "committing",
+                ..
+            })
+        ));
+        assert_eq!(retry_calls.load(Ordering::SeqCst), 0);
+        coordinator.activate(CleanupFailureReport::new(
+            "task",
+            "gate commit panic",
+            vec!["실행 상태"],
+            "fail-stop",
+        ));
+        assert!(coordinator.is_fail_stopping());
+        active.complete();
+    }
+
+    #[test]
+    fn poisoned_state_lock_keeps_start_commit_fail_closed() {
+        let coordinator =
+            FailStopCoordinator::new(FailStopSettings::new(Duration::from_secs(1)).unwrap());
+        let poisoned = Arc::clone(&coordinator);
+        let _ = thread::spawn(move || {
+            let _state = poisoned.state.lock().unwrap();
+            panic!("상태 잠금 poison 주입");
+        })
+        .join();
+        let active = coordinator
+            .try_admit()
+            .unwrap()
+            .register("task".to_owned())
+            .unwrap();
+
+        coordinator
+            .commit_start("task", || Ok::<(), ()>(()))
+            .unwrap();
+
+        assert!(coordinator.start_is_committed("task"));
+        active.complete();
     }
 
     #[test]

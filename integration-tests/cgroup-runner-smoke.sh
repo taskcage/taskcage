@@ -278,7 +278,24 @@ unit_sequence=$((unit_sequence + 1))
   --exact \
   --nocapture
 
-# 정리 불확실성 주입은 모든 활성 작업을 같은 fail-stop 예산 안에서 전체 종료한다.
+# membership 확인 뒤 fail-stop이 먼저 끝나면 exec gate를 열지 않고 pending 작업을 정리한다.
+unit_sequence=$((unit_sequence + 1))
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-exec-gate-race-$$-${unit_sequence}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --setenv=TASKCAGE_RUN_LINUX_EXEC_GATE_INTEGRATION=1 \
+  --setenv=TASKCAGE_EXEC_GATE_GHOST_BIN="${ghost_bin}" \
+  "${submit_test}" \
+  'submit::tests::actual_fail_stop_before_exec_commit_rolls_back_without_target_start' \
+  --exact \
+  --nocapture
+
+# exec commit이 먼저 끝난 활성 작업은 fail-stop whole-cgroup 정리 대상에 계속 포함한다.
 unit_sequence=$((unit_sequence + 1))
 "${taskcage_systemd[@]}" \
   --quiet \

@@ -839,7 +839,11 @@ mod tests {
     use std::collections::BTreeMap;
     #[cfg(target_os = "linux")]
     use std::fs;
+    #[cfg(target_os = "linux")]
+    use std::path::Path;
     use std::sync::Arc;
+    #[cfg(target_os = "linux")]
+    use std::sync::Barrier as ThreadBarrier;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tokio::sync::{Barrier, Notify};
@@ -2003,6 +2007,123 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn actual_fail_stop_before_exec_commit_rolls_back_without_target_start() {
+        if std::env::var_os("TASKCAGE_RUN_LINUX_EXEC_GATE_INTEGRATION").is_none() {
+            eprintln!("NOT EXECUTED: 실제 cgroup v2 위임 환경이 필요합니다");
+            return;
+        }
+
+        let environment = SystemProbe::from_environment().check().unwrap();
+        let jobs_path = environment.report().delegated_root.join("jobs");
+        let fail_stop = fail_stop_runtime();
+        let coordinator = Arc::new(
+            SubmitCoordinator::initialize(
+                environment,
+                TaskCapacitySettings::new(1).unwrap(),
+                Arc::clone(&fail_stop),
+            )
+            .unwrap(),
+        );
+        let ghost_bin = std::env::var("TASKCAGE_EXEC_GATE_GHOST_BIN")
+            .expect("exec gate 통합 시험용 ghost fixture 경로가 필요합니다");
+        let marker = std::env::temp_dir().join(format!(
+            "taskcage-exec-gate-{}-{}.ready",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let marker_text = marker.to_string_lossy().into_owned();
+        let reached = Arc::new(ThreadBarrier::new(2));
+        let release = Arc::new(ThreadBarrier::new(2));
+        fail_stop.set_before_start_commit_hook({
+            let reached = Arc::clone(&reached);
+            let release = Arc::clone(&release);
+            Arc::new(move || {
+                reached.wait();
+                release.wait();
+            })
+        });
+
+        let submitting = tokio::spawn({
+            let coordinator = Arc::clone(&coordinator);
+            async move {
+                coordinator
+                    .submit(
+                        request(
+                            PROTOCOL_VERSION,
+                            REQUEST_ID,
+                            linux_payload(
+                                CLIENT_REQUEST_ID,
+                                &ghost_bin,
+                                &["--hold-parent", &marker_text],
+                                60_000,
+                            ),
+                        ),
+                        metadata(TASK_ID),
+                        || ("finished".to_owned(), Instant::now()),
+                    )
+                    .await
+            }
+        });
+
+        reached.wait();
+        let job_path = jobs_path.join(format!("job-{TASK_ID}"));
+        let pending_pid = fs::read_to_string(job_path.join("cgroup.procs"))
+            .unwrap()
+            .lines()
+            .next()
+            .expect("pending child가 작업 cgroup에 있어야 합니다")
+            .parse::<u32>()
+            .unwrap();
+        let deadline = fail_stop.activate(CleanupFailureReport::new(
+            TASK_ID,
+            "exec gate 경쟁 통합 시험",
+            vec!["pending child", "작업 cgroup"],
+            "exec gate를 열지 않고 기존 deadline으로 정리",
+        ));
+        let repeated = fail_stop.activate(CleanupFailureReport::new(
+            "later-task",
+            "후속 실패",
+            vec!["작업 cgroup"],
+            "deadline 유지",
+        ));
+        release.wait();
+
+        let outcome = timeout(TokioDuration::from_secs(10), submitting)
+            .await
+            .expect("fail-stop deadline 안에 pending 실행을 정리해야 합니다")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            outcome.observation,
+            SubmitObservation::Failed(SubmitFailure {
+                code: ErrorCode::InternalError,
+                ..
+            })
+        ));
+        assert_eq!(deadline, repeated);
+        assert_eq!(fail_stop.deadline(), Some(deadline));
+        assert!(!fail_stop.start_is_committed(TASK_ID));
+        assert_eq!(fail_stop.active_count(), 0);
+        assert_eq!(coordinator.snapshot(TASK_ID), Ok(None));
+        assert_eq!(
+            coordinator.snapshot_by_client_request_id(CLIENT_REQUEST_ID),
+            Ok(None)
+        );
+        assert_eq!(coordinator.capacity.retained_for_fail_stop(), 1);
+        assert!(coordinator.capacity.try_acquire().is_none());
+        assert!(!marker.exists(), "target marker가 생성되면 안 됩니다");
+        assert!(
+            !Path::new(&format!("/proc/{pending_pid}")).exists(),
+            "pending child가 남아 있습니다: {pending_pid}"
+        );
+        assert!(!job_path.exists(), "작업 cgroup이 남아 있습니다");
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn actual_fail_stop_cleans_all_active_cgroups_and_blocks_new_execution() {
         if std::env::var_os("TASKCAGE_RUN_LINUX_FAIL_STOP_INTEGRATION").is_none() {
@@ -2074,12 +2195,31 @@ mod tests {
             .map(|line| line.split_once('=').unwrap().1.parse::<u32>().unwrap())
             .collect::<Vec<_>>();
 
-        fail_stop.activate(CleanupFailureReport::new(
+        assert_eq!(fail_stop.active_count(), 2);
+        assert!(fail_stop.start_is_committed(TASK_ID));
+        assert!(fail_stop.start_is_committed(NONZERO_TASK_ID));
+        assert!(matches!(
+            coordinator.snapshot(TASK_ID).unwrap(),
+            Some(TaskPayload::Running { .. })
+        ));
+        assert!(matches!(
+            coordinator.snapshot(NONZERO_TASK_ID).unwrap(),
+            Some(TaskPayload::Running { .. })
+        ));
+
+        let deadline = fail_stop.activate(CleanupFailureReport::new(
             TASK_ID,
             "통합 시험 정리 불확실성 주입",
             vec!["작업 cgroup"],
             "process-wide 정리 시작",
         ));
+        let repeated = fail_stop.activate(CleanupFailureReport::new(
+            "later-task",
+            "후속 정리 불확실성",
+            vec!["작업 cgroup"],
+            "기존 deadline 유지",
+        ));
+        assert_eq!(deadline, repeated);
 
         timeout(TokioDuration::from_secs(5), async {
             loop {
@@ -2100,6 +2240,7 @@ mod tests {
         })
         .await
         .expect("fail-stop은 활성 작업 전체를 정리해야 합니다");
+        assert_eq!(fail_stop.deadline(), Some(deadline));
         assert_eq!(fail_stop.active_count(), 0);
 
         let rejected = coordinator

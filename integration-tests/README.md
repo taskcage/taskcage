@@ -62,6 +62,9 @@ Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 
     정리하며, 안전한 결과만 `DAEMON_ERROR`로 저장하고 작업 cgroup을 남기지 않는다.
 18. daemon 생존 기간 lock이 동시 시작을 막고, 비정상 종료로 lock이 해제된 뒤 검증된 stale socket만
     제거하며 preflight와 실행 코어 준비 전에는 listener를 열지 않는다.
+19. cgroup membership 확인 뒤 fail-stop이 먼저 완료되면 exec gate와 `RUNNING`을 열지 않고 pending
+    child와 작업 cgroup을 정리하며 Registry 예약을 되돌리고 실행 슬롯을 fail-stop 종료까지 보존한다.
+    exec commit이 먼저 완료된 작업은 활성 whole-cgroup 정리 대상에 계속 포함한다.
 
 실행 방법:
 

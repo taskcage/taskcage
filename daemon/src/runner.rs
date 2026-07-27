@@ -11,10 +11,10 @@ use crate::cancellation::CancellationRuntime;
 use crate::cgroup::{CgroupError, CgroupManager, JobCgroup, JobStats};
 use crate::deadline::MonotonicDeadline;
 use crate::executor::{
-    ExecFailure, PreparedCommand, ProcessExit, SpawnOutcome, SpawnedProcess, WaitOutcome,
-    spawn_in_cgroup,
+    ExecFailure, PreparedCommand, ProcessExit, SpawnOutcome, SpawnedProcess, StartCommitToken,
+    WaitOutcome, spawn_in_cgroup,
 };
-use crate::fail_stop::{CleanupFailureReport, FailStopCoordinator};
+use crate::fail_stop::{CleanupFailureReport, FailStopCoordinator, StartCommitError};
 use crate::lifecycle::{
     ControlTrigger, ControlTriggers, ExecutionEvidence, ProcessEvidence, SingleTaskLifecycle,
 };
@@ -329,7 +329,7 @@ where
         );
     }
 
-    let pending = match spawn_in_cgroup(&prepared, job.raw_fd(), capture_limits) {
+    let mut pending = match spawn_in_cgroup(&prepared, job.raw_fd(), capture_limits) {
         Ok(pending) => pending,
         Err(error) => {
             drop(prepared);
@@ -387,7 +387,61 @@ where
             .await);
         }
     }
-    let spawn = match pending.start() {
+    enum StartDecision {
+        Committed(StartCommitToken),
+        FailStopping(MonotonicDeadline),
+        Failed(String),
+    }
+    let start = match fail_stop {
+        Some(coordinator) => match coordinator
+            .commit_start(&job_id, || pending.commit_start_signal())
+        {
+            Ok(token) => StartDecision::Committed(token),
+            Err(StartCommitError::FailStopping(deadline)) => StartDecision::FailStopping(deadline),
+            Err(StartCommitError::NotActive(task_id)) => StartDecision::Failed(format!(
+                "활성 실행 owner가 없는 taskId는 exec를 시작할 수 없습니다: {task_id}"
+            )),
+            Err(StartCommitError::AlreadyResolved { task_id, state }) => StartDecision::Failed(
+                format!("exec 시작이 이미 확정된 taskId입니다: {task_id} ({state})"),
+            ),
+            Err(StartCommitError::Gate(error)) => StartDecision::Failed(error.to_string()),
+        },
+        None => match pending.commit_start_signal() {
+            Ok(token) => StartDecision::Committed(token),
+            Err(error) => StartDecision::Failed(error.to_string()),
+        },
+    };
+    let token = match start {
+        StartDecision::Committed(token) => token,
+        StartDecision::FailStopping(deadline) => {
+            drop(prepared);
+            return Err(cleanup_pending_job_until(
+                &mut job,
+                pending,
+                deadline,
+                &job_id,
+                fail_stop,
+                "exec 시작 commit 전 fail-stop",
+                "fail-stop 전환이 exec gate보다 먼저 완료됐습니다".to_owned(),
+            )
+            .await);
+        }
+        StartDecision::Failed(cause) => {
+            drop(prepared);
+            return Err(cleanup_pending_job(
+                &mut job,
+                pending,
+                cleanup_timeout,
+                &job_id,
+                fail_stop,
+                "exec 시작 gate commit",
+                cause,
+            )
+            .await);
+        }
+    };
+    let committed = pending.into_start_committed(token);
+    let spawn = match committed.wait_for_exec() {
         Ok(spawn) => spawn,
         Err(error) => {
             let isolation_uncertain = matches!(&error, crate::executor::ExecutorError::Wait(_));
