@@ -124,6 +124,7 @@ if (result.terminationReason() == TerminationReason.TIMEOUT) {
 - [정리 뒤 종료 결과 공개 결정](docs/decisions/0002-publish-terminal-results-after-cleanup.md): 작업 전체 정리가 확인된 뒤에만 `FINISHED`를 공개하는 원칙
 - [RUNNING 이후 정리 불확실 처리 결정](docs/decisions/0003-fail-stop-on-uncertain-cleanup-after-running.md): 제한된 복구 뒤 fail-stop 종료와 재시작 복구 원칙
 - [명시적 owner-only UDS 결정](docs/decisions/0004-explicit-owner-only-uds-socket.md): socket 절대 경로, `0600` 권한과 기존 경로 보호 원칙
+- [시작 복구 소유권과 stale socket 결정](docs/decisions/0005-own-startup-recovery-before-removing-stale-socket.md): 단일 daemon lock, 안전한 stale 판정과 시작 순서
 
 ## 지원 범위
 

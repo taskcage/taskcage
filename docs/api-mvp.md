@@ -28,8 +28,12 @@ MVP는 단일 Linux 호스트에서 Java 17+ SDK와 `taskcaged`가 통신하는 
 - 하나의 연결에서는 요청과 응답을 순서대로 처리한다. 동시 호출은 별도 연결 또는 순서를 보장하는 연결 풀을 사용한다.
 - 데몬은 socket 절대 경로를 서비스 설정으로 명시적으로 받으며 UID/GID를 임의로 바꾸지 않는다.
 - MVP socket mode는 owner-only `0600`이다.
-- 기존 경로가 일반 파일, symlink, 활성 socket 또는 stale socket이면 삭제하지 않고 시작을 거절한다.
-- 정상 종료에서는 자신이 성공적으로 bind한 동일한 socket만 제거한다. crash 뒤 stale socket 처리는 startup recovery 범위다.
+- 일반 bind는 기존 일반 파일, 디렉터리, symlink와 socket을 삭제하지 않고 시작을 거절한다.
+- crash 뒤 startup recovery는 보호된 runtime 디렉터리에서 단일 daemon lock을 먼저 획득하고, 기존
+  socket의 종류, owner UID, mode, link count, device·inode와 연결 결과를 모두 검증한 경우에만 stale
+  socket을 제거할 수 있다. 연결 성공, 권한 오류, timeout 또는 불확실한 결과에서는 삭제하지 않는다.
+- 정상 종료에서는 자신이 성공적으로 bind한 동일 device·inode의 socket만 제거한다. lock 파일은
+  삭제하지 않고 file descriptor를 닫아 lock만 해제한다.
 
 ### 프레임
 
@@ -363,9 +367,19 @@ SDK는 응답 유실이나 재연결 뒤 같은 작업을 재전송할 수 있�
 
 ### 재시작 복구
 
-- 데몬은 UDS 요청을 받기 전에 남아 있는 TaskCage cgroup을 검색하고 정리한다. 잔여 cgroup의
-  `populated 0`과 제거를 확인하기 전에는 요청을 수락하거나 준비됐다고 보고하지 않는다.
-- 시작 복구에 실패하면 신규 작업을 시작하지 않는다.
+- 하나의 서비스 인스턴스는 인스턴스 전용 socket 부모 runtime 디렉터리와 supervisor가 독점 위임한
+  cgroup root를 사용한다. runtime 디렉터리는 daemon effective UID가 소유하고 group·other가 쓸 수
+  없어야 한다. lock 경로는 그 디렉터리의 `.taskcaged.lock`이며 mode는 `0600`이다.
+- 시작 순서는 단일 daemon lock 획득, stale socket 확인·복구, 남은 TaskCage cgroup 정리, 전체 cgroup
+  사전 검사, socket bind, UDS 요청 수락이다. 앞 단계가 끝나기 전에는 뒤 단계의 side effect를 만들지
+  않는다.
+- socket은 명시된 경로이거나 `connect`가 한 번 실패했다는 이유만으로 삭제하지 않는다. symlink를
+  따라가지 않고 신원과 권한을 확인하며, `ECONNREFUSED`는 다른 검증을 모두 통과한 뒤에만 stale
+  근거로 사용할 수 있다. 삭제 직전에 device·inode를 포함한 신원을 다시 확인한다.
+- 잔여 cgroup의 `populated 0`과 제거를 확인한 뒤 전체 cgroup 사전 검사를 새로 통과하기 전에는 요청을
+  수락하거나 준비됐다고 보고하지 않는다.
+- 소유권 확인, stale 판정, socket 복구, cgroup 복구 또는 사전 검사에 실패하면 socket을 bind하거나
+  신규 작업을 시작하지 않고 startup 오류로 종료한다. 이는 새 protocol 오류 코드가 아니다.
 - MVP Registry는 메모리 기반이므로 재시작 전 작업 snapshot과 idempotency mapping을 복구하지
   않는다. 이전 `taskId` 조회는 `TASK_NOT_FOUND`가 될 수 있다.
 - 같은 `clientRequestId`를 재제출하면 새 작업이 만들어질 수 있지만, 이전 잔여 cgroup 정리가 끝난
@@ -374,7 +388,8 @@ SDK는 응답 유실이나 재연결 뒤 같은 작업을 재전송할 수 있�
 
 이 동작은 기존 `RUNNING`, `FINISHED`, `ENVIRONMENT_UNAVAILABLE`, `DAEMON_UNAVAILABLE`,
 `TASK_NOT_FOUND`와 `IDEMPOTENCY_CONFLICT`만 사용한다. protocol v1에 cleanup field, 상태, 응답
-타입 또는 오류 코드를 추가하지 않는다.
+타입 또는 오류 코드를 추가하지 않는다. 파일 판정과 lock의 상세 절차는
+[ADR 0005](decisions/0005-own-startup-recovery-before-removing-stale-socket.md)를 따른다.
 
 ## 오류 코드
 
