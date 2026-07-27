@@ -118,7 +118,10 @@ TaskCage MVP는 네 번째 선택지를 사용한다. `RUNNING` 공개 이후 �
 
 ### 재시작 복구와 idempotency 한계
 
-- 데몬은 UDS 요청을 받기 전에 남아 있는 TaskCage cgroup을 검색하고 정리한다.
+- 데몬은 [ADR 0005](0005-own-startup-recovery-before-removing-stale-socket.md)의 보호된 runtime
+  디렉터리를 확인하고 단일 daemon lock을 획득한 뒤에만 socket과 cgroup 시작 복구를 수행한다.
+- 시작 순서는 단일 daemon 소유권 획득, stale socket 확인·복구, 남은 TaskCage cgroup 정리, 전체 cgroup
+  사전 검사, socket bind, UDS 요청 수락이다.
 - 잔여 cgroup의 `populated 0`과 제거를 확인하기 전에는 요청을 수락하지 않는다.
 - 시작 복구에 실패하면 준비됐다고 보고하지 않고 신규 작업을 시작하지 않는다.
 - MVP Registry는 메모리 기반이므로 재시작 전 snapshot과 idempotency mapping을 복구하지 않는다.
@@ -178,7 +181,8 @@ TaskCage MVP는 네 번째 선택지를 사용한다. `RUNNING` 공개 이후 �
   구현한다.
 - 같은 작업과 모든 활성 작업을 남은 fail-stop deadline 안에서 함께 정리한다.
 - UDS 신규 연결·작업 수락 중단, 기존 연결의 제한된 조회와 0이 아닌 제어 종료 경로를 구현한다.
-- 데몬 시작 시 잔여 TaskCage cgroup을 검색·정리하고 완료 전에는 UDS를 열지 않는다.
+- 단일 daemon lock과 stale socket 판정을 구현한 뒤 잔여 TaskCage cgroup을 검색·정리하고, 전체 시작
+  복구와 사전 검사가 끝나기 전에는 UDS를 열지 않는다.
 - capacity가 추가될 때 불확실한 작업의 슬롯을 반환하지 않는지 검증한다.
 - 실제 Linux cgroup v2 환경에서 복구 성공, 복구 실패, 재시작 정리와 잔존 0건을 검증한다.
 
@@ -189,3 +193,4 @@ TaskCage MVP는 네 번째 선택지를 사용한다. `RUNNING` 공개 이후 �
 
 - 계약 Issue: [#30](https://github.com/taskcage/taskcage/issues/30)
 - 선행 결정: [ADR 0002](0002-publish-terminal-results-after-cleanup.md)
+- 시작 복구 소유권 결정: [ADR 0005](0005-own-startup-recovery-before-removing-stale-socket.md)
