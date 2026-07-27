@@ -1,10 +1,12 @@
 //! protocol v1 typed 요청을 기존 capability, submit과 Registry 경계에 연결한다.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::capability::{CapabilityAdapter, CapabilityInitialization};
 use crate::capacity::TaskCapacitySettings;
+use crate::fail_stop::FailStopCoordinator;
 use crate::preflight::{PreflightError, VerifiedEnvironment};
 use crate::protocol::{
     ErrorCode, ErrorPayload, PROTOCOL_VERSION, Request, Response, TaskAcceptedPayload,
@@ -100,12 +102,14 @@ enum HandlerState<C> {
 #[derive(Debug)]
 pub(crate) struct ProtocolHandlers<C> {
     state: HandlerState<C>,
+    fail_stop: Arc<FailStopCoordinator>,
 }
 
 impl<C> ProtocolHandlers<C> {
     fn initialize_with<E, F>(
         preflight: Result<VerifiedEnvironment, PreflightError>,
         capacity_settings: TaskCapacitySettings,
+        fail_stop: Arc<FailStopCoordinator>,
         build_core: F,
     ) -> Result<Self, E>
     where
@@ -120,11 +124,13 @@ impl<C> ProtocolHandlers<C> {
                     capabilities: adapter,
                     core: build_core(environment, capacity_settings)?,
                 },
+                fail_stop,
             }),
             CapabilityInitialization::Unavailable { adapter } => Ok(Self {
                 state: HandlerState::Unavailable {
                     capabilities: adapter,
                 },
+                fail_stop,
             }),
         }
     }
@@ -149,10 +155,14 @@ impl<C> ProtocolHandlers<C> {
         if let Some(error) = validate_envelope(protocol_version, &request_id) {
             return RequestHandling::Handled(error);
         }
+        let mut payload = self.capabilities().payload();
+        if self.fail_stop.is_fail_stopping() {
+            payload.cgroup_v2_ready = false;
+        }
         RequestHandling::Handled(Response::Capabilities {
             protocol_version: PROTOCOL_VERSION,
             request_id,
-            payload: self.capabilities().payload(),
+            payload,
         })
     }
 }
@@ -162,14 +172,27 @@ impl ProtocolHandlers<SubmitCoordinator> {
     pub(crate) fn initialize(
         preflight: Result<VerifiedEnvironment, PreflightError>,
         capacity_settings: TaskCapacitySettings,
+        fail_stop: Arc<FailStopCoordinator>,
     ) -> crate::Result<Self> {
-        Self::initialize_with(preflight, capacity_settings, SubmitCoordinator::initialize)
+        let core_fail_stop = Arc::clone(&fail_stop);
+        Self::initialize_with(
+            preflight,
+            capacity_settings,
+            fail_stop,
+            move |environment, settings| {
+                SubmitCoordinator::initialize(environment, settings, core_fail_stop)
+            },
+        )
     }
 
     pub(crate) async fn wait_idle(&self) {
         if let HandlerState::Ready { core, .. } = &self.state {
             core.wait_idle().await;
         }
+    }
+
+    pub(crate) fn fail_stop(&self) -> &Arc<FailStopCoordinator> {
+        &self.fail_stop
     }
 }
 
@@ -215,14 +238,6 @@ where
             }
         };
         debug_assert_eq!(validated_request_id, request_id);
-
-        if let Err(code) = self.capabilities().submit_gate() {
-            return RequestHandling::Handled(error_response(
-                request_id,
-                code,
-                "cgroup v2 execution environment is unavailable",
-            ));
-        }
 
         let core = match &self.state {
             HandlerState::Ready { core, .. } => core,
@@ -531,9 +546,11 @@ mod tests {
     }
 
     fn ready_handlers(core: FakeCore, maximum: u32) -> ProtocolHandlers<FakeCore> {
+        let fail_stop = test_fail_stop();
         ProtocolHandlers::initialize_with(
             Ok(VerifiedEnvironment::for_test()),
             TaskCapacitySettings::new(maximum).unwrap(),
+            fail_stop,
             |environment, _| {
                 assert_eq!(
                     environment.report().delegated_root.to_string_lossy(),
@@ -545,13 +562,21 @@ mod tests {
         .unwrap()
     }
 
+    fn test_fail_stop() -> Arc<FailStopCoordinator> {
+        FailStopCoordinator::new(
+            crate::fail_stop::FailStopSettings::new(Duration::from_secs(30)).unwrap(),
+        )
+    }
+
     fn unavailable_handlers() -> ProtocolHandlers<FakeCore> {
+        let fail_stop = test_fail_stop();
         ProtocolHandlers::initialize_with(
             Err(PreflightError::MissingController {
                 controller: "pids".to_owned(),
                 path: "/delegated".into(),
             }),
             TaskCapacitySettings::new(2).unwrap(),
+            fail_stop,
             |_environment, _| -> Result<FakeCore, Infallible> {
                 panic!("preflight 실패에서는 실행 코어를 만들면 안 됩니다")
             },
@@ -663,13 +688,13 @@ mod tests {
 
     fn context_for(task_id: &str) -> SubmitContext {
         SubmitContext::new(
-            SubmitMetadata {
-                task_id: task_id.to_owned(),
-                submitted_at: "2026-07-20T09:00:00Z".to_owned(),
-                started_at: "2026-07-20T09:00:00Z".to_owned(),
-                started_monotonic: Instant::now(),
-                cleanup_timeout: Duration::from_secs(5),
-            },
+            SubmitMetadata::fixed(
+                task_id.to_owned(),
+                "2026-07-20T09:00:00Z".to_owned(),
+                "2026-07-20T09:00:00Z".to_owned(),
+                Instant::now(),
+                Duration::from_secs(5),
+            ),
             Box::new(|| ("2026-07-20T09:00:01Z".to_owned(), Instant::now())),
         )
     }
@@ -786,6 +811,34 @@ mod tests {
             Response::Capabilities { request_id, payload, .. }
                 if request_id == OTHER_REQUEST_ID && !payload.cgroup_v2_ready
         ));
+    }
+
+    #[test]
+    fn fail_stop_makes_capability_unavailable_without_new_wire_fields() {
+        let handlers = ready_handlers(FakeCore::default(), 3);
+        handlers
+            .fail_stop
+            .activate(crate::fail_stop::CleanupFailureReport::new(
+                TASK_ID,
+                "시험 정리",
+                vec!["작업 cgroup"],
+                "실패",
+            ));
+
+        let response = handled(handlers.handle_get_capabilities(Request::GetCapabilities {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: REQUEST_ID.to_owned(),
+            payload: EmptyPayload {},
+        }));
+        let Response::Capabilities { payload, .. } = response else {
+            panic!("capabilities 응답이어야 합니다");
+        };
+        assert!(!payload.cgroup_v2_ready);
+        let value = serde_json::to_value(payload).unwrap();
+        let Value::Object(fields) = value else {
+            panic!("capability payload는 object여야 합니다");
+        };
+        assert_eq!(fields.len(), 5);
     }
 
     #[tokio::test]
@@ -1196,9 +1249,12 @@ mod tests {
 
         let environment = SystemProbe::from_environment().check().unwrap();
         let jobs_path = environment.report().delegated_root.join("jobs");
-        let handlers =
-            ProtocolHandlers::initialize(Ok(environment), TaskCapacitySettings::new(1).unwrap())
-                .unwrap();
+        let handlers = ProtocolHandlers::initialize(
+            Ok(environment),
+            TaskCapacitySettings::new(1).unwrap(),
+            test_fail_stop(),
+        )
+        .unwrap();
 
         let capabilities = handled(handlers.handle_get_capabilities(Request::GetCapabilities {
             protocol_version: PROTOCOL_VERSION,
@@ -1330,9 +1386,12 @@ mod tests {
 
         let environment = SystemProbe::from_environment().check().unwrap();
         let jobs_path = environment.report().delegated_root.join("jobs");
-        let handlers =
-            ProtocolHandlers::initialize(Ok(environment), TaskCapacitySettings::new(1).unwrap())
-                .unwrap();
+        let handlers = ProtocolHandlers::initialize(
+            Ok(environment),
+            TaskCapacitySettings::new(1).unwrap(),
+            test_fail_stop(),
+        )
+        .unwrap();
 
         let ghost_payload = linux_payload(
             CANCEL_CLIENT_REQUEST_ID,

@@ -251,3 +251,20 @@ unit_sequence=$((unit_sequence + 1))
   'handlers::tests::actual_cancel_handler_cleans_descendants_and_preserves_timeout_winner' \
   --exact \
   --nocapture
+
+# 정리 불확실성 주입은 모든 활성 작업을 같은 fail-stop 예산 안에서 전체 종료한다.
+unit_sequence=$((unit_sequence + 1))
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-fail-stop-$$-${unit_sequence}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --setenv=TASKCAGE_RUN_LINUX_FAIL_STOP_INTEGRATION=1 \
+  --setenv=TASKCAGE_FAIL_STOP_GHOST_BIN="${ghost_bin}" \
+  "${submit_test}" \
+  'submit::tests::actual_fail_stop_cleans_all_active_cgroups_and_blocks_new_execution' \
+  --exact \
+  --nocapture

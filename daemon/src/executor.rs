@@ -21,6 +21,7 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio::time::sleep;
 
+use crate::deadline::MonotonicDeadline;
 use crate::output::{BoundedTail, CaptureLimits, CapturedOutput, CapturedStream};
 
 const CLONE_INTO_CGROUP: u64 = 0x0002_0000_0000;
@@ -234,8 +235,29 @@ impl PendingProcess {
         }
     }
 
-    pub fn abort(mut self) -> Result<(), ExecutorError> {
-        self.stop_and_reap()
+    pub(crate) async fn abort_until(
+        &mut self,
+        deadline: MonotonicDeadline,
+    ) -> Result<(), ExecutorError> {
+        self.start_write_end.take();
+        unsafe { libc::kill(self.pid, libc::SIGKILL) };
+        let wait_result = loop {
+            if let Some(status) = wait_nohang(self.pid)? {
+                break Ok(status);
+            }
+            let Some(remaining) = deadline.remaining() else {
+                break Err(ExecutorError::Wait(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "pending clone3 child의 종료 상태를 회수하지 못했습니다",
+                )));
+            };
+            sleep(remaining.min(Duration::from_millis(10))).await;
+        };
+        self.exec_read_end.take();
+        if let Some(output_readers) = self.output_readers.take() {
+            output_readers.cancel_and_join();
+        }
+        wait_result.map(|_| ())
     }
 
     fn stop_and_reap(&mut self) -> Result<(), ExecutorError> {
@@ -276,21 +298,29 @@ impl SpawnedProcess {
         }
     }
 
-    pub async fn reap_after_kill(&self, timeout: Duration) -> Result<ProcessExit, ExecutorError> {
-        match self.wait_for(timeout).await? {
-            WaitOutcome::Exited(status) => Ok(status),
-            WaitOutcome::TimedOut => Err(ExecutorError::Wait(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "cgroup 전체 종료 뒤 target의 종료 상태를 회수하지 못했습니다",
-            ))),
+    pub(crate) async fn reap_after_kill_until(
+        &self,
+        deadline: MonotonicDeadline,
+    ) -> Result<ProcessExit, ExecutorError> {
+        loop {
+            if let Some(status) = wait_nohang(self.pid)? {
+                return Ok(status);
+            }
+            let Some(remaining) = deadline.remaining() else {
+                return Err(ExecutorError::Wait(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "cgroup 전체 종료 뒤 target의 종료 상태를 회수하지 못했습니다",
+                )));
+            };
+            sleep(remaining.min(Duration::from_millis(10))).await;
         }
     }
 
-    pub async fn finish_output(
+    pub(crate) async fn finish_output_until(
         self,
-        timeout_duration: Duration,
+        deadline: MonotonicDeadline,
     ) -> Result<CapturedOutput, ExecutorError> {
-        self.output_readers.collect(timeout_duration).await
+        self.output_readers.collect_until(deadline).await
     }
 }
 
@@ -352,11 +382,10 @@ impl OutputReaders {
         })
     }
 
-    async fn collect(
+    async fn collect_until(
         mut self,
-        timeout_duration: Duration,
+        deadline: MonotonicDeadline,
     ) -> Result<CapturedOutput, ExecutorError> {
-        let deadline = Instant::now() + timeout_duration;
         let timed_out = loop {
             let stdout_finished = self
                 .stdout
@@ -371,11 +400,11 @@ impl OutputReaders {
             if stdout_finished && stderr_finished {
                 break false;
             }
-            if Instant::now() >= deadline {
+            let Some(remaining) = deadline.remaining() else {
                 self.cancelled.store(true, Ordering::Release);
                 break true;
-            }
-            sleep(Duration::from_millis(10)).await;
+            };
+            sleep(remaining.min(Duration::from_millis(10))).await;
         };
 
         // reader는 nonblocking read와 50 ms poll만 사용하므로 취소 뒤 join이 제한 없이
@@ -391,12 +420,19 @@ impl OutputReaders {
             .expect("stderr reader가 존재합니다")
             .join();
         if timed_out {
-            return Err(ExecutorError::OutputReaderTimeout(timeout_duration));
+            return Err(ExecutorError::OutputReaderTimeout(deadline.budget()));
         }
 
         let stdout = join_output_reader("stdout", stdout_result)?;
         let stderr = join_output_reader("stderr", stderr_result)?;
         Ok(CapturedOutput { stdout, stderr })
+    }
+
+    #[cfg(test)]
+    async fn collect(self, timeout: Duration) -> Result<CapturedOutput, ExecutorError> {
+        let deadline = MonotonicDeadline::from_now(timeout)
+            .ok_or(ExecutorError::OutputReaderTimeout(timeout))?;
+        self.collect_until(deadline).await
     }
 
     fn cancel_and_join(mut self) {

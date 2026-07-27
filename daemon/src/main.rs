@@ -55,6 +55,7 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
     let mut socket_path = None;
     let mut max_concurrent_tasks = None;
     let mut cleanup_timeout_ms = None;
+    let mut fail_stop_timeout_ms = None;
     let mut index = 0;
     while index < args.len() {
         let name = args[index].to_str().ok_or_else(|| {
@@ -71,7 +72,13 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             "--cleanup-timeout-ms" if cleanup_timeout_ms.is_none() => {
                 cleanup_timeout_ms = Some(parse_number(name, value)?);
             }
-            "--socket" | "--max-concurrent-tasks" | "--cleanup-timeout-ms" => {
+            "--fail-stop-timeout-ms" if fail_stop_timeout_ms.is_none() => {
+                fail_stop_timeout_ms = Some(parse_number(name, value)?);
+            }
+            "--socket"
+            | "--max-concurrent-tasks"
+            | "--cleanup-timeout-ms"
+            | "--fail-stop-timeout-ms" => {
                 return Err(Error::InvalidArgument(format!(
                     "serve 옵션이 중복되었습니다: {name}"
                 )));
@@ -89,6 +96,10 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
         required_option("socket", socket_path)?,
         required_option("max-concurrent-tasks", max_concurrent_tasks)?,
         Duration::from_millis(required_option("cleanup-timeout-ms", cleanup_timeout_ms)?),
+        Duration::from_millis(required_option(
+            "fail-stop-timeout-ms",
+            fail_stop_timeout_ms,
+        )?),
     )
 }
 
@@ -289,6 +300,8 @@ mod tests {
             OsString::from("2"),
             OsString::from("--cleanup-timeout-ms"),
             OsString::from("5000"),
+            OsString::from("--fail-stop-timeout-ms"),
+            OsString::from("10000"),
         ])
         .unwrap();
         assert!(format!("{config:?}").contains("max_concurrent_tasks: 2"));
@@ -300,6 +313,8 @@ mod tests {
             OsString::from("2"),
             OsString::from("--cleanup-timeout-ms"),
             OsString::from("5000"),
+            OsString::from("--fail-stop-timeout-ms"),
+            OsString::from("10000"),
         ])
         .unwrap_err();
         assert!(error.to_string().contains("절대 경로"));
@@ -315,18 +330,48 @@ mod tests {
             OsString::from("0"),
             OsString::from("--cleanup-timeout-ms"),
             OsString::from("5000"),
+            OsString::from("--fail-stop-timeout-ms"),
+            OsString::from("10000"),
         ])
         .unwrap_err();
         assert!(error.to_string().contains("0보다 커야"));
 
         let error = parse_serve(vec![
             OsString::from("--socket"),
-            socket.into_os_string(),
+            socket.clone().into_os_string(),
             OsString::from("--max-concurrent-tasks"),
             OsString::from("1"),
         ])
         .unwrap_err();
         assert!(error.to_string().contains("cleanup-timeout-ms 옵션은 필수"));
+
+        let error = parse_serve(vec![
+            OsString::from("--socket"),
+            socket.clone().into_os_string(),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("1"),
+            OsString::from("--cleanup-timeout-ms"),
+            OsString::from("5000"),
+            OsString::from("--fail-stop-timeout-ms"),
+            OsString::from("0"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("fail-stop timeout은 0보다 커야"));
+
+        let error = parse_serve(vec![
+            OsString::from("--socket"),
+            socket.into_os_string(),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("1"),
+            OsString::from("--cleanup-timeout-ms"),
+            OsString::from("5000"),
+        ])
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("fail-stop-timeout-ms 옵션은 필수")
+        );
     }
 
     #[test]

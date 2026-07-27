@@ -131,11 +131,23 @@ where
     }
 
     /// clientRequestId 확인과 새 예약 등록을 같은 잠금 구간에서 결정한다.
+    #[cfg(test)]
     pub(crate) fn reserve_submit(
         &self,
         request: ValidatedSubmit,
         candidate_task_id: String,
     ) -> Result<SubmitReservation<C>, RegistryError> {
+        self.reserve_submit_with(request, || candidate_task_id)
+    }
+
+    pub(crate) fn reserve_submit_with<F>(
+        &self,
+        request: ValidatedSubmit,
+        make_task_id: F,
+    ) -> Result<SubmitReservation<C>, RegistryError>
+    where
+        F: FnOnce() -> String,
+    {
         let payload = request.payload().clone();
         let client_request_id = payload.client_request_id.clone();
         let mut state = self.lock_state()?;
@@ -150,6 +162,7 @@ where
                 signal: Arc::clone(&existing.reservation),
             }));
         }
+        let candidate_task_id = make_task_id();
         if state.task_requests.contains_key(&candidate_task_id) {
             return Err(RegistryError::TaskAlreadyExists(candidate_task_id));
         }
@@ -175,6 +188,28 @@ where
             request: Box::new(request),
             signal,
             resolved: false,
+        }))
+    }
+
+    /// fail-stop 중에는 기존 멱등 요청만 관찰하고 새 예약은 만들지 않는다.
+    pub(crate) fn existing_submit(
+        &self,
+        request: &ValidatedSubmit,
+    ) -> Result<Option<SubmitWaiter>, RegistryError> {
+        let payload = request.payload();
+        let mut state = self.lock_state()?;
+        state.purge_expired();
+        let Some(existing) = state.requests.get(&payload.client_request_id) else {
+            return Ok(None);
+        };
+        if existing.payload != *payload {
+            return Err(RegistryError::IdempotencyConflict(
+                payload.client_request_id.clone(),
+            ));
+        }
+        Ok(Some(SubmitWaiter {
+            task_id: existing.task_id.clone(),
+            signal: Arc::clone(&existing.reservation),
         }))
     }
 
