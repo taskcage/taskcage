@@ -1333,8 +1333,9 @@ mod tests {
             NonZeroUsize::new(1024).unwrap(),
             NonZeroUsize::new(1024).unwrap(),
         );
-        let pending = spawn_in_cgroup(&command, directory.as_raw_fd(), limits).unwrap();
-        let process = match pending.start().unwrap() {
+        let mut pending = spawn_in_cgroup(&command, directory.as_raw_fd(), limits).unwrap();
+        let token = pending.commit_start_signal().unwrap();
+        let process = match pending.into_start_committed(token).wait_for_exec().unwrap() {
             SpawnOutcome::Started(process) => process,
             SpawnOutcome::ExecFailed(failure) => panic!("ghost exec 실패: {}", failure.errno),
         };

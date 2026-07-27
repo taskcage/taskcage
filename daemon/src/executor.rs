@@ -70,6 +70,8 @@ pub enum ExecutorError {
     StartGatePipe(#[source] io::Error),
     #[error("검증이 끝난 target의 exec 시작을 허용하지 못했습니다")]
     StartGateSignal(#[source] io::Error),
+    #[error("exec 시작 게이트가 이미 처리됐습니다")]
+    StartGateAlreadyResolved,
     #[error("{stream} 출력 관을 준비하지 못했습니다")]
     OutputPipe {
         stream: &'static str,
@@ -181,57 +183,43 @@ pub struct PendingProcess {
     output_readers: Option<OutputReaders>,
 }
 
+#[derive(Debug)]
+pub(crate) struct StartCommitToken {
+    pid: libc::pid_t,
+}
+
+#[derive(Debug)]
+pub(crate) struct StartCommittedProcess {
+    pid: libc::pid_t,
+    exec_read_end: Option<OwnedFd>,
+    output_readers: Option<OutputReaders>,
+}
+
 impl PendingProcess {
     pub fn pid(&self) -> libc::pid_t {
         self.pid
     }
 
-    /// 부모가 cgroup 소속을 확인한 뒤에만 자식의 execve 경로를 연다.
-    pub fn start(mut self) -> Result<SpawnOutcome, ExecutorError> {
+    /// fail-stop 상태 잠금 안에서는 gate 신호 한 번만 기록하고 정리는 수행하지 않는다.
+    pub(crate) fn commit_start_signal(&mut self) -> Result<StartCommitToken, ExecutorError> {
         let start_write_end = self
             .start_write_end
             .take()
-            .expect("exec 시작 게이트가 존재합니다");
-        if let Err(source) = write_start_signal(start_write_end.as_raw_fd()) {
+            .ok_or(ExecutorError::StartGateAlreadyResolved)?;
+        if let Err(source) = write_start_signal_once(start_write_end.as_raw_fd()) {
             drop(start_write_end);
-            self.stop_and_reap()?;
             return Err(ExecutorError::StartGateSignal(source));
         }
         drop(start_write_end);
+        Ok(StartCommitToken { pid: self.pid })
+    }
 
-        let exec_read_end = self
-            .exec_read_end
-            .take()
-            .expect("실행 오류 통로가 존재합니다");
-        let mut payload = Vec::with_capacity(size_of::<i32>());
-        if let Err(error) = File::from(exec_read_end).read_to_end(&mut payload) {
-            self.stop_and_reap()?;
-            return Err(ExecutorError::ExecPipe(error));
-        }
-        let output_readers = self
-            .output_readers
-            .take()
-            .expect("출력 reader가 존재합니다");
-        if payload.is_empty() {
-            Ok(SpawnOutcome::Started(SpawnedProcess {
-                pid: self.pid,
-                output_readers,
-            }))
-        } else if payload.len() == size_of::<i32>() {
-            let errno = i32::from_ne_bytes(payload.try_into().expect("길이를 먼저 확인했습니다"));
-            let wait_result = wait_blocking(self.pid);
-            let output_result = output_readers.cancel_and_collect();
-            wait_result?;
-            let output = output_result?;
-            Ok(SpawnOutcome::ExecFailed(ExecFailure {
-                pid: self.pid,
-                errno,
-                output,
-            }))
-        } else {
-            let _ = wait_blocking(self.pid);
-            output_readers.cancel_and_join();
-            Err(ExecutorError::InvalidExecPayload)
+    pub(crate) fn into_start_committed(mut self, token: StartCommitToken) -> StartCommittedProcess {
+        debug_assert_eq!(self.pid, token.pid);
+        StartCommittedProcess {
+            pid: self.pid,
+            exec_read_end: self.exec_read_end.take(),
+            output_readers: self.output_readers.take(),
         }
     }
 
@@ -272,7 +260,65 @@ impl PendingProcess {
     }
 }
 
+impl StartCommittedProcess {
+    /// gate commit 뒤에만 exec 결과를 읽으며 이 대기 동안 coordinator 잠금은 잡지 않는다.
+    pub(crate) fn wait_for_exec(mut self) -> Result<SpawnOutcome, ExecutorError> {
+        let exec_read_end = self
+            .exec_read_end
+            .take()
+            .expect("실행 오류 통로가 존재합니다");
+        let mut payload = Vec::with_capacity(size_of::<i32>());
+        if let Err(error) = File::from(exec_read_end).read_to_end(&mut payload) {
+            self.stop_and_reap()?;
+            return Err(ExecutorError::ExecPipe(error));
+        }
+        let output_readers = self
+            .output_readers
+            .take()
+            .expect("출력 reader가 존재합니다");
+        if payload.is_empty() {
+            Ok(SpawnOutcome::Started(SpawnedProcess {
+                pid: self.pid,
+                output_readers,
+            }))
+        } else if payload.len() == size_of::<i32>() {
+            let errno = i32::from_ne_bytes(payload.try_into().expect("길이를 먼저 확인했습니다"));
+            let wait_result = wait_blocking(self.pid);
+            let output_result = output_readers.cancel_and_collect();
+            wait_result?;
+            let output = output_result?;
+            Ok(SpawnOutcome::ExecFailed(ExecFailure {
+                pid: self.pid,
+                errno,
+                output,
+            }))
+        } else {
+            let _ = wait_blocking(self.pid);
+            output_readers.cancel_and_join();
+            Err(ExecutorError::InvalidExecPayload)
+        }
+    }
+
+    fn stop_and_reap(&mut self) -> Result<(), ExecutorError> {
+        unsafe { libc::kill(self.pid, libc::SIGKILL) };
+        let wait_result = wait_blocking(self.pid);
+        self.exec_read_end.take();
+        if let Some(output_readers) = self.output_readers.take() {
+            output_readers.cancel_and_join();
+        }
+        wait_result.map(|_| ())
+    }
+}
+
 impl Drop for PendingProcess {
+    fn drop(&mut self) {
+        if self.output_readers.is_some() {
+            let _ = self.stop_and_reap();
+        }
+    }
+}
+
+impl Drop for StartCommittedProcess {
     fn drop(&mut self) {
         if self.output_readers.is_some() {
             let _ = self.stop_and_reap();
@@ -507,6 +553,8 @@ pub fn spawn_in_cgroup(
 ) -> Result<PendingProcess, ExecutorError> {
     let (exec_read_end, exec_write_end) = pipe_cloexec().map_err(ExecutorError::ExecPipe)?;
     let (start_read_end, start_write_end) = pipe_cloexec().map_err(ExecutorError::StartGatePipe)?;
+    // coordinator 잠금 안의 한 바이트 기록이 대기 상태에 빠지지 않게 부모 쓰기 끝만 비차단으로 둔다.
+    set_nonblocking(start_write_end.as_raw_fd()).map_err(ExecutorError::StartGatePipe)?;
     let (stdout_read_end, stdout_write_end) =
         pipe_cloexec().map_err(|source| ExecutorError::OutputPipe {
             stream: "stdout",
@@ -668,30 +716,22 @@ fn child_exec(
     }
 }
 
-fn write_start_signal(descriptor: RawFd) -> io::Result<()> {
+fn write_start_signal_once(descriptor: RawFd) -> io::Result<()> {
     let signal = [1_u8];
-    loop {
-        let written = unsafe {
-            libc::write(
-                descriptor,
-                signal.as_ptr().cast::<libc::c_void>(),
-                signal.len(),
-            )
-        };
-        if written == 1 {
-            return Ok(());
-        }
-        if written == -1 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error);
-        }
-        return Err(io::Error::new(
+    let written = unsafe {
+        libc::write(
+            descriptor,
+            signal.as_ptr().cast::<libc::c_void>(),
+            signal.len(),
+        )
+    };
+    match written {
+        1 => Ok(()),
+        -1 => Err(io::Error::last_os_error()),
+        _ => Err(io::Error::new(
             io::ErrorKind::WriteZero,
             "exec 시작 게이트에 신호를 쓰지 못했습니다",
-        ));
+        )),
     }
 }
 
