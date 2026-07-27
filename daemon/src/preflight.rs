@@ -23,7 +23,7 @@ use thiserror::Error;
 
 use crate::cgroup::CgroupPathError;
 #[cfg(target_os = "linux")]
-use crate::cgroup::CgroupPaths;
+use crate::cgroup::{CgroupPaths, StartupCgroupPlacement};
 
 #[cfg(any(target_os = "linux", test))]
 const REQUIRED_CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
@@ -124,6 +124,8 @@ pub enum PreflightError {
     },
     #[error("manager cgroup이 이미 있어 안전하게 재사용할 수 없습니다: {path:?}")]
     ManagerAlreadyExists { path: PathBuf },
+    #[error("manager cgroup에 현재 daemon 외의 직접 프로세스가 있습니다: {path:?}")]
+    UnsafeManagerProcesses { path: PathBuf },
     #[error("clone3의 원자적 cgroup 진입을 사용할 수 없습니다")]
     AtomicEntryUnsupported {
         #[source]
@@ -162,13 +164,24 @@ impl SystemProbe {
             root_override: Some(root.into()),
         }
     }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn check_after_recovery(
+        &self,
+        placement: StartupCgroupPlacement,
+    ) -> Result<VerifiedEnvironment, PreflightError> {
+        check_linux(self.root_override.as_deref(), placement)
+    }
 }
 
 impl CapabilityProbe for SystemProbe {
     fn check(&self) -> Result<VerifiedEnvironment, PreflightError> {
         #[cfg(target_os = "linux")]
         {
-            check_linux(self.root_override.as_deref())
+            check_linux(
+                self.root_override.as_deref(),
+                StartupCgroupPlacement::DelegatedRoot,
+            )
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -192,8 +205,24 @@ where
 }
 
 #[cfg(target_os = "linux")]
-fn check_linux(root_override: Option<&Path>) -> Result<VerifiedEnvironment, PreflightError> {
-    let paths = CgroupPaths::resolve(root_override)?;
+fn check_linux(
+    root_override: Option<&Path>,
+    placement: StartupCgroupPlacement,
+) -> Result<VerifiedEnvironment, PreflightError> {
+    let paths = match placement {
+        StartupCgroupPlacement::DelegatedRoot => CgroupPaths::resolve(root_override)?,
+        StartupCgroupPlacement::ExistingManager => {
+            let (paths, actual) = CgroupPaths::resolve_startup(root_override)?;
+            if actual != StartupCgroupPlacement::ExistingManager {
+                return Err(CgroupPathError::ConfiguredRootMismatch {
+                    configured: paths.manager().to_path_buf(),
+                    actual: paths.root().to_path_buf(),
+                }
+                .into());
+            }
+            paths
+        }
+    };
     ensure_cgroup2_filesystem(paths.root())?;
     let controllers = read_words(&paths.root().join("cgroup.controllers"))?;
     ensure_required_controllers(&controllers, paths.root())?;
@@ -201,7 +230,10 @@ fn check_linux(root_override: Option<&Path>) -> Result<VerifiedEnvironment, Pref
     require_writable(&paths.root().join("cgroup.procs"))?;
     require_writable(&paths.root().join("cgroup.subtree_control"))?;
 
-    create_manager(paths.manager())?;
+    let created_manager = placement == StartupCgroupPlacement::DelegatedRoot;
+    if created_manager {
+        create_manager(paths.manager())?;
+    }
     let original_subtree = read_words(&paths.root().join("cgroup.subtree_control"))?;
     let mut moved_to_manager = false;
 
@@ -212,12 +244,15 @@ fn check_linux(root_override: Option<&Path>) -> Result<VerifiedEnvironment, Pref
         )?;
         require_regular_file("manager 전체 종료", &paths.manager().join("cgroup.kill"))?;
 
-        write_control(
-            &paths.manager().join("cgroup.procs"),
-            &format!("{}\n", std::process::id()),
-        )?;
-        moved_to_manager = true;
+        if created_manager {
+            write_control(
+                &paths.manager().join("cgroup.procs"),
+                &format!("{}\n", std::process::id()),
+            )?;
+            moved_to_manager = true;
+        }
         paths.verify_manager_membership()?;
+        require_only_current_manager_process(paths.manager())?;
 
         let manager_directory = File::open(paths.manager())
             .map_err(|source| io_error("manager cgroup 열기", paths.manager(), source))?;
@@ -242,7 +277,9 @@ fn check_linux(root_override: Option<&Path>) -> Result<VerifiedEnvironment, Pref
     match result {
         Ok(report) => Ok(report),
         Err(cause) => {
-            if let Err(cleanup) = rollback_manager(&paths, &original_subtree, moved_to_manager) {
+            if let Err(cleanup) =
+                rollback_manager(&paths, &original_subtree, moved_to_manager, created_manager)
+            {
                 return Err(PreflightError::RollbackFailed {
                     cause: cause.to_string(),
                     cleanup: cleanup.to_string(),
@@ -346,29 +383,45 @@ fn rollback_manager(
     paths: &CgroupPaths,
     original_subtree: &BTreeSet<String>,
     moved_to_manager: bool,
+    remove_manager: bool,
 ) -> Result<(), PreflightError> {
+    let enabled = read_words(&paths.root().join("cgroup.subtree_control"))?;
+    let added: Vec<_> = REQUIRED_CONTROLLERS
+        .iter()
+        .filter(|controller| {
+            enabled.contains(**controller) && !original_subtree.contains(**controller)
+        })
+        .map(|controller| format!("-{controller}"))
+        .collect();
+    if !added.is_empty() {
+        write_control(
+            &paths.root().join("cgroup.subtree_control"),
+            &format!("{}\n", added.join(" ")),
+        )?;
+    }
     if moved_to_manager {
-        let enabled = read_words(&paths.root().join("cgroup.subtree_control"))?;
-        let added: Vec<_> = REQUIRED_CONTROLLERS
-            .iter()
-            .filter(|controller| {
-                enabled.contains(**controller) && !original_subtree.contains(**controller)
-            })
-            .map(|controller| format!("-{controller}"))
-            .collect();
-        if !added.is_empty() {
-            write_control(
-                &paths.root().join("cgroup.subtree_control"),
-                &format!("{}\n", added.join(" ")),
-            )?;
-        }
         write_control(
             &paths.root().join("cgroup.procs"),
             &format!("{}\n", std::process::id()),
         )?;
     }
-    fs::remove_dir(paths.manager())
-        .map_err(|source| io_error("manager cgroup 제거", paths.manager(), source))
+    if remove_manager {
+        fs::remove_dir(paths.manager())
+            .map_err(|source| io_error("manager cgroup 제거", paths.manager(), source))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_only_current_manager_process(path: &Path) -> Result<(), PreflightError> {
+    let process_file = path.join("cgroup.procs");
+    let processes = read_words(&process_file)?;
+    let expected = std::process::id().to_string();
+    if processes.len() == 1 && processes.contains(&expected) {
+        Ok(())
+    } else {
+        Err(PreflightError::UnsafeManagerProcesses { path: process_file })
+    }
 }
 
 #[cfg(target_os = "linux")]
