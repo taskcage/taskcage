@@ -17,14 +17,14 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, RawFd};
-#[cfg(target_os = "linux")]
-use std::time::Instant;
 
 use serde::Serialize;
 use thiserror::Error;
 #[cfg(target_os = "linux")]
 use tokio::time::sleep;
 
+#[cfg(target_os = "linux")]
+use crate::deadline::MonotonicDeadline;
 #[cfg(target_os = "linux")]
 use crate::preflight::VerifiedEnvironment;
 
@@ -454,19 +454,21 @@ impl JobCgroup {
         write_control(&self.path.join("cgroup.kill"), "1\n")
     }
 
-    pub async fn wait_empty(&self, timeout: Duration) -> Result<(), CgroupError> {
-        let deadline = Instant::now() + timeout;
+    pub(crate) async fn wait_empty_until(
+        &self,
+        deadline: MonotonicDeadline,
+    ) -> Result<(), CgroupError> {
         loop {
             if !self.is_populated()? {
                 return Ok(());
             }
-            if Instant::now() >= deadline {
+            let Some(remaining) = deadline.remaining() else {
                 return Err(CgroupError::EmptyTimeout {
                     path: self.path.clone(),
-                    timeout,
+                    timeout: deadline.budget(),
                 });
-            }
-            sleep(Duration::from_millis(10)).await;
+            };
+            sleep(remaining.min(Duration::from_millis(10))).await;
         }
     }
 
@@ -491,19 +493,29 @@ impl JobCgroup {
     }
 
     /// 전체 종료, 빈 상태 확인, 통계 읽기, cgroup 제거 순서를 지킨다.
-    pub async fn finish(self, timeout: Duration) -> Result<JobStats, CgroupError> {
+    pub(crate) async fn finish_until(
+        &mut self,
+        deadline: MonotonicDeadline,
+    ) -> Result<JobStats, CgroupError> {
         if self.is_populated()? {
             self.kill_all()?;
         }
-        self.finish_after_kill(timeout).await
+        self.finish_after_kill_until(deadline).await
     }
 
     /// 이미 cgroup.kill을 보낸 제어 종료 경로는 같은 종료 명령을 중복 전송하지 않는다.
-    pub(crate) async fn finish_after_kill(
-        mut self,
-        timeout: Duration,
+    pub(crate) async fn finish_after_kill_until(
+        &mut self,
+        deadline: MonotonicDeadline,
     ) -> Result<JobStats, CgroupError> {
-        self.wait_empty(timeout).await?;
+        self.wait_empty_until(deadline).await?;
+
+        if deadline.remaining().is_none() {
+            return Err(CgroupError::EmptyTimeout {
+                path: self.path.clone(),
+                timeout: deadline.budget(),
+            });
+        }
 
         // 통계 읽기에 실패해도 빈 cgroup 제거는 반드시 시도한다.
         let stats = self.stats();

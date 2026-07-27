@@ -15,6 +15,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinSet;
 
 use crate::codec::{FrameError, decode_json, read_frame_or_eof, write_json_frame};
+use crate::deadline::MonotonicDeadline;
+use crate::fail_stop::FailStopCoordinator;
 use crate::handlers::{ProtocolHandlers, SubmitContext};
 use crate::protocol::{ErrorCode, ErrorPayload, PROTOCOL_VERSION, Request, Response};
 use crate::submit::{SubmitCoordinator, SubmitMetadata};
@@ -58,6 +60,10 @@ pub(crate) enum ServerError {
     },
     #[error("UDS 처리 실패와 socket 정리가 함께 실패했습니다: server={server}; cleanup={cleanup}")]
     ServeAndCleanup { server: String, cleanup: String },
+    #[error(
+        "정리 불확실 fail-stop이 종료 기한 안에 daemon을 중단했습니다: taskId={task_id}, stage={stage}"
+    )]
+    FailStop { task_id: String, stage: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,9 +132,9 @@ impl BoundSocket {
         })
     }
 
-    fn listener(&self) -> &UnixListener {
+    fn take_listener(&mut self) -> UnixListener {
         self.listener
-            .as_ref()
+            .take()
             .expect("정리 전에는 listener가 존재해야 합니다")
     }
 
@@ -189,12 +195,21 @@ where
         })
     });
 
-    let result = serve_socket_until(socket_path, dispatch, shutdown).await;
+    let result = serve_socket_until_fail_stop(
+        socket_path,
+        dispatch,
+        shutdown,
+        Arc::clone(handlers.fail_stop()),
+    )
+    .await;
     // 연결 task를 닫아도 coordinator가 시작한 실행은 독립적으로 cleanup을 끝낸다.
-    handlers.wait_idle().await;
+    if !matches!(result, Err(ServerError::FailStop { .. })) {
+        handlers.wait_idle().await;
+    }
     result
 }
 
+#[cfg(test)]
 async fn serve_socket_until<S>(
     socket_path: &Path,
     dispatch: Dispatch,
@@ -203,9 +218,33 @@ async fn serve_socket_until<S>(
 where
     S: Future<Output = io::Result<()>>,
 {
-    let socket = BoundSocket::bind(socket_path)?;
-    let result = accept_until_shutdown(socket.listener(), dispatch, shutdown).await;
+    let mut socket = BoundSocket::bind(socket_path)?;
+    let listener = socket.take_listener();
+    let result = accept_until_shutdown(listener, dispatch, shutdown).await;
     let cleanup = socket.cleanup();
+    combine_server_and_cleanup(result, cleanup)
+}
+
+async fn serve_socket_until_fail_stop<S>(
+    socket_path: &Path,
+    dispatch: Dispatch,
+    shutdown: S,
+    fail_stop: Arc<FailStopCoordinator>,
+) -> Result<(), ServerError>
+where
+    S: Future<Output = io::Result<()>>,
+{
+    let mut socket = BoundSocket::bind(socket_path)?;
+    let listener = socket.take_listener();
+    let result = accept_until_shutdown_or_fail_stop(listener, dispatch, shutdown, fail_stop).await;
+    let cleanup = socket.cleanup();
+    combine_server_and_cleanup(result, cleanup)
+}
+
+fn combine_server_and_cleanup(
+    result: Result<(), ServerError>,
+    cleanup: Result<(), ServerError>,
+) -> Result<(), ServerError> {
     match (result, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(server), Ok(())) => Err(server),
@@ -217,20 +256,51 @@ where
     }
 }
 
+#[cfg(test)]
 async fn accept_until_shutdown<S>(
-    listener: &UnixListener,
+    listener: UnixListener,
     dispatch: Dispatch,
     shutdown: S,
 ) -> Result<(), ServerError>
 where
     S: Future<Output = io::Result<()>>,
 {
+    accept_connections(listener, dispatch, shutdown, None).await
+}
+
+async fn accept_until_shutdown_or_fail_stop<S>(
+    listener: UnixListener,
+    dispatch: Dispatch,
+    shutdown: S,
+    fail_stop: Arc<FailStopCoordinator>,
+) -> Result<(), ServerError>
+where
+    S: Future<Output = io::Result<()>>,
+{
+    accept_connections(listener, dispatch, shutdown, Some(fail_stop)).await
+}
+
+async fn accept_connections<S>(
+    listener: UnixListener,
+    dispatch: Dispatch,
+    shutdown: S,
+    fail_stop: Option<Arc<FailStopCoordinator>>,
+) -> Result<(), ServerError>
+where
+    S: Future<Output = io::Result<()>>,
+{
+    enum Stop {
+        Normal(Result<(), ServerError>),
+        FailStop(MonotonicDeadline),
+    }
+
     tokio::pin!(shutdown);
     let mut connections = JoinSet::new();
-    let result = loop {
+    let stop = loop {
         tokio::select! {
             biased;
-            result = &mut shutdown => break result.map_err(ServerError::Shutdown),
+            deadline = wait_for_fail_stop(fail_stop.as_deref()) => break Stop::FailStop(deadline),
+            result = &mut shutdown => break Stop::Normal(result.map_err(ServerError::Shutdown)),
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
                     let connection_dispatch = Arc::clone(&dispatch);
@@ -238,7 +308,7 @@ where
                         handle_connection(stream, connection_dispatch).await
                     });
                 }
-                Err(error) => break Err(ServerError::Accept(error)),
+                Err(error) => break Stop::Normal(Err(ServerError::Accept(error))),
             },
             joined = connections.join_next(), if !connections.is_empty() => {
                 if let Some(result) = joined {
@@ -247,12 +317,64 @@ where
             }
         }
     };
+    drop(listener);
 
+    match stop {
+        Stop::Normal(result) => {
+            abort_connections(&mut connections).await;
+            result
+        }
+        Stop::FailStop(deadline) => {
+            let coordinator = fail_stop.expect("fail-stop 대기가 활성화돼 있어야 합니다");
+            drain_fail_stop_connections(&mut connections, &coordinator, deadline).await;
+            let report = coordinator
+                .first_report()
+                .expect("최초 fail-stop 보고가 있어야 합니다");
+            Err(ServerError::FailStop {
+                task_id: report.task_id,
+                stage: report.stage.to_owned(),
+            })
+        }
+    }
+}
+
+async fn wait_for_fail_stop(fail_stop: Option<&FailStopCoordinator>) -> MonotonicDeadline {
+    match fail_stop {
+        Some(coordinator) => coordinator.activated().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn drain_fail_stop_connections(
+    connections: &mut JoinSet<Result<(), ConnectionError>>,
+    fail_stop: &FailStopCoordinator,
+    deadline: MonotonicDeadline,
+) {
+    loop {
+        if connections.is_empty() && fail_stop.active_count() == 0 {
+            break;
+        }
+        let Some(remaining) = deadline.remaining() else {
+            break;
+        };
+        tokio::select! {
+            joined = connections.join_next(), if !connections.is_empty() => {
+                if let Some(result) = joined {
+                    log_connection_result(result);
+                }
+            }
+            _ = fail_stop.active_changed() => {}
+            _ = tokio::time::sleep(remaining) => break,
+        }
+    }
+    abort_connections(connections).await;
+}
+
+async fn abort_connections(connections: &mut JoinSet<Result<(), ConnectionError>>) {
     connections.abort_all();
     while let Some(joined) = connections.join_next().await {
         log_connection_result(joined);
     }
-    result
 }
 
 fn log_connection_result(result: Result<Result<(), ConnectionError>, tokio::task::JoinError>) {
@@ -323,13 +445,13 @@ fn submit_context(cleanup_timeout: Duration) -> SubmitContext {
     let started_at = timestamp_now();
     let started_monotonic = Instant::now();
     SubmitContext::new(
-        SubmitMetadata {
-            task_id: new_task_id(),
+        SubmitMetadata::lazy(
+            new_task_id,
             submitted_at,
             started_at,
             started_monotonic,
             cleanup_timeout,
-        },
+        ),
         Box::new(|| (timestamp_now(), Instant::now())),
     )
 }
@@ -487,6 +609,22 @@ mod tests {
         (shutdown_sender, server)
     }
 
+    async fn start_fail_stop_server(
+        path: PathBuf,
+        dispatch: Dispatch,
+        fail_stop: Arc<FailStopCoordinator>,
+    ) -> tokio::task::JoinHandle<Result<(), ServerError>> {
+        tokio::spawn(async move {
+            serve_socket_until_fail_stop(
+                &path,
+                dispatch,
+                std::future::pending::<io::Result<()>>(),
+                fail_stop,
+            )
+            .await
+        })
+    }
+
     async fn connect(path: &Path) -> UnixStream {
         timeout(Duration::from_secs(2), async {
             loop {
@@ -619,6 +757,113 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!path.socket.exists());
+    }
+
+    #[tokio::test]
+    async fn fail_stop_closes_listener_but_keeps_existing_queries_until_disconnect() {
+        let path = TestSocketPath::new("fail-stop-existing");
+        let fail_stop = FailStopCoordinator::new(
+            crate::fail_stop::FailStopSettings::new(Duration::from_secs(1)).unwrap(),
+        );
+        let dispatch: Dispatch = {
+            let fail_stop = Arc::clone(&fail_stop);
+            Arc::new(move |request| {
+                let mut response = capabilities(request.request_id().to_owned());
+                let fail_stop = Arc::clone(&fail_stop);
+                Box::pin(async move {
+                    if let Response::Capabilities { payload, .. } = &mut response {
+                        payload.cgroup_v2_ready = !fail_stop.is_fail_stopping();
+                    }
+                    response
+                })
+            })
+        };
+        let server =
+            start_fail_stop_server(path.socket.clone(), dispatch, Arc::clone(&fail_stop)).await;
+        let mut existing = connect(&path.socket).await;
+        assert!(matches!(
+            exchange(&mut existing, &capability_request(FIRST_REQUEST_ID)).await,
+            Response::Capabilities { payload, .. } if payload.cgroup_v2_ready
+        ));
+
+        fail_stop.activate(crate::fail_stop::CleanupFailureReport::new(
+            "task",
+            "시험 정리",
+            vec!["작업 cgroup"],
+            "실패",
+        ));
+        assert!(matches!(
+            exchange(&mut existing, &capability_request(SECOND_REQUEST_ID)).await,
+            Response::Capabilities { payload, .. } if !payload.cgroup_v2_ready
+        ));
+        timeout(Duration::from_secs(1), async {
+            while let Ok(stream) = UnixStream::connect(&path.socket).await {
+                drop(stream);
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("fail-stop은 신규 연결 listener를 닫아야 합니다");
+        drop(existing);
+
+        assert!(matches!(
+            timeout(Duration::from_secs(1), server)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(ServerError::FailStop { .. })
+        ));
+        assert!(!path.socket.exists());
+    }
+
+    #[tokio::test]
+    async fn fail_stop_deadline_aborts_a_stuck_existing_handler() {
+        let path = TestSocketPath::new("fail-stop-deadline");
+        let fail_stop = FailStopCoordinator::new(
+            crate::fail_stop::FailStopSettings::new(Duration::from_millis(50)).unwrap(),
+        );
+        let started = Arc::new(Notify::new());
+        let never_finish = Arc::new(Notify::new());
+        let dispatch: Dispatch = {
+            let started = Arc::clone(&started);
+            let never_finish = Arc::clone(&never_finish);
+            Arc::new(move |request| {
+                let started = Arc::clone(&started);
+                let never_finish = Arc::clone(&never_finish);
+                let request_id = request.request_id().to_owned();
+                Box::pin(async move {
+                    started.notify_one();
+                    never_finish.notified().await;
+                    capabilities(request_id)
+                })
+            })
+        };
+        let server =
+            start_fail_stop_server(path.socket.clone(), dispatch, Arc::clone(&fail_stop)).await;
+        let mut stream = connect(&path.socket).await;
+        write_json_frame(&mut stream, &capability_request(FIRST_REQUEST_ID))
+            .await
+            .unwrap();
+        started.notified().await;
+        fail_stop.activate(crate::fail_stop::CleanupFailureReport::new(
+            "task",
+            "시험 정리",
+            vec!["작업 cgroup"],
+            "실패",
+        ));
+
+        assert!(matches!(
+            timeout(Duration::from_secs(1), server)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(ServerError::FailStop { .. })
+        ));
+        assert!(!path.socket.exists());
+        assert_eq!(
+            stream.read_u8().await.unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
     }
 
     #[tokio::test]
@@ -849,8 +1094,14 @@ mod tests {
         let environment = SystemProbe::from_environment().check().unwrap();
         let jobs_path = environment.report().delegated_root.join("jobs");
         let handlers = Arc::new(
-            ProtocolHandlers::initialize(Ok(environment), TaskCapacitySettings::new(2).unwrap())
-                .unwrap(),
+            ProtocolHandlers::initialize(
+                Ok(environment),
+                TaskCapacitySettings::new(2).unwrap(),
+                FailStopCoordinator::new(
+                    crate::fail_stop::FailStopSettings::new(Duration::from_secs(5)).unwrap(),
+                ),
+            )
+            .unwrap(),
         );
         let path = TestSocketPath::new("actual-cgroup");
         let server_path = path.socket.clone();

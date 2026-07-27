@@ -25,6 +25,10 @@ pub(crate) use self::registry::{RegistryError, SubmitFailure, SubmitObservation}
 use crate::cancellation::{CancellationRuntime, RunningCancellation, cancellation_channel};
 #[cfg(any(target_os = "linux", test))]
 use crate::capacity::{TaskCapacity, TaskCapacityPermit, TaskCapacitySettings};
+#[cfg(any(target_os = "linux", test))]
+use crate::fail_stop::{
+    ActiveExecution, CleanupFailureReport, FailStopCoordinator, FailStopSettings,
+};
 #[cfg(target_os = "linux")]
 use crate::preflight::VerifiedEnvironment;
 #[cfg(any(target_os = "linux", test))]
@@ -49,13 +53,75 @@ impl RunnerPermit {
 }
 
 #[cfg(any(target_os = "linux", test))]
-#[derive(Debug, Clone)]
+pub(crate) enum TaskIdSource {
+    #[cfg(test)]
+    Fixed(String),
+    Lazy(Box<dyn FnOnce() -> String + Send + 'static>),
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl std::fmt::Debug for TaskIdSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(test)]
+            Self::Fixed(task_id) => formatter.debug_tuple("Fixed").field(task_id).finish(),
+            Self::Lazy(_) => formatter.write_str("Lazy(<task id factory>)"),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug)]
 pub(crate) struct SubmitMetadata {
-    pub(crate) task_id: String,
+    task_id: Option<TaskIdSource>,
     pub(crate) submitted_at: String,
     pub(crate) started_at: String,
     pub(crate) started_monotonic: Instant,
     pub(crate) cleanup_timeout: Duration,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl SubmitMetadata {
+    #[cfg(test)]
+    pub(crate) fn fixed(
+        task_id: String,
+        submitted_at: String,
+        started_at: String,
+        started_monotonic: Instant,
+        cleanup_timeout: Duration,
+    ) -> Self {
+        Self {
+            task_id: Some(TaskIdSource::Fixed(task_id)),
+            submitted_at,
+            started_at,
+            started_monotonic,
+            cleanup_timeout,
+        }
+    }
+
+    pub(crate) fn lazy(
+        make_task_id: impl FnOnce() -> String + Send + 'static,
+        submitted_at: String,
+        started_at: String,
+        started_monotonic: Instant,
+        cleanup_timeout: Duration,
+    ) -> Self {
+        Self {
+            task_id: Some(TaskIdSource::Lazy(Box::new(make_task_id))),
+            submitted_at,
+            started_at,
+            started_monotonic,
+            cleanup_timeout,
+        }
+    }
+
+    fn make_task_id(&mut self) -> String {
+        match self.task_id.take().expect("task ID source가 있어야 합니다") {
+            #[cfg(test)]
+            TaskIdSource::Fixed(task_id) => task_id,
+            TaskIdSource::Lazy(make_task_id) => make_task_id(),
+        }
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -104,14 +170,24 @@ enum ExecutionCompletion {
 struct ExecutionFailure {
     submit: SubmitFailure,
     capacity_reusable: bool,
+    cleanup_complete: bool,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug)]
+struct OwnerRuntime {
+    capacity_permit: TaskCapacityPermit,
+    active: ActiveExecution,
+    fail_stop: Arc<FailStopCoordinator>,
 }
 
 #[cfg(any(target_os = "linux", test))]
 impl ExecutionFailure {
-    fn new(submit: SubmitFailure, capacity_reusable: bool) -> Self {
+    fn new(submit: SubmitFailure, capacity_reusable: bool, cleanup_complete: bool) -> Self {
         Self {
             submit,
             capacity_reusable,
+            cleanup_complete,
         }
     }
 }
@@ -123,6 +199,7 @@ pub(crate) struct SubmitCoordinator {
     registry: TaskRegistry<MonotonicClock>,
     runner: Arc<TaskRunner>,
     capacity: Arc<TaskCapacity>,
+    fail_stop: Arc<FailStopCoordinator>,
 }
 
 #[cfg(target_os = "linux")]
@@ -130,11 +207,13 @@ impl SubmitCoordinator {
     pub(crate) fn initialize(
         environment: VerifiedEnvironment,
         capacity_settings: TaskCapacitySettings,
+        fail_stop: Arc<FailStopCoordinator>,
     ) -> crate::Result<Self> {
         Ok(Self {
             registry: TaskRegistry::new(),
-            runner: Arc::new(TaskRunner::initialize(environment)?),
+            runner: Arc::new(TaskRunner::initialize(environment, Arc::clone(&fail_stop))?),
             capacity: Arc::new(TaskCapacity::new(capacity_settings)),
+            fail_stop,
         })
     }
 
@@ -173,6 +252,7 @@ impl SubmitCoordinator {
         coordinate_validated_submit(
             self.registry.clone(),
             Arc::clone(&self.capacity),
+            Arc::clone(&self.fail_stop),
             request_id,
             validated,
             metadata,
@@ -197,12 +277,14 @@ impl SubmitCoordinator {
                     .map(ExecutionCompletion::Real)
                     .map_err(|error| {
                         let capacity_reusable = error.capacity_reusable();
+                        let cleanup_complete = error.cleanup_complete();
                         ExecutionFailure::new(
                             SubmitFailure::new(
                                 ErrorCode::InternalError,
                                 error.into_error().to_string(),
                             ),
                             capacity_reusable,
+                            cleanup_complete,
                         )
                     })
             },
@@ -263,8 +345,12 @@ where
 {
     // 검증은 Registry 예약과 Runner side effect보다 먼저 끝낸다.
     let (request_id, validated) = ValidatedSubmit::try_from_request(request)?;
+    let fail_stop = FailStopCoordinator::new(
+        FailStopSettings::new(Duration::from_secs(30))
+            .expect("시험용 fail-stop timeout은 유효해야 합니다"),
+    );
     coordinate_validated_submit(
-        registry, capacity, request_id, validated, metadata, executor,
+        registry, capacity, fail_stop, request_id, validated, metadata, executor,
     )
     .await
 }
@@ -273,6 +359,7 @@ where
 async fn coordinate_validated_submit<C, E, Fut>(
     registry: TaskRegistry<C>,
     capacity: Arc<TaskCapacity>,
+    fail_stop: Arc<FailStopCoordinator>,
     request_id: String,
     validated: ValidatedSubmit,
     metadata: SubmitMetadata,
@@ -286,7 +373,41 @@ where
     Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>> + Send + 'static,
 {
     let effective_limits = validated.payload().limits.clone();
-    let reservation = registry.reserve_submit(validated, metadata.task_id.clone())?;
+    if let Some(waiter) = registry.existing_submit(&validated)? {
+        let task_id = waiter.task_id().to_owned();
+        return Ok(SubmitOutcome {
+            request_id,
+            task_id,
+            effective_limits,
+            observation: waiter.wait().await,
+        });
+    }
+    let mut metadata = metadata;
+    let (reservation, active) = {
+        let Some(admission) = fail_stop.try_admit() else {
+            return Ok(SubmitOutcome {
+                request_id,
+                task_id: String::new(),
+                effective_limits,
+                observation: SubmitObservation::Failed(SubmitFailure::new(
+                    ErrorCode::EnvironmentUnavailable,
+                    "cgroup v2 execution environment is unavailable",
+                )),
+            });
+        };
+        let reservation = registry.reserve_submit_with(validated, || metadata.make_task_id())?;
+        match &reservation {
+            SubmitReservation::Existing(_) => (reservation, None),
+            SubmitReservation::Owner(owner) => {
+                let active = admission
+                    .register(owner.task_id().to_owned())
+                    .map_err(|error| {
+                        SubmitError::Registry(RegistryError::TaskAlreadyExists(error.to_string()))
+                    })?;
+                (reservation, Some(active))
+            }
+        }
+    };
 
     let (task_id, observation) = match reservation {
         SubmitReservation::Existing(waiter) => {
@@ -295,11 +416,13 @@ where
         }
         SubmitReservation::Owner(owner) => {
             let task_id = owner.task_id().to_owned();
+            let active = active.expect("새 실행 owner에는 활성 실행 소유권이 있어야 합니다");
             let Some(capacity_permit) = capacity.try_acquire() else {
                 let observation = owner.rollback_before_running(SubmitFailure::new(
                     ErrorCode::CapacityExhausted,
                     CAPACITY_EXHAUSTED_MESSAGE,
                 ))?;
+                active.complete();
                 return Ok(SubmitOutcome {
                     request_id,
                     task_id,
@@ -323,6 +446,8 @@ where
                 executor,
                 initial_sender,
                 capacity_permit,
+                active,
+                Arc::clone(&fail_stop),
             ));
             let observation = initial_receiver
                 .await
@@ -346,6 +471,8 @@ async fn run_owner<C, E, Fut>(
     executor: E,
     initial_sender: oneshot::Sender<SubmitObservation>,
     capacity_permit: TaskCapacityPermit,
+    active: ActiveExecution,
+    fail_stop: Arc<FailStopCoordinator>,
 ) where
     C: RegistryClock,
     E: FnOnce(SubmitExecutionConfig, oneshot::Sender<TaskPayload>, CancellationRuntime) -> Fut,
@@ -354,6 +481,11 @@ async fn run_owner<C, E, Fut>(
     let (running_sender, mut running_receiver) = oneshot::channel();
     let (cancellation_runtime, running_cancellation) = cancellation_channel();
     let execution = executor(config, running_sender, cancellation_runtime);
+    let runtime = OwnerRuntime {
+        capacity_permit,
+        active,
+        fail_stop,
+    };
     tokio::pin!(execution);
     tokio::select! {
         biased;
@@ -365,13 +497,13 @@ async fn run_owner<C, E, Fut>(
                     execution,
                     running_cancellation,
                     initial_sender,
-                    capacity_permit,
+                    runtime,
                 ).await,
                 Err(_) => finish_without_running(
                     owner,
                     execution.await,
                     initial_sender,
-                    capacity_permit,
+                    runtime,
                 ),
             }
         }
@@ -383,13 +515,13 @@ async fn run_owner<C, E, Fut>(
                     running_cancellation,
                     completion,
                     initial_sender,
-                    capacity_permit,
+                    runtime,
                 ),
                 Err(_) => finish_without_running(
                     owner,
                     completion,
                     initial_sender,
-                    capacity_permit,
+                    runtime,
                 ),
             }
         }
@@ -403,11 +535,16 @@ async fn run_after_running<C, Fut>(
     execution: Fut,
     cancellation: RunningCancellation,
     initial_sender: oneshot::Sender<SubmitObservation>,
-    capacity_permit: TaskCapacityPermit,
+    runtime: OwnerRuntime,
 ) where
     C: RegistryClock,
     Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>>,
 {
+    let OwnerRuntime {
+        capacity_permit,
+        active,
+        fail_stop,
+    } = runtime;
     let running = match owner.publish_running_with_cancellation(running, cancellation) {
         Ok(running) => running,
         Err(error) => {
@@ -425,10 +562,17 @@ async fn run_after_running<C, Fut>(
         Ok(completed) => {
             if finish_owner(owner, completed).is_err() {
                 capacity_permit.retain_for_fail_stop();
+            } else {
+                active.complete();
+                finish_capacity(capacity_permit, &fail_stop);
             }
         }
         Err(failure) => {
+            report_running_failure(&fail_stop, owner.task_id());
             owner.fail(failure.submit);
+            if failure.cleanup_complete {
+                active.complete();
+            }
             capacity_permit.retain_for_fail_stop();
         }
     }
@@ -441,10 +585,15 @@ fn finish_after_running<C>(
     cancellation: RunningCancellation,
     completion: Result<ExecutionCompletion, ExecutionFailure>,
     initial_sender: oneshot::Sender<SubmitObservation>,
-    capacity_permit: TaskCapacityPermit,
+    runtime: OwnerRuntime,
 ) where
     C: RegistryClock,
 {
+    let OwnerRuntime {
+        capacity_permit,
+        active,
+        fail_stop,
+    } = runtime;
     let running = match owner.publish_running_with_cancellation(running, cancellation) {
         Ok(running) => running,
         Err(error) => {
@@ -460,10 +609,17 @@ fn finish_after_running<C>(
         Ok(completed) => {
             if finish_owner(owner, completed).is_err() {
                 capacity_permit.retain_for_fail_stop();
+            } else {
+                active.complete();
+                finish_capacity(capacity_permit, &fail_stop);
             }
         }
         Err(failure) => {
+            report_running_failure(&fail_stop, owner.task_id());
             owner.fail(failure.submit);
+            if failure.cleanup_complete {
+                active.complete();
+            }
             capacity_permit.retain_for_fail_stop();
         }
     }
@@ -474,13 +630,21 @@ fn finish_without_running<C>(
     owner: SubmitExecutionOwner<C>,
     completion: Result<ExecutionCompletion, ExecutionFailure>,
     initial_sender: oneshot::Sender<SubmitObservation>,
-    capacity_permit: TaskCapacityPermit,
+    runtime: OwnerRuntime,
 ) where
     C: RegistryClock,
 {
+    let OwnerRuntime {
+        capacity_permit,
+        active,
+        fail_stop,
+    } = runtime;
     let observation = match completion {
         Ok(completed) => match finish_owner(owner, completed) {
-            Ok(finished) => SubmitObservation::Task(finished),
+            Ok(finished) => {
+                active.complete();
+                SubmitObservation::Task(finished)
+            }
             Err(error) => {
                 capacity_permit.retain_for_fail_stop();
                 return send_initial_failure(initial_sender, error);
@@ -489,7 +653,10 @@ fn finish_without_running<C>(
         Err(failure) => {
             if failure.capacity_reusable {
                 match owner.rollback_before_running(failure.submit) {
-                    Ok(observation) => observation,
+                    Ok(observation) => {
+                        active.complete();
+                        observation
+                    }
                     Err(error) => {
                         capacity_permit.retain_for_fail_stop();
                         return send_initial_failure(initial_sender, error);
@@ -497,11 +664,35 @@ fn finish_without_running<C>(
                 }
             } else {
                 capacity_permit.retain_for_fail_stop();
-                owner.fail(failure.submit)
+                let observation = owner.fail(failure.submit);
+                if failure.cleanup_complete {
+                    active.complete();
+                }
+                return initial_sender.send(observation).ok().unwrap_or(());
             }
         }
     };
+    if fail_stop.is_fail_stopping() {
+        capacity_permit.retain_for_fail_stop();
+    }
     let _ = initial_sender.send(observation);
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn finish_capacity(capacity_permit: TaskCapacityPermit, fail_stop: &FailStopCoordinator) {
+    if fail_stop.is_fail_stopping() {
+        capacity_permit.retain_for_fail_stop();
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn report_running_failure(fail_stop: &FailStopCoordinator, task_id: &str) {
+    fail_stop.activate(CleanupFailureReport::new(
+        task_id,
+        "RUNNING 작업 완료",
+        vec!["검증된 FINISHED 결과"],
+        "RUNNING snapshot을 유지하고 daemon 종료를 시작함",
+    ));
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -664,6 +855,7 @@ mod tests {
     use super::*;
 
     const REQUEST_ID: &str = "11111111-1111-1111-1111-111111111111";
+    const OTHER_REQUEST_ID: &str = "12111111-1111-1111-1111-111111111111";
     const CLIENT_REQUEST_ID: &str = "22222222-2222-2222-2222-222222222222";
     const TASK_ID: &str = "33333333-3333-3333-3333-333333333333";
     const OTHER_TASK_ID: &str = "44444444-4444-4444-4444-444444444444";
@@ -716,13 +908,13 @@ mod tests {
     }
 
     fn metadata(task_id: &str) -> SubmitMetadata {
-        SubmitMetadata {
-            task_id: task_id.to_owned(),
-            submitted_at: "2026-07-24T10:00:00.000Z".to_owned(),
-            started_at: "2026-07-24T10:00:00.010Z".to_owned(),
-            started_monotonic: Instant::now(),
-            cleanup_timeout: Duration::from_secs(5),
-        }
+        SubmitMetadata::fixed(
+            task_id.to_owned(),
+            "2026-07-24T10:00:00.000Z".to_owned(),
+            "2026-07-24T10:00:00.010Z".to_owned(),
+            Instant::now(),
+            Duration::from_secs(5),
+        )
     }
 
     fn task_capacity(maximum: u32) -> Arc<TaskCapacity> {
@@ -732,11 +924,15 @@ mod tests {
     }
 
     fn reusable_failure(failure: SubmitFailure) -> ExecutionFailure {
-        ExecutionFailure::new(failure, true)
+        ExecutionFailure::new(failure, true, true)
     }
 
     fn retained_failure(failure: SubmitFailure) -> ExecutionFailure {
-        ExecutionFailure::new(failure, false)
+        ExecutionFailure::new(failure, false, false)
+    }
+
+    fn fail_stop_runtime() -> Arc<FailStopCoordinator> {
+        FailStopCoordinator::new(FailStopSettings::new(Duration::from_secs(5)).unwrap())
     }
 
     fn running(task_id: &str) -> TaskPayload {
@@ -1435,6 +1631,151 @@ mod tests {
         assert_eq!(registry.snapshot(NONZERO_TASK_ID), Ok(None));
     }
 
+    #[tokio::test]
+    async fn fail_stop_rejects_a_new_request_before_task_id_registry_capacity_and_executor() {
+        let registry = TaskRegistry::new();
+        let capacity = task_capacity(1);
+        let fail_stop = fail_stop_runtime();
+        fail_stop.activate(CleanupFailureReport::new(
+            TASK_ID,
+            "시험 정리",
+            vec!["작업 cgroup"],
+            "실패",
+        ));
+        let task_ids = Arc::new(AtomicUsize::new(0));
+        let executor_starts = Arc::new(AtomicUsize::new(0));
+        let task_id_calls = Arc::clone(&task_ids);
+        let executor_calls = Arc::clone(&executor_starts);
+        let metadata = SubmitMetadata::lazy(
+            move || {
+                task_id_calls.fetch_add(1, Ordering::SeqCst);
+                TASK_ID.to_owned()
+            },
+            "submitted".to_owned(),
+            "started".to_owned(),
+            Instant::now(),
+            Duration::from_secs(1),
+        );
+        let validated = ValidatedSubmit::try_from_payload(payload()).unwrap();
+
+        let outcome = coordinate_validated_submit(
+            registry.clone(),
+            Arc::clone(&capacity),
+            fail_stop,
+            REQUEST_ID.to_owned(),
+            validated,
+            metadata,
+            move |_config, _running_sender, _cancellation| async move {
+                executor_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(ExecutionCompletion::Test(finished(TASK_ID)))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome.observation,
+            SubmitObservation::Failed(SubmitFailure {
+                code: ErrorCode::EnvironmentUnavailable,
+                ..
+            })
+        ));
+        assert!(outcome.task_id.is_empty());
+        assert_eq!(task_ids.load(Ordering::SeqCst), 0);
+        assert_eq!(executor_starts.load(Ordering::SeqCst), 0);
+        assert!(
+            registry
+                .snapshot_by_client_request_id(CLIENT_REQUEST_ID)
+                .unwrap()
+                .is_none()
+        );
+        assert!(capacity.try_acquire().is_some());
+    }
+
+    #[tokio::test]
+    async fn fail_stop_keeps_existing_idempotency_and_conflict_without_new_execution() {
+        let registry = TaskRegistry::new();
+        let capacity = task_capacity(1);
+        let fail_stop = fail_stop_runtime();
+        let validated = ValidatedSubmit::try_from_payload(payload()).unwrap();
+        let first = coordinate_validated_submit(
+            registry.clone(),
+            Arc::clone(&capacity),
+            Arc::clone(&fail_stop),
+            REQUEST_ID.to_owned(),
+            validated.clone(),
+            metadata(TASK_ID),
+            move |config, running_sender, _cancellation| async move {
+                running_sender.send(running(&config.task_id)).unwrap();
+                Ok(ExecutionCompletion::Test(finished(&config.task_id)))
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            first.observation,
+            SubmitObservation::Task(TaskPayload::Running { .. })
+        ));
+        tokio::task::yield_now().await;
+
+        fail_stop.activate(CleanupFailureReport::new(
+            TASK_ID,
+            "시험 정리",
+            vec!["작업 cgroup"],
+            "실패",
+        ));
+        let new_task_ids = Arc::new(AtomicUsize::new(0));
+        let executor_starts = Arc::new(AtomicUsize::new(0));
+        let task_id_calls = Arc::clone(&new_task_ids);
+        let executor_calls = Arc::clone(&executor_starts);
+        let duplicate = coordinate_validated_submit(
+            registry.clone(),
+            Arc::clone(&capacity),
+            Arc::clone(&fail_stop),
+            OTHER_REQUEST_ID.to_owned(),
+            validated,
+            SubmitMetadata::lazy(
+                move || {
+                    task_id_calls.fetch_add(1, Ordering::SeqCst);
+                    OTHER_TASK_ID.to_owned()
+                },
+                "submitted".to_owned(),
+                "started".to_owned(),
+                Instant::now(),
+                Duration::from_secs(1),
+            ),
+            move |_config, _running_sender, _cancellation| async move {
+                executor_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(ExecutionCompletion::Test(finished(OTHER_TASK_ID)))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(duplicate.task_id, TASK_ID);
+        assert!(matches!(duplicate.observation, SubmitObservation::Task(_)));
+
+        let mut changed = payload();
+        changed.command.args.push("different".to_owned());
+        let conflict = coordinate_validated_submit(
+            registry,
+            capacity,
+            fail_stop,
+            REQUEST_ID.to_owned(),
+            ValidatedSubmit::try_from_payload(changed).unwrap(),
+            metadata(OTHER_TASK_ID),
+            move |_config, _running_sender, _cancellation| async move {
+                Ok(ExecutionCompletion::Test(finished(OTHER_TASK_ID)))
+            },
+        )
+        .await;
+        assert!(matches!(
+            conflict,
+            Err(SubmitError::Registry(RegistryError::IdempotencyConflict(_)))
+        ));
+        assert_eq!(new_task_ids.load(Ordering::SeqCst), 0);
+        assert_eq!(executor_starts.load(Ordering::SeqCst), 0);
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn actual_submit_coordinator_runs_once_and_finishes_after_cleanup() {
@@ -1445,9 +1786,12 @@ mod tests {
 
         let environment = SystemProbe::from_environment().check().unwrap();
         let jobs_path = environment.report().delegated_root.join("jobs");
-        let coordinator =
-            SubmitCoordinator::initialize(environment, TaskCapacitySettings::new(1).unwrap())
-                .unwrap();
+        let coordinator = SubmitCoordinator::initialize(
+            environment,
+            TaskCapacitySettings::new(1).unwrap(),
+            FailStopCoordinator::new(FailStopSettings::new(Duration::from_secs(5)).unwrap()),
+        )
+        .unwrap();
         let actual_payload = linux_payload(CLIENT_REQUEST_ID, "/bin/sleep", &["2"], 5_000);
 
         let started = Instant::now();
@@ -1593,5 +1937,143 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().starts_with("job-"))
             .count();
         assert_eq!(remaining_jobs, 0, "작업 cgroup이 남아 있습니다");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn actual_fail_stop_cleans_all_active_cgroups_and_blocks_new_execution() {
+        if std::env::var_os("TASKCAGE_RUN_LINUX_FAIL_STOP_INTEGRATION").is_none() {
+            eprintln!("NOT EXECUTED: 실제 cgroup v2 위임 환경이 필요합니다");
+            return;
+        }
+
+        let environment = SystemProbe::from_environment().check().unwrap();
+        let jobs_path = environment.report().delegated_root.join("jobs");
+        let fail_stop = fail_stop_runtime();
+        let coordinator = SubmitCoordinator::initialize(
+            environment,
+            TaskCapacitySettings::new(2).unwrap(),
+            Arc::clone(&fail_stop),
+        )
+        .unwrap();
+        let ghost_bin = std::env::var("TASKCAGE_FAIL_STOP_GHOST_BIN")
+            .expect("통합 시험용 ghost-tree 절대 경로가 필요합니다");
+        let ready_path = std::env::temp_dir().join(format!(
+            "taskcage-fail-stop-{}-{}.ready",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let ready_text = ready_path.to_string_lossy().into_owned();
+
+        for (request_id, client_request_id, task_id, program, args) in [
+            (
+                REQUEST_ID,
+                CLIENT_REQUEST_ID,
+                TASK_ID,
+                "/bin/sleep",
+                vec!["30"],
+            ),
+            (
+                OTHER_REQUEST_ID,
+                NONZERO_CLIENT_REQUEST_ID,
+                NONZERO_TASK_ID,
+                ghost_bin.as_str(),
+                vec!["--hold-parent", ready_text.as_str()],
+            ),
+        ] {
+            let outcome = coordinator
+                .submit(
+                    request(
+                        PROTOCOL_VERSION,
+                        request_id,
+                        linux_payload(client_request_id, program, &args, 60_000),
+                    ),
+                    metadata(task_id),
+                    || ("finished".to_owned(), Instant::now()),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                outcome.observation,
+                SubmitObservation::Task(TaskPayload::Running { .. })
+            ));
+        }
+        timeout(TokioDuration::from_secs(5), async {
+            while !ready_path.exists() {
+                tokio::time::sleep(TokioDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("ghost descendant가 실행됐다는 근거가 필요합니다");
+        let ghost_pids = fs::read_to_string(&ready_path)
+            .unwrap()
+            .lines()
+            .map(|line| line.split_once('=').unwrap().1.parse::<u32>().unwrap())
+            .collect::<Vec<_>>();
+
+        fail_stop.activate(CleanupFailureReport::new(
+            TASK_ID,
+            "통합 시험 정리 불확실성 주입",
+            vec!["작업 cgroup"],
+            "process-wide 정리 시작",
+        ));
+
+        timeout(TokioDuration::from_secs(5), async {
+            loop {
+                let all_finished = [TASK_ID, NONZERO_TASK_ID].iter().all(|task_id| {
+                    matches!(
+                        coordinator.snapshot(task_id).unwrap(),
+                        Some(TaskPayload::Finished {
+                            termination_reason: TerminationReason::DaemonError,
+                            ..
+                        })
+                    )
+                });
+                if all_finished {
+                    break;
+                }
+                tokio::time::sleep(TokioDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fail-stop은 활성 작업 전체를 정리해야 합니다");
+        assert_eq!(fail_stop.active_count(), 0);
+
+        let rejected = coordinator
+            .submit(
+                request(
+                    PROTOCOL_VERSION,
+                    REQUEST_ID,
+                    linux_payload(TIMEOUT_CLIENT_REQUEST_ID, "/bin/true", &[], 5_000),
+                ),
+                metadata(TIMEOUT_TASK_ID),
+                || ("finished".to_owned(), Instant::now()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            rejected.observation,
+            SubmitObservation::Failed(SubmitFailure {
+                code: ErrorCode::EnvironmentUnavailable,
+                ..
+            })
+        ));
+        assert!(coordinator.snapshot(TIMEOUT_TASK_ID).unwrap().is_none());
+        let remaining_jobs = fs::read_dir(jobs_path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("job-"))
+            .count();
+        assert_eq!(
+            remaining_jobs, 0,
+            "fail-stop 뒤 작업 cgroup이 남아 있습니다"
+        );
+        assert!(
+            ghost_pids
+                .iter()
+                .all(|pid| !std::path::Path::new(&format!("/proc/{pid}")).exists()),
+            "fail-stop 뒤 ghost descendant가 남아 있습니다: {ghost_pids:?}"
+        );
+        fs::remove_file(ready_path).unwrap();
     }
 }

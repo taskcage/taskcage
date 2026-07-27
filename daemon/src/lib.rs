@@ -9,8 +9,10 @@ pub mod capability;
 mod capacity;
 pub mod cgroup;
 pub mod codec;
+mod deadline;
 #[cfg(target_os = "linux")]
 mod executor;
+mod fail_stop;
 #[cfg(any(target_os = "linux", test))]
 mod handlers;
 #[cfg_attr(
@@ -52,6 +54,9 @@ use cgroup::{CgroupError, CgroupLimits, JobStats};
 #[cfg(target_os = "linux")]
 use executor::{ExecutorError, PreparedCommand};
 #[cfg(target_os = "linux")]
+use fail_stop::FailStopCoordinator;
+use fail_stop::FailStopSettings;
+#[cfg(target_os = "linux")]
 use handlers::ProtocolHandlers;
 use output::CaptureLimits;
 use preflight::{CapabilityProbe, CapabilityReport, PreflightError, SystemProbe};
@@ -90,6 +95,8 @@ pub enum Error {
     TaskLifecycle(String),
     #[error("UDS 서버가 실패했습니다: {0}")]
     Server(String),
+    #[error("정리 불확실 fail-stop으로 daemon을 종료합니다: taskId={task_id}, stage={stage}")]
+    FailStop { task_id: String, stage: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -117,6 +124,7 @@ pub struct DaemonConfig {
     socket_path: PathBuf,
     max_concurrent_tasks: u32,
     cleanup_timeout: Duration,
+    fail_stop_timeout: Duration,
 }
 
 impl DaemonConfig {
@@ -124,6 +132,7 @@ impl DaemonConfig {
         socket_path: PathBuf,
         max_concurrent_tasks: u32,
         cleanup_timeout: Duration,
+        fail_stop_timeout: Duration,
     ) -> Result<Self> {
         if !socket_path.is_absolute() {
             return Err(Error::InvalidArgument(
@@ -140,10 +149,13 @@ impl DaemonConfig {
                 "cleanup-timeout-ms 값은 0보다 커야 합니다".to_owned(),
             ));
         }
+        FailStopSettings::new(fail_stop_timeout)
+            .map_err(|error| Error::InvalidArgument(error.to_string()))?;
         Ok(Self {
             socket_path,
             max_concurrent_tasks,
             cleanup_timeout,
+            fail_stop_timeout,
         })
     }
 }
@@ -169,6 +181,10 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let capacity_settings = TaskCapacitySettings::new(config.max_concurrent_tasks)
         .map_err(|error| Error::InvalidArgument(error.to_string()))?;
     let preflight = SystemProbe::from_environment().check();
+    let fail_stop = FailStopCoordinator::new(
+        FailStopSettings::new(config.fail_stop_timeout)
+            .map_err(|error| Error::InvalidArgument(error.to_string()))?,
+    );
     match &preflight {
         Ok(environment) => tracing::info!(
             root = %environment.report().delegated_root.display(),
@@ -180,7 +196,11 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             "cgroup 실행은 사용할 수 없지만 capability 조회를 위해 UDS를 시작합니다"
         ),
     }
-    let handlers = Arc::new(ProtocolHandlers::initialize(preflight, capacity_settings)?);
+    let handlers = Arc::new(ProtocolHandlers::initialize(
+        preflight,
+        capacity_settings,
+        fail_stop,
+    )?);
     tracing::info!(socket = %config.socket_path.display(), "TaskCage daemon started");
     let result = server::serve_protocol_until(
         &config.socket_path,
@@ -189,8 +209,15 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         shutdown_signal(),
     )
     .await
-    .map_err(|error| Error::Server(error.to_string()));
-    tracing::info!(socket = %config.socket_path.display(), "TaskCage daemon stopped");
+    .map_err(|error| match error {
+        server::ServerError::FailStop { task_id, stage } => Error::FailStop { task_id, stage },
+        other => Error::Server(other.to_string()),
+    });
+    if result.is_ok() {
+        tracing::info!(socket = %config.socket_path.display(), "TaskCage daemon stopped");
+    } else {
+        tracing::error!(socket = %config.socket_path.display(), "TaskCage daemon stopped with an error");
+    }
     result
 }
 
@@ -239,6 +266,7 @@ pub async fn run_once(config: RunOnceConfig) -> Result<RunOnceReport> {
             prepared,
         },
         cancellation,
+        None,
         || {},
     )
     .await

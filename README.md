@@ -155,7 +155,8 @@ CLI, Python SDK, Docker·Kubernetes 지원은 초기 기능과 실제 사용 사
 taskcaged serve \
   --socket /run/taskcage/taskcaged.sock \
   --max-concurrent-tasks 4 \
-  --cleanup-timeout-ms 5000
+  --cleanup-timeout-ms 5000 \
+  --fail-stop-timeout-ms 10000
 ```
 
 위 경로와 숫자는 배포 예시이며 protocol 기본값이 아니다. 상위 디렉터리와 서비스 계정은 배포 설정이
