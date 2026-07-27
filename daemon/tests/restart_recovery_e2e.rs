@@ -407,24 +407,53 @@ fn wait_for_listener_after_recovery(
 }
 
 fn assert_startup_log_order(log_path: &Path) {
-    let log = read_log(log_path);
+    let raw_log = read_log(log_path);
+    let log = strip_ansi_csi(&raw_log);
     let recovery = log
         .find("잔여 TaskCage 작업 cgroup 복구를 완료했습니다")
-        .unwrap_or_else(|| panic!("시작 복구 완료 log가 없습니다:\n{log}"));
+        .unwrap_or_else(|| panic!("시작 복구 완료 log가 없습니다:\n{raw_log}"));
     let preflight = log
         .find("cgroup 사전 검사를 통과했습니다")
-        .unwrap_or_else(|| panic!("preflight 완료 log가 없습니다:\n{log}"));
+        .unwrap_or_else(|| panic!("preflight 완료 log가 없습니다:\n{raw_log}"));
     let started = log
         .find("TaskCage daemon started")
-        .unwrap_or_else(|| panic!("daemon 시작 log가 없습니다:\n{log}"));
+        .unwrap_or_else(|| panic!("daemon 시작 log가 없습니다:\n{raw_log}"));
     assert!(
         recovery < preflight && preflight < started,
-        "복구 → preflight → UDS 준비 순서가 아닙니다:\n{log}"
+        "복구 → preflight → UDS 준비 순서가 아닙니다:\n{raw_log}"
     );
     assert!(
         log.contains("removed_jobs=1"),
-        "잔여 작업 한 건을 제거했다는 근거가 없습니다:\n{log}"
+        "잔여 작업 한 건을 제거했다는 근거가 없습니다:\n{raw_log}"
     );
+}
+
+fn strip_ansi_csi(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut plain = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'[') {
+            let mut end = index + 2;
+            while end < bytes.len() && !(0x40..=0x7e).contains(&bytes[end]) {
+                end += 1;
+            }
+            if end < bytes.len() {
+                index = end + 1;
+                continue;
+            }
+        }
+        plain.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(plain).expect("ANSI 제거 뒤에도 UTF-8이어야 합니다")
+}
+
+#[test]
+fn ansi_colored_recovery_field_is_searchable() {
+    let colored = "\u{1b}[3mremoved_jobs\u{1b}[0m\u{1b}[2m=\u{1b}[0m1";
+
+    assert_eq!(strip_ansi_csi(colored), "removed_jobs=1");
 }
 
 fn poll_finished(stream: &mut std::os::unix::net::UnixStream, task_id: &str) -> Value {
