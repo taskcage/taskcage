@@ -5,6 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -237,6 +238,192 @@ fn actual_serve_process_exits_nonzero_after_fail_stop_deadline() {
     assert!(!runtime.exists(), "시험용 runtime directory가 남았습니다");
 }
 
+#[test]
+fn actual_shutdown_drain_switches_to_fail_stop_and_exits_nonzero() {
+    if std::env::var_os("TASKCAGE_RUN_FAIL_STOP_PROCESS_E2E").is_none() {
+        eprintln!("NOT EXECUTED: 실제 Ubuntu cgroup v2 위임 환경이 필요합니다");
+        return;
+    }
+
+    let daemon_bin = required_path("TASKCAGE_FAIL_STOP_PROCESS_BIN");
+    let ghost_bin = required_path("TASKCAGE_FAIL_STOP_PROCESS_GHOST_BIN");
+    let outer = CgroupPaths::resolve(None).expect("시험 process의 위임 cgroup root 확인");
+    let nonce = unique_nonce();
+    let outer_root = outer.root().to_path_buf();
+    let harness = outer_root.join(format!("shutdown-fail-stop-harness-{nonce}"));
+    fs::create_dir(&harness).expect("E2E harness cgroup 생성");
+    fs::write(
+        harness.join("cgroup.procs"),
+        format!("{}\n", std::process::id()),
+    )
+    .expect("E2E harness를 별도 cgroup으로 이동");
+    enable_controllers(&outer_root, &["cpu", "memory", "pids"]);
+    let daemon_root = outer.root().join(format!("shutdown-fail-stop-e2e-{nonce}"));
+    fs::create_dir(&daemon_root).expect("실제 daemon용 전용 cgroup root 생성");
+    require_controllers(&daemon_root, &["cpu", "memory", "pids"]);
+
+    let runtime = PathBuf::from("/run").join(format!("taskcage-shutdown-fail-stop-{nonce}"));
+    fs::create_dir(&runtime).expect("owner-only runtime directory 생성");
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))
+        .expect("runtime directory mode 설정");
+    let socket_path = runtime.join("taskcaged.sock");
+    let log_path = runtime.join("taskcaged.log");
+    let ready_path = runtime.join("ghost.ready");
+
+    let mut guard = E2eGuard::new(daemon_root.clone(), runtime.clone(), log_path.clone());
+    let log = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&log_path)
+        .expect("daemon log 파일 생성");
+    let mut command = Command::new(&daemon_bin);
+    command
+        .arg("serve")
+        .arg("--socket")
+        .arg(&socket_path)
+        .arg("--max-concurrent-tasks")
+        .arg("1")
+        .arg("--cleanup-timeout-ms")
+        .arg(CLEANUP_TIMEOUT.as_millis().to_string())
+        .arg("--fail-stop-timeout-ms")
+        .arg(FAIL_STOP_TIMEOUT.as_millis().to_string())
+        .env_remove("TASKCAGE_CGROUP_ROOT")
+        .stdout(Stdio::from(
+            log.try_clone().expect("daemon stdout log 복제"),
+        ))
+        .stderr(Stdio::from(log));
+    move_child_before_exec(&mut command, &daemon_root);
+    guard.child = Some(command.spawn().expect("실제 taskcaged serve 실행"));
+
+    wait_for_socket(&socket_path, guard.child.as_mut().unwrap(), &log_path);
+    let mut submitter = connect(&socket_path);
+    let submit = exchange(
+        &mut submitter,
+        &json!({
+            "protocolVersion": 1,
+            "requestId": request_id(30),
+            "type": "submitTask",
+            "payload": {
+                "clientRequestId": "40000000-0000-4000-8000-000000000004",
+                "command": {
+                    "program": ghost_bin.to_string_lossy(),
+                    "args": ["--hold-parent", ready_path.to_string_lossy()],
+                    "workingDirectory": "/",
+                    "environment": {}
+                },
+                "limits": {
+                    "cpuMax": { "quotaMicros": 50000, "periodMicros": 100000 },
+                    "memoryMaxBytes": 67108864,
+                    "pidsMax": 8,
+                    "wallTimeLimitMs": 1500
+                },
+                "output": {
+                    "stdoutTailMaxBytes": 1024,
+                    "stderrTailMaxBytes": 1024
+                }
+            }
+        }),
+    );
+    assert_eq!(submit["type"], "taskAccepted", "RUNNING 응답: {submit}");
+    assert_eq!(submit["payload"]["state"], "RUNNING");
+    let task_id = submit["payload"]["taskId"]
+        .as_str()
+        .expect("taskAccepted.taskId")
+        .to_owned();
+    wait_for_path(&ready_path, Duration::from_secs(3), "ghost descendant 준비");
+    let descendant_pids = read_ready_pids(&ready_path);
+    let job_path = daemon_root.join("jobs").join(format!("job-{task_id}"));
+    assert!(job_path.is_dir(), "RUNNING 작업 cgroup이 필요합니다");
+    let blocker = job_path.join("e2e-removal-blocker");
+    fs::create_dir(&blocker).expect("작업 cgroup 제거를 막는 빈 하위 cgroup 생성");
+    guard.blocker = Some(blocker);
+
+    let daemon_pid = i32::try_from(guard.child.as_ref().unwrap().id()).expect("daemon PID 변환");
+    assert_eq!(unsafe { libc::kill(daemon_pid, libc::SIGTERM) }, 0);
+    let shutdown_observed = wait_for_log_contains(
+        &log_path,
+        "정상 shutdown drain을 시작합니다",
+        Duration::from_secs(2),
+        guard.child.as_mut().unwrap(),
+    );
+    wait_for_new_connections_to_stop(&socket_path, guard.child.as_mut().unwrap());
+    assert!(
+        guard.child.as_mut().unwrap().try_wait().unwrap().is_none(),
+        "정상 shutdown drain 중에는 작업 cleanup을 기다려야 합니다"
+    );
+
+    let fail_stop_observed = wait_for_log_contains(
+        &log_path,
+        "process-wide fail-stop을 시작합니다",
+        Duration::from_secs(3),
+        guard.child.as_mut().unwrap(),
+    );
+    assert!(
+        fail_stop_observed >= shutdown_observed,
+        "정상 shutdown 선택 뒤에 fail-stop이 발생해야 합니다"
+    );
+    let status = wait_for_exit(
+        guard.child.as_mut().unwrap(),
+        fail_stop_observed + FAIL_STOP_TIMEOUT + Duration::from_secs(2),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "shutdown 뒤 fail-stop 종료 기한을 넘었습니다\n{}",
+            read_log(&log_path)
+        )
+    });
+    let elapsed = fail_stop_observed.elapsed();
+    assert!(
+        !status.success(),
+        "shutdown 뒤 fail-stop은 0 코드로 종료하면 안 됩니다"
+    );
+    assert!(
+        elapsed <= FAIL_STOP_TIMEOUT + Duration::from_secs(1),
+        "기존 fail-stop deadline을 초과했습니다: elapsed={elapsed:?}\n{}",
+        read_log(&log_path)
+    );
+
+    let log = read_log(&log_path);
+    let shutdown_index = log
+        .find("정상 shutdown drain을 시작합니다")
+        .expect("정상 shutdown drain 로그");
+    let fail_stop_index = log
+        .find("process-wide fail-stop을 시작합니다")
+        .expect("fail-stop 전환 로그");
+    assert!(
+        shutdown_index < fail_stop_index,
+        "shutdown이 fail-stop보다 먼저여야 합니다"
+    );
+    assert!(
+        !socket_path.exists(),
+        "정상 shutdown에서 owned socket을 정리해야 합니다"
+    );
+    assert_daemon_lock_released(&runtime.join(".taskcaged.lock"));
+    assert!(
+        !cgroup_populated(&job_path),
+        "작업 cgroup에 process가 남았습니다"
+    );
+    assert!(
+        descendant_pids
+            .iter()
+            .all(|pid| !Path::new(&format!("/proc/{pid}")).exists()),
+        "ghost descendant가 남았습니다: {descendant_pids:?}"
+    );
+
+    drop(submitter);
+    let cleanup_errors = guard.cleanup();
+    assert!(
+        cleanup_errors.is_empty(),
+        "시험 guard 정리 실패: {cleanup_errors:?}"
+    );
+    assert!(
+        !daemon_root.exists(),
+        "시험용 daemon cgroup root가 남았습니다"
+    );
+    assert!(!runtime.exists(), "시험용 runtime directory가 남았습니다");
+}
+
 fn move_child_before_exec(command: &mut Command, daemon_root: &Path) {
     let cgroup_procs = CString::new(daemon_root.join("cgroup.procs").as_os_str().as_bytes())
         .expect("cgroup.procs 경로에는 NUL이 없습니다");
@@ -395,6 +582,46 @@ fn wait_for_exit(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn wait_for_log_contains(
+    log: &Path,
+    expected: &str,
+    timeout: Duration,
+    child: &mut Child,
+) -> Instant {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if read_log(log).contains(expected) {
+            return Instant::now();
+        }
+        if let Some(status) = child.try_wait().expect("daemon 상태 확인") {
+            panic!(
+                "{expected:?} 로그 전에 daemon이 종료됐습니다: {status}\n{}",
+                read_log(log)
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{expected:?} 로그 timeout\n{}",
+            read_log(log)
+        );
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn assert_daemon_lock_released(path: &Path) {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .expect("daemon lock 파일 열기");
+    let acquired = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(
+        acquired, 0,
+        "daemon 종료 뒤 생존 기간 lock이 해제돼야 합니다"
+    );
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
 }
 
 fn read_ready_pids(path: &Path) -> Vec<u32> {
