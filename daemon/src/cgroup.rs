@@ -17,6 +17,10 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, RawFd};
+#[cfg(all(target_os = "linux", test))]
+use std::sync::Arc;
+#[cfg(all(target_os = "linux", test))]
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use serde::Serialize;
 use thiserror::Error;
@@ -90,21 +94,51 @@ pub enum CgroupError {
     EmptyTimeout { path: PathBuf, timeout: Duration },
     #[error("작업 결과 수집과 cgroup 제거가 모두 실패했습니다: 결과={primary}; 제거={cleanup}")]
     CleanupCombined { primary: String, cleanup: String },
+    #[error(
+        "cgroup 값 재확인 실패 뒤 작업 cgroup 제거도 실패했습니다: 재확인={mismatch}; 제거={cleanup}"
+    )]
+    ReadBackRollbackUncertain {
+        mismatch: Box<CgroupError>,
+        cleanup: String,
+    },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// 한 주기 안에서 CPU를 얼마나 오래 사용할지 정한다.
 pub struct CpuLimit {
     pub quota_micros: NonZeroU64,
     pub period_micros: NonZeroU64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// 작업 cgroup 하나에 적용할 자원 상한이다.
 pub struct CgroupLimits {
     pub memory_max_bytes: NonZeroU64,
     pub max_processes: NonZeroU64,
     pub cpu: CpuLimit,
+}
+
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 모든 cgroup 제한을 쓰고 같은 값으로 다시 읽은 뒤에만 만드는 내부 증거다.
+pub(crate) struct VerifiedCgroupLimits {
+    limits: CgroupLimits,
+}
+
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+impl VerifiedCgroupLimits {
+    fn new(limits: CgroupLimits) -> Self {
+        Self { limits }
+    }
+
+    pub(crate) fn limits(self) -> CgroupLimits {
+        self.limits
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(limits: CgroupLimits) -> Self {
+        Self::new(limits)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -322,6 +356,38 @@ const REQUIRED_CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
 /// 검증된 위임 영역에서 작업 cgroup을 만들고 관리한다.
 pub struct CgroupManager {
     paths: CgroupPaths,
+    #[cfg(test)]
+    create_faults: Option<Arc<CgroupCreateFaults>>,
+}
+
+#[cfg(all(target_os = "linux", test))]
+#[derive(Debug, Default)]
+pub(crate) struct CgroupCreateFaults {
+    mode: AtomicU8,
+    read_back_attempts: AtomicUsize,
+    rollback_attempts: AtomicUsize,
+}
+
+#[cfg(all(target_os = "linux", test))]
+impl CgroupCreateFaults {
+    pub(crate) fn inject_read_back_mismatch(&self, rollback_removal_fails: bool) {
+        self.mode.store(
+            if rollback_removal_fails { 2 } else { 1 },
+            Ordering::Release,
+        );
+    }
+
+    fn take_mode(&self) -> u8 {
+        self.mode.swap(0, Ordering::AcqRel)
+    }
+
+    pub(crate) fn read_back_attempts(&self) -> usize {
+        self.read_back_attempts.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn rollback_attempts(&self) -> usize {
+        self.rollback_attempts.load(Ordering::Acquire)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -358,7 +424,21 @@ impl CgroupManager {
                 }),
             };
         }
-        Ok(Self { paths })
+        Ok(Self {
+            paths,
+            #[cfg(test)]
+            create_faults: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn initialize_with_create_faults(
+        environment: VerifiedEnvironment,
+        faults: Arc<CgroupCreateFaults>,
+    ) -> Result<Self, CgroupError> {
+        let mut manager = Self::initialize(environment)?;
+        manager.create_faults = Some(faults);
+        Ok(manager)
     }
 
     pub fn root(&self) -> &Path {
@@ -366,6 +446,46 @@ impl CgroupManager {
     }
 
     pub fn create_job(&self, job_id: &str, limits: CgroupLimits) -> Result<JobCgroup, CgroupError> {
+        #[cfg(test)]
+        if let Some(faults) = &self.create_faults {
+            match faults.take_mode() {
+                1 => {
+                    let configure_faults = Arc::clone(faults);
+                    let rollback_faults = Arc::clone(faults);
+                    return self.create_job_with_rollback(
+                        job_id,
+                        limits,
+                        move |path, limits| {
+                            configure_job_with_read_back_mismatch(path, limits, &configure_faults)
+                        },
+                        move |path| {
+                            rollback_faults
+                                .rollback_attempts
+                                .fetch_add(1, Ordering::AcqRel);
+                            fs::remove_dir(path)
+                        },
+                    );
+                }
+                2 => {
+                    let configure_faults = Arc::clone(faults);
+                    let rollback_faults = Arc::clone(faults);
+                    return self.create_job_with_rollback(
+                        job_id,
+                        limits,
+                        move |path, limits| {
+                            configure_job_with_read_back_mismatch(path, limits, &configure_faults)
+                        },
+                        move |_path| {
+                            rollback_faults
+                                .rollback_attempts
+                                .fetch_add(1, Ordering::AcqRel);
+                            Err(io::Error::other("injected cgroup rollback removal failure"))
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
         self.create_job_with(job_id, limits, configure_job)
     }
 
@@ -376,7 +496,27 @@ impl CgroupManager {
         configure: F,
     ) -> Result<JobCgroup, CgroupError>
     where
-        F: FnOnce(&Path, CgroupLimits) -> Result<(File, KernelEvents), CgroupError>,
+        F: FnOnce(
+            &Path,
+            CgroupLimits,
+        ) -> Result<(File, KernelEvents, VerifiedCgroupLimits), CgroupError>,
+    {
+        self.create_job_with_rollback(job_id, limits, configure, |path| fs::remove_dir(path))
+    }
+
+    fn create_job_with_rollback<F, R>(
+        &self,
+        job_id: &str,
+        limits: CgroupLimits,
+        configure: F,
+        rollback: R,
+    ) -> Result<JobCgroup, CgroupError>
+    where
+        F: FnOnce(
+            &Path,
+            CgroupLimits,
+        ) -> Result<(File, KernelEvents, VerifiedCgroupLimits), CgroupError>,
+        R: FnOnce(&Path) -> io::Result<()>,
     {
         let path = self.paths.new_job_path(job_id)?;
         fs::create_dir(&path)
@@ -385,29 +525,57 @@ impl CgroupManager {
         let configured = configure(&path, limits);
 
         match configured {
-            Ok((directory, baseline)) => Ok(JobCgroup {
+            Ok((directory, baseline, verified_limits)) => Ok(JobCgroup {
                 job_id: job_id.to_owned(),
                 path,
                 directory,
                 baseline,
+                verified_limits,
                 cleaned: false,
             }),
             Err(error) => {
                 let _ = write_control(&path.join("cgroup.kill"), "1\n");
-                match fs::remove_dir(&path) {
+                match rollback(&path) {
                     Ok(()) => Err(error),
-                    Err(cleanup) => Err(CgroupError::CleanupCombined {
-                        primary: error.to_string(),
-                        cleanup: cleanup.to_string(),
-                    }),
+                    Err(cleanup) => match error {
+                        mismatch @ CgroupError::ValueMismatch { .. } => {
+                            Err(CgroupError::ReadBackRollbackUncertain {
+                                mismatch: Box::new(mismatch),
+                                cleanup: cleanup.to_string(),
+                            })
+                        }
+                        other => Err(CgroupError::CleanupCombined {
+                            primary: other.to_string(),
+                            cleanup: cleanup.to_string(),
+                        }),
+                    },
                 }
             }
         }
     }
 }
 
+#[cfg(all(target_os = "linux", test))]
+fn configure_job_with_read_back_mismatch(
+    path: &Path,
+    limits: CgroupLimits,
+    faults: &CgroupCreateFaults,
+) -> Result<(File, KernelEvents, VerifiedCgroupLimits), CgroupError> {
+    faults.read_back_attempts.fetch_add(1, Ordering::AcqRel);
+    let expected = limits.memory_max_bytes.get().to_string();
+    write_and_verify_with_injected_actual(
+        &path.join("memory.max"),
+        &expected,
+        "injected-read-back-value",
+    )?;
+    unreachable!("주입된 read-back 값은 요청값과 달라야 합니다")
+}
+
 #[cfg(target_os = "linux")]
-fn configure_job(path: &Path, limits: CgroupLimits) -> Result<(File, KernelEvents), CgroupError> {
+fn configure_job(
+    path: &Path,
+    limits: CgroupLimits,
+) -> Result<(File, KernelEvents, VerifiedCgroupLimits), CgroupError> {
     // 커널 제어 파일은 쓰기 성공만으로 적용됐다고 단정하지 않고 다시 읽어 확인한다.
     write_and_verify(
         &path.join("memory.max"),
@@ -434,7 +602,7 @@ fn configure_job(path: &Path, limits: CgroupLimits) -> Result<(File, KernelEvent
     let directory =
         File::open(path).map_err(|source| cgroup_io_error("작업 cgroup 열기", path, source))?;
     let baseline = read_kernel_events(path)?;
-    Ok((directory, baseline))
+    Ok((directory, baseline, VerifiedCgroupLimits::new(limits)))
 }
 
 #[cfg(target_os = "linux")]
@@ -445,6 +613,7 @@ pub struct JobCgroup {
     path: PathBuf,
     directory: File,
     baseline: KernelEvents,
+    verified_limits: VerifiedCgroupLimits,
     cleaned: bool,
 }
 
@@ -460,6 +629,10 @@ impl JobCgroup {
 
     pub fn raw_fd(&self) -> RawFd {
         self.directory.as_raw_fd()
+    }
+
+    pub(crate) fn verified_limits(&self) -> VerifiedCgroupLimits {
+        self.verified_limits
     }
 
     pub fn is_populated(&self) -> Result<bool, CgroupError> {
@@ -687,13 +860,30 @@ fn write_and_verify(path: &Path, value: &str) -> Result<(), CgroupError> {
     write_control(path, &format!("{value}\n"))?;
     let actual = fs::read_to_string(path)
         .map_err(|source| cgroup_io_error("cgroup 값 재확인", path, source))?;
-    if actual.trim() == value {
+    verify_read_back(path, value, actual.trim())
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn write_and_verify_with_injected_actual(
+    path: &Path,
+    value: &str,
+    injected_actual: &str,
+) -> Result<(), CgroupError> {
+    write_control(path, &format!("{value}\n"))?;
+    let _actual = fs::read_to_string(path)
+        .map_err(|source| cgroup_io_error("cgroup 값 재확인", path, source))?;
+    verify_read_back(path, value, injected_actual)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_read_back(path: &Path, value: &str, actual: &str) -> Result<(), CgroupError> {
+    if actual == value {
         Ok(())
     } else {
         Err(CgroupError::ValueMismatch {
             path: path.to_path_buf(),
             expected: value.to_owned(),
-            actual: actual.trim().to_owned(),
+            actual: actual.to_owned(),
         })
     }
 }
@@ -836,6 +1026,7 @@ mod tests {
                 manager: root.join("manager"),
                 jobs: jobs.clone(),
             },
+            create_faults: None,
         };
         let limits = CgroupLimits {
             memory_max_bytes: NonZeroU64::new(1).unwrap(),
@@ -849,7 +1040,7 @@ mod tests {
 
         let result = manager
             .create_job_with("created-failure", limits, |path, _| {
-                Err::<(File, KernelEvents), _>(cgroup_io_error(
+                Err::<(File, KernelEvents, VerifiedCgroupLimits), _>(cgroup_io_error(
                     "injected after creation",
                     path,
                     io::Error::other("injected"),
@@ -881,6 +1072,7 @@ mod tests {
                 manager: root.join("manager"),
                 jobs: jobs.clone(),
             },
+            create_faults: None,
         };
         let limits = CgroupLimits {
             memory_max_bytes: NonZeroU64::new(1).unwrap(),
@@ -896,7 +1088,7 @@ mod tests {
         let result = manager
             .create_job_with("partial", limits, |path, _| {
                 configured_limits.set(1);
-                Err::<(File, KernelEvents), _>(CgroupError::ValueMismatch {
+                Err::<(File, KernelEvents, VerifiedCgroupLimits), _>(CgroupError::ValueMismatch {
                     path: path.join("pids.max"),
                     expected: "1".to_owned(),
                     actual: "2".to_owned(),

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::cgroup::{CgroupLimits, CpuLimit};
+use crate::cgroup::{CgroupLimits, CpuLimit, VerifiedCgroupLimits};
 use crate::output::CaptureLimits;
 use crate::protocol::{OutputLimits, ResourceLimits};
 
@@ -16,9 +16,28 @@ const MAX_TOTAL_OUTPUT_BYTES: u32 = 131_072;
 pub struct ResourceBudget {
     cgroup_limits: CgroupLimits,
     wall_timeout: Duration,
+    wall_time_limit_ms: NonZeroU64,
     stdout_tail_max_bytes: NonZeroUsize,
     stderr_tail_max_bytes: NonZeroUsize,
-    effective_limits: ResourceLimits,
+}
+
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// cgroup 제한의 write/read-back이 모두 끝난 뒤 taskAccepted에 사용할 수 있는 값이다.
+pub(crate) struct VerifiedEffectiveLimits {
+    limits: ResourceLimits,
+}
+
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+impl VerifiedEffectiveLimits {
+    pub(crate) fn into_protocol(self) -> ResourceLimits {
+        self.limits
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(limits: ResourceLimits) -> Self {
+        Self { limits }
+    }
 }
 
 impl ResourceBudget {
@@ -64,9 +83,9 @@ impl ResourceBudget {
                 },
             },
             wall_timeout: Duration::from_millis(wall_time_limit_ms.get()),
+            wall_time_limit_ms,
             stdout_tail_max_bytes,
             stderr_tail_max_bytes,
-            effective_limits: limits,
         })
     }
 
@@ -90,8 +109,28 @@ impl ResourceBudget {
         CaptureLimits::new(self.stdout_tail_max_bytes, self.stderr_tail_max_bytes)
     }
 
-    pub fn effective_limits(&self) -> &ResourceLimits {
-        &self.effective_limits
+    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+    pub(crate) fn verified_effective_limits(
+        &self,
+        verified: VerifiedCgroupLimits,
+    ) -> VerifiedEffectiveLimits {
+        let limits = verified.limits();
+        VerifiedEffectiveLimits {
+            limits: ResourceLimits {
+                cpu_max: crate::protocol::CpuMax {
+                    quota_micros: limits.cpu.quota_micros.get(),
+                    period_micros: limits.cpu.period_micros.get(),
+                },
+                memory_max_bytes: limits.memory_max_bytes.get(),
+                pids_max: limits.max_processes.get(),
+                wall_time_limit_ms: self.wall_time_limit_ms.get(),
+            },
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verified_effective_limits_for_test(&self) -> VerifiedEffectiveLimits {
+        self.verified_effective_limits(VerifiedCgroupLimits::for_test(self.cgroup_limits))
     }
 }
 
@@ -193,7 +232,10 @@ mod tests {
         assert_eq!(budget.wall_timeout(), Duration::from_millis(1));
         assert_eq!(budget.stdout_tail_max_bytes(), 1);
         assert_eq!(budget.stderr_tail_max_bytes(), 1);
-        assert_eq!(budget.effective_limits(), &wire_limits);
+        assert_eq!(
+            budget.verified_effective_limits_for_test().into_protocol(),
+            wire_limits
+        );
     }
 
     #[test]
@@ -310,7 +352,10 @@ mod tests {
         assert_eq!(cgroup.memory_max_bytes.get(), u64::MAX);
         assert_eq!(cgroup.max_processes.get(), u64::MAX);
         assert_eq!(budget.wall_timeout(), Duration::from_millis(u64::MAX));
-        assert_eq!(budget.effective_limits(), &wire_limits);
+        assert_eq!(
+            budget.verified_effective_limits_for_test().into_protocol(),
+            wire_limits
+        );
     }
 
     #[test]
@@ -343,6 +388,9 @@ mod tests {
         assert_eq!(budget.wall_timeout(), Duration::from_millis(54_321));
         assert_eq!(budget.stdout_tail_max_bytes(), 123);
         assert_eq!(budget.stderr_tail_max_bytes(), 456);
-        assert_eq!(budget.effective_limits(), &wire_limits);
+        assert_eq!(
+            budget.verified_effective_limits_for_test().into_protocol(),
+            wire_limits
+        );
     }
 }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::cancellation::CancellationRuntime;
-use crate::cgroup::{CgroupError, CgroupManager, JobCgroup, JobStats};
+use crate::cgroup::{CgroupError, CgroupManager, JobCgroup, JobStats, VerifiedCgroupLimits};
 use crate::deadline::MonotonicDeadline;
 use crate::executor::{
     ExecFailure, PreparedCommand, ProcessExit, SpawnOutcome, SpawnedProcess, StartCommitToken,
@@ -22,7 +22,7 @@ use crate::output::{CaptureLimits, CapturedOutput};
 use crate::preflight::VerifiedEnvironment;
 use crate::protocol::{CommandSpec, TaskPayload};
 use crate::resource_budget::ResourceBudget;
-use crate::submit::{RunnerPermit, TaskStartTime, TaskStartTimeSource};
+use crate::submit::{RunnerPermit, TaskStartTime, TaskStartTimeSource, VerifiedRunningTask};
 use crate::{Error, Result};
 
 #[derive(Debug)]
@@ -67,14 +67,23 @@ pub(crate) struct TaskRunner {
 #[derive(Debug)]
 pub(crate) struct TaskRunFailure {
     error: Error,
+    kind: TaskRunFailureKind,
     capacity_reusable: bool,
     cleanup_complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskRunFailureKind {
+    CgroupReadBackMismatch,
+    CgroupReadBackRollbackUncertain,
+    Other,
 }
 
 impl TaskRunFailure {
     fn with_reusable_capacity(error: Error) -> Self {
         Self {
             error,
+            kind: TaskRunFailureKind::Other,
             capacity_reusable: true,
             cleanup_complete: true,
         }
@@ -86,6 +95,10 @@ impl TaskRunFailure {
 
     pub(crate) fn into_error(self) -> Error {
         self.error
+    }
+
+    pub(crate) fn kind(&self) -> TaskRunFailureKind {
+        self.kind
     }
 
     pub(crate) fn cleanup_complete(&self) -> bool {
@@ -105,12 +118,24 @@ impl TaskRunner {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn initialize_with_cgroup_create_faults(
+        environment: VerifiedEnvironment,
+        fail_stop: Arc<FailStopCoordinator>,
+        faults: Arc<crate::cgroup::CgroupCreateFaults>,
+    ) -> Result<Self> {
+        Ok(Self {
+            manager: CgroupManager::initialize_with_create_faults(environment, faults)?,
+            fail_stop,
+        })
+    }
+
     /// 전체 정리가 증명된 결과만 FINISHED snapshot으로 바꾼다.
     pub(crate) async fn run_task<F>(
         &self,
         _permit: RunnerPermit,
         config: TaskRunConfig,
-        running_sender: tokio::sync::oneshot::Sender<TaskPayload>,
+        running_sender: tokio::sync::oneshot::Sender<VerifiedRunningTask>,
         cancellation: CancellationRuntime,
         finished_time: F,
     ) -> std::result::Result<CompletedTask, TaskRunFailure>
@@ -120,6 +145,7 @@ impl TaskRunner {
         if self.fail_stop.is_fail_stopping() {
             return Err(TaskRunFailure {
                 error: Error::CleanupUncertain,
+                kind: TaskRunFailureKind::Other,
                 capacity_reusable: false,
                 cleanup_complete: true,
             });
@@ -145,7 +171,7 @@ impl TaskRunner {
             cancellation,
             Some(&self.fail_stop),
             config.start_time,
-            |start_time| {
+            |start_time, verified_cgroup_limits| {
                 let running_lifecycle = SingleTaskLifecycle::running(
                     task_id.clone(),
                     submitted_at.clone(),
@@ -153,7 +179,12 @@ impl TaskRunner {
                     start_time.monotonic(),
                 );
                 // execve 성공을 확인한 뒤 실제로 완료할 같은 lifecycle의 snapshot만 공개한다.
-                let _ = running_sender.send(running_lifecycle.snapshot());
+                let _ = running_sender.send(VerifiedRunningTask::new(
+                    running_lifecycle.snapshot(),
+                    config
+                        .budget
+                        .verified_effective_limits(verified_cgroup_limits),
+                ));
                 lifecycle = Some(running_lifecycle);
             },
         )
@@ -166,6 +197,7 @@ impl TaskRunner {
                 }
                 return Err(TaskRunFailure {
                     error: *failure.error,
+                    kind: failure.kind,
                     capacity_reusable: !failure.block_future_runs,
                     cleanup_complete: failure.cleanup_complete,
                 });
@@ -290,6 +322,7 @@ pub(crate) struct DiagnosticRun {
 
 pub(crate) struct CoreFailure {
     error: Box<Error>,
+    kind: TaskRunFailureKind,
     block_future_runs: bool,
     cleanup_complete: bool,
     report: CleanupFailureReport,
@@ -297,9 +330,20 @@ pub(crate) struct CoreFailure {
 
 impl CoreFailure {
     fn before_job(job_id: &str, error: CgroupError) -> Self {
-        let block_future_runs = matches!(&error, CgroupError::CleanupCombined { .. });
+        let kind = match &error {
+            CgroupError::ValueMismatch { .. } => TaskRunFailureKind::CgroupReadBackMismatch,
+            CgroupError::ReadBackRollbackUncertain { .. } => {
+                TaskRunFailureKind::CgroupReadBackRollbackUncertain
+            }
+            _ => TaskRunFailureKind::Other,
+        };
+        let block_future_runs = matches!(
+            &error,
+            CgroupError::CleanupCombined { .. } | CgroupError::ReadBackRollbackUncertain { .. }
+        );
         Self {
             error: Box::new(error.into()),
+            kind,
             block_future_runs,
             cleanup_complete: !block_future_runs,
             report: CleanupFailureReport::new(
@@ -325,7 +369,7 @@ pub(crate) async fn execute<F>(
     on_started: F,
 ) -> std::result::Result<CleanedRun, CoreFailure>
 where
-    F: FnOnce(&TaskStartTime),
+    F: FnOnce(&TaskStartTime, VerifiedCgroupLimits),
 {
     let ExecutionConfig {
         job_id,
@@ -341,6 +385,7 @@ where
     let mut job = manager
         .create_job(&job_id, limits)
         .map_err(|error| CoreFailure::before_job(&job_id, error))?;
+    let verified_cgroup_limits = job.verified_limits();
 
     if let Some(deadline) = fail_stop.and_then(|coordinator| coordinator.deadline()) {
         return Err(
@@ -498,6 +543,7 @@ where
                 process,
                 cancellation,
                 fail_stop,
+                verified_cgroup_limits,
                 on_started,
             )
             .await
@@ -565,10 +611,11 @@ async fn finish_started_process<F>(
     process: SpawnedProcess,
     cancellation: CancellationRuntime,
     fail_stop: Option<&Arc<FailStopCoordinator>>,
+    verified_cgroup_limits: VerifiedCgroupLimits,
     on_started: F,
 ) -> std::result::Result<CleanedRun, CoreFailure>
 where
-    F: FnOnce(&TaskStartTime),
+    F: FnOnce(&TaskStartTime, VerifiedCgroupLimits),
 {
     let StartedProcessConfig {
         job_id,
@@ -576,7 +623,7 @@ where
         wall_deadline,
         cleanup_timeout,
     } = config;
-    on_started(&start_time);
+    on_started(&start_time, verified_cgroup_limits);
     enum WaitDecision {
         Cancelled,
         FailStop(MonotonicDeadline),
@@ -853,6 +900,7 @@ async fn finish_cleaned_started(
                 &cgroup_error,
                 vec![output_error.to_string()],
             )),
+            kind: TaskRunFailureKind::Other,
             block_future_runs: true,
             cleanup_complete: false,
             report: CleanupFailureReport::new(
@@ -880,6 +928,7 @@ async fn cleanup_job_after_failure(
     match finish_job_with_retry(job, deadline, false, fail_stop, job_id, stage).await {
         Ok(_) => CoreFailure {
             error: Box::new(run_failed(stage, &cause, Vec::new())),
+            kind: TaskRunFailureKind::Other,
             block_future_runs: isolation_uncertain,
             cleanup_complete: !isolation_uncertain,
             report: CleanupFailureReport::new(
@@ -950,6 +999,7 @@ async fn cleanup_pending_job_until(
     let uncertain = abort_result.is_err() || finish_result.is_err();
     CoreFailure {
         error: Box::new(run_failed(stage, &cause, cleanup_errors)),
+        kind: TaskRunFailureKind::Other,
         block_future_runs: uncertain,
         cleanup_complete: !uncertain,
         report: CleanupFailureReport::new(
@@ -1082,6 +1132,7 @@ async fn cleanup_running_job(
         }
         _ => Err(CoreFailure {
             error: Box::new(run_failed(stage, &cause, cleanup_errors)),
+            kind: TaskRunFailureKind::Other,
             block_future_runs: isolation_uncertain || output_failed,
             cleanup_complete: false,
             report: CleanupFailureReport::new(
@@ -1173,6 +1224,7 @@ fn cleanup_deadline(
 fn fail_stop_before_side_effect(job_id: &str, _deadline: MonotonicDeadline) -> CoreFailure {
     CoreFailure {
         error: Box::new(Error::CleanupUncertain),
+        kind: TaskRunFailureKind::Other,
         block_future_runs: true,
         cleanup_complete: true,
         report: CleanupFailureReport::new(
@@ -1204,6 +1256,7 @@ fn uncertain_failure(
 ) -> CoreFailure {
     CoreFailure {
         error: Box::new(run_failed(stage, &error, Vec::new())),
+        kind: TaskRunFailureKind::Other,
         block_future_runs: true,
         cleanup_complete: false,
         report: CleanupFailureReport::new(
@@ -1224,6 +1277,7 @@ fn uncertain_failure_with_cause(
 ) -> CoreFailure {
     CoreFailure {
         error: Box::new(run_failed(stage, &cause, vec![cleanup.to_string()])),
+        kind: TaskRunFailureKind::Other,
         block_future_runs: true,
         cleanup_complete: false,
         report: CleanupFailureReport::new(

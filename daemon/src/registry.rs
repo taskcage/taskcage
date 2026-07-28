@@ -11,6 +11,7 @@ use tokio::sync::Notify;
 use crate::cancellation::cancellation_channel;
 use crate::cancellation::{CancellationWaiter, RunningCancellation};
 use crate::protocol::{ErrorCode, SubmitTaskPayload, TaskPayload};
+use crate::resource_budget::VerifiedEffectiveLimits;
 use crate::submit::ValidatedSubmit;
 
 pub(crate) const MIN_FINISHED_RETENTION: Duration = Duration::from_secs(10 * 60);
@@ -46,6 +47,8 @@ pub(crate) enum RegistryError {
     TaskIdMismatch { expected: String, actual: String },
     #[error("Task Registry 상태 잠금을 사용할 수 없습니다")]
     StateUnavailable,
+    #[error("RUNNING 작업에 적용 확인된 effectiveLimits가 없습니다: {0}")]
+    VerifiedEffectiveLimitsRequired(String),
 }
 
 impl RegistryError {
@@ -55,6 +58,7 @@ impl RegistryError {
             Self::TaskNotFound(_) => Some(ErrorCode::TaskNotFound),
             Self::TaskAlreadyFinished(_) => Some(ErrorCode::TaskAlreadyFinished),
             Self::StateUnavailable => Some(ErrorCode::InternalError),
+            Self::VerifiedEffectiveLimitsRequired(_) => Some(ErrorCode::InternalError),
             _ => None,
         }
     }
@@ -63,6 +67,7 @@ impl RegistryError {
 #[derive(Debug)]
 struct TaskRecord {
     snapshot: TaskPayload,
+    effective_limits: Option<VerifiedEffectiveLimits>,
     finished_monotonic: Option<Instant>,
     cancellation: Option<RunningCancellation>,
 }
@@ -249,6 +254,27 @@ where
             .map(|record| record.snapshot.clone()))
     }
 
+    pub(crate) fn effective_limits_for(
+        &self,
+        task_id: &str,
+        observation: &SubmitObservation,
+    ) -> Result<Option<VerifiedEffectiveLimits>, RegistryError> {
+        if !matches!(
+            observation,
+            SubmitObservation::Task(TaskPayload::Running { .. })
+        ) {
+            return Ok(None);
+        }
+        let mut state = self.lock_state()?;
+        state.purge_expired();
+        state
+            .tasks
+            .get(task_id)
+            .and_then(|record| record.effective_limits.clone())
+            .map(Some)
+            .ok_or_else(|| RegistryError::VerifiedEffectiveLimitsRequired(task_id.to_owned()))
+    }
+
     /// RUNNING 확인과 cancel trigger 기록을 같은 Registry 잠금 구간에서 수행한다.
     pub(crate) fn request_cancel(
         &self,
@@ -274,6 +300,7 @@ where
         &self,
         owner: &SubmitExecutionOwner<C>,
         snapshot: TaskPayload,
+        effective_limits: VerifiedEffectiveLimits,
         cancellation: RunningCancellation,
     ) -> Result<TaskPayload, RegistryError> {
         let actual_task_id = match &snapshot {
@@ -292,6 +319,7 @@ where
             owner.task_id.clone(),
             TaskRecord {
                 snapshot: snapshot.clone(),
+                effective_limits: Some(effective_limits),
                 finished_monotonic: None,
                 cancellation: Some(cancellation),
             },
@@ -333,6 +361,7 @@ where
                     owner.task_id.clone(),
                     TaskRecord {
                         snapshot: snapshot.clone(),
+                        effective_limits: None,
                         finished_monotonic: Some(finished_monotonic),
                         cancellation: None,
                     },
@@ -520,9 +549,11 @@ where
     pub(crate) fn publish_running_with_cancellation(
         &self,
         snapshot: TaskPayload,
+        effective_limits: VerifiedEffectiveLimits,
         cancellation: RunningCancellation,
     ) -> Result<TaskPayload, RegistryError> {
-        self.registry.publish_running(self, snapshot, cancellation)
+        self.registry
+            .publish_running(self, snapshot, effective_limits, cancellation)
     }
 
     #[cfg(test)]
@@ -531,7 +562,8 @@ where
         snapshot: TaskPayload,
     ) -> Result<TaskPayload, RegistryError> {
         let (_runtime, cancellation) = cancellation_channel();
-        self.publish_running_with_cancellation(snapshot, cancellation)
+        let effective_limits = self.request.budget().verified_effective_limits_for_test();
+        self.publish_running_with_cancellation(snapshot, effective_limits, cancellation)
     }
 
     #[cfg(target_os = "linux")]
@@ -865,8 +897,12 @@ mod tests {
         let (registry, _) = registry();
         let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
         let (runtime, cancellation) = cancellation_channel();
+        let effective_limits = owner
+            .request()
+            .budget()
+            .verified_effective_limits_for_test();
         owner
-            .publish_running_with_cancellation(running(TASK_ID), cancellation)
+            .publish_running_with_cancellation(running(TASK_ID), effective_limits, cancellation)
             .unwrap();
 
         let first = registry.request_cancel(TASK_ID).unwrap();
@@ -896,8 +932,12 @@ mod tests {
         let (registry, _) = registry();
         let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
         let (runtime, cancellation) = cancellation_channel();
+        let effective_limits = owner
+            .request()
+            .budget()
+            .verified_effective_limits_for_test();
         owner
-            .publish_running_with_cancellation(running(TASK_ID), cancellation)
+            .publish_running_with_cancellation(running(TASK_ID), effective_limits, cancellation)
             .unwrap();
 
         drop(registry.request_cancel(TASK_ID).unwrap());

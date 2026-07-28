@@ -378,7 +378,10 @@ fn submit_response(request_id: String, outcome: SubmitOutcome) -> Response {
             payload: TaskAcceptedPayload {
                 task_id: outcome.task_id,
                 state: TaskState::Running,
-                effective_limits: outcome.effective_limits,
+                effective_limits: outcome
+                    .effective_limits
+                    .expect("RUNNING 응답에는 적용 확인된 effectiveLimits가 있어야 합니다")
+                    .into_protocol(),
             },
         },
         SubmitObservation::Task(payload @ TaskPayload::Finished { .. }) => Response::Task {
@@ -443,8 +446,8 @@ mod tests {
     use std::convert::Infallible;
     #[cfg(target_os = "linux")]
     use std::fs;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use serde_json::Value;
@@ -452,6 +455,8 @@ mod tests {
     use tokio::time::{Duration as TokioDuration, timeout};
 
     use super::*;
+    #[cfg(target_os = "linux")]
+    use crate::cgroup::CgroupCreateFaults;
     #[cfg(target_os = "linux")]
     use crate::preflight::{CapabilityProbe, SystemProbe};
     use crate::protocol::{
@@ -479,6 +484,16 @@ mod tests {
     const TIMEOUT_CLIENT_REQUEST_ID: &str = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
     #[cfg(target_os = "linux")]
     const TIMEOUT_TASK_ID: &str = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+    #[cfg(target_os = "linux")]
+    const READ_BACK_TASK_ID: &str = "12121212-1212-1212-1212-121212121212";
+    #[cfg(target_os = "linux")]
+    const READ_BACK_RETRY_TASK_ID: &str = "13131313-1313-1313-1313-131313131313";
+    #[cfg(target_os = "linux")]
+    const READ_BACK_UNCERTAIN_TASK_ID: &str = "14141414-1414-1414-1414-141414141414";
+    #[cfg(target_os = "linux")]
+    const READ_BACK_CLIENT_REQUEST_ID: &str = "15151515-1515-1515-1515-151515151515";
+    #[cfg(target_os = "linux")]
+    const READ_BACK_UNCERTAIN_CLIENT_REQUEST_ID: &str = "16161616-1616-1616-1616-161616161616";
 
     #[derive(Debug, Default)]
     struct FakeCore {
@@ -854,7 +869,9 @@ mod tests {
             FakeCore::with_submit(Ok(SubmitOutcome {
                 request_id: "ignored-by-handler".to_owned(),
                 task_id: TASK_ID.to_owned(),
-                effective_limits: expected_limits,
+                effective_limits: Some(crate::resource_budget::VerifiedEffectiveLimits::for_test(
+                    expected_limits,
+                )),
                 observation: SubmitObservation::Task(running()),
             })),
             1,
@@ -880,7 +897,7 @@ mod tests {
             FakeCore::with_submit(Ok(SubmitOutcome {
                 request_id: OTHER_REQUEST_ID.to_owned(),
                 task_id: TASK_ID.to_owned(),
-                effective_limits: submit_payload().limits.clone(),
+                effective_limits: None,
                 observation: SubmitObservation::Task(payload.clone()),
             })),
             1,
@@ -948,7 +965,7 @@ mod tests {
             FakeCore::with_submit(Ok(SubmitOutcome {
                 request_id: OTHER_REQUEST_ID.to_owned(),
                 task_id: TASK_ID.to_owned(),
-                effective_limits: submit_payload().limits.clone(),
+                effective_limits: None,
                 observation: SubmitObservation::Failed(SubmitFailure::new(
                     ErrorCode::CapacityExhausted,
                     "all task execution slots are in use",
@@ -1138,7 +1155,9 @@ mod tests {
             submit_result: Mutex::new(Some(Ok(SubmitOutcome {
                 request_id: REQUEST_ID.to_owned(),
                 task_id: TASK_ID.to_owned(),
-                effective_limits: submit_payload().limits.clone(),
+                effective_limits: Some(crate::resource_budget::VerifiedEffectiveLimits::for_test(
+                    submit_payload().limits,
+                )),
                 observation: SubmitObservation::Task(running()),
             }))),
             cancel_result: Mutex::new(Some(Ok(cancelled_for(TASK_ID)))),
@@ -1370,6 +1389,255 @@ mod tests {
             remaining_jobs, 0,
             "handler 실행 뒤 작업 cgroup이 남아 있습니다"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn actual_read_back_mismatch_enforces_public_error_and_rollback_contract() {
+        if std::env::var_os("TASKCAGE_RUN_LINUX_READ_BACK_CONTRACT").is_none() {
+            eprintln!("NOT EXECUTED: 실제 cgroup v2 위임 환경이 필요합니다");
+            return;
+        }
+
+        let marker_program = std::env::var("TASKCAGE_READ_BACK_MARKER_BIN").unwrap();
+        let marker = std::env::temp_dir().join(format!(
+            "taskcage-read-back-{}-success.marker",
+            std::process::id()
+        ));
+        let uncertain_marker = std::env::temp_dir().join(format!(
+            "taskcage-read-back-{}-uncertain.marker",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&marker);
+        let _ = fs::remove_file(&uncertain_marker);
+
+        let environment = SystemProbe::from_environment().check().unwrap();
+        let jobs_path = environment.report().delegated_root.join("jobs");
+        let fail_stop_clock_calls = Arc::new(AtomicUsize::new(0));
+        let fail_stop_clock = {
+            let calls = Arc::clone(&fail_stop_clock_calls);
+            let now = Instant::now();
+            Arc::new(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                now
+            })
+        };
+        let fail_stop = FailStopCoordinator::with_test_clock(
+            crate::fail_stop::FailStopSettings::new(Duration::from_secs(5)).unwrap(),
+            fail_stop_clock,
+        );
+        let faults = Arc::new(CgroupCreateFaults::default());
+        let core_fail_stop = Arc::clone(&fail_stop);
+        let core_faults = Arc::clone(&faults);
+        let handlers = ProtocolHandlers::initialize_with(
+            Ok(environment),
+            TaskCapacitySettings::new(1).unwrap(),
+            Arc::clone(&fail_stop),
+            move |environment, settings| {
+                SubmitCoordinator::initialize_with_cgroup_create_faults(
+                    environment,
+                    settings,
+                    core_fail_stop,
+                    core_faults,
+                )
+            },
+        )
+        .unwrap();
+        let HandlerState::Ready { core, .. } = &handlers.state else {
+            panic!("read-back 계약 시험에는 준비된 실행 코어가 필요합니다");
+        };
+
+        let mut payload = submit_payload();
+        payload.client_request_id = READ_BACK_CLIENT_REQUEST_ID.to_owned();
+        payload.command.program = marker_program.clone();
+        payload.command.args = vec![marker.to_string_lossy().into_owned()];
+        payload.command.working_directory = "/".to_owned();
+        payload.limits.cpu_max.quota_micros = 50_000;
+        payload.limits.cpu_max.period_micros = 100_000;
+        payload.limits.memory_max_bytes = 64 * 1024 * 1024;
+        payload.limits.pids_max = 8;
+        payload.limits.wall_time_limit_ms = 5_000;
+        payload.output.stdout_tail_max_bytes = 1_024;
+        payload.output.stderr_tail_max_bytes = 1_024;
+        let expected_limits = payload.limits.clone();
+
+        faults.inject_read_back_mismatch(false);
+        let mismatch = handled(
+            handlers
+                .handle_submit(submit_request(REQUEST_ID, payload.clone()), || {
+                    context_for(READ_BACK_TASK_ID)
+                })
+                .await,
+        );
+        let Response::Error {
+            request_id,
+            payload: error,
+            ..
+        } = &mismatch
+        else {
+            panic!("read-back 불일치는 error 응답이어야 합니다: {mismatch:?}");
+        };
+        assert_eq!(request_id, REQUEST_ID);
+        assert_eq!(error.code, ErrorCode::InternalError);
+        assert!(!error.retryable);
+        assert_eq!(error.message, "cgroup limit read-back verification failed");
+        let public_json = serde_json::to_string(&mismatch).unwrap();
+        assert!(!public_json.contains(&jobs_path.to_string_lossy().into_owned()));
+        assert!(!public_json.contains("injected-read-back-value"));
+        assert!(!public_json.contains("effectiveLimits"));
+        assert!(!public_json.contains("taskId"));
+        let public_value = serde_json::to_value(&mismatch).unwrap();
+        let error_fields = public_value
+            .get("payload")
+            .and_then(Value::as_object)
+            .expect("error payload는 object여야 합니다");
+        assert_eq!(error_fields.len(), 3);
+        assert!(
+            !marker.exists(),
+            "read-back 실패 전에 target이 실행되면 안 됩니다"
+        );
+        assert_eq!(core.snapshot(READ_BACK_TASK_ID), Ok(None));
+        assert_eq!(
+            core.snapshot_by_client_request_id(READ_BACK_CLIENT_REQUEST_ID),
+            Ok(None)
+        );
+        assert!(!jobs_path.join(format!("job-{READ_BACK_TASK_ID}")).exists());
+        assert!(core.capacity_is_available_for_test());
+        assert_eq!(faults.read_back_attempts(), 1);
+        assert_eq!(faults.rollback_attempts(), 1);
+
+        let retry = handled(
+            handlers
+                .handle_submit(submit_request(OTHER_REQUEST_ID, payload), || {
+                    context_for(READ_BACK_RETRY_TASK_ID)
+                })
+                .await,
+        );
+        assert!(matches!(
+            retry,
+            Response::TaskAccepted {
+                payload: TaskAcceptedPayload {
+                    task_id,
+                    effective_limits,
+                    ..
+                },
+                ..
+            } if task_id == READ_BACK_RETRY_TASK_ID && effective_limits == expected_limits
+        ));
+        timeout(TokioDuration::from_secs(5), async {
+            loop {
+                if matches!(
+                    core.snapshot(READ_BACK_RETRY_TASK_ID),
+                    Ok(Some(TaskPayload::Finished { .. }))
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("재시도 작업은 정리된 FINISHED가 되어야 합니다");
+        assert!(
+            marker.exists(),
+            "rollback 성공 뒤 동일 요청을 다시 실행해야 합니다"
+        );
+        assert!(core.capacity_is_available_for_test());
+        assert!(
+            !jobs_path
+                .join(format!("job-{READ_BACK_RETRY_TASK_ID}"))
+                .exists()
+        );
+
+        let mut uncertain_payload = submit_payload();
+        uncertain_payload.client_request_id = READ_BACK_UNCERTAIN_CLIENT_REQUEST_ID.to_owned();
+        uncertain_payload.command.program = marker_program;
+        uncertain_payload.command.args = vec![uncertain_marker.to_string_lossy().into_owned()];
+        uncertain_payload.command.working_directory = "/".to_owned();
+        uncertain_payload.limits = expected_limits;
+        uncertain_payload.output.stdout_tail_max_bytes = 1_024;
+        uncertain_payload.output.stderr_tail_max_bytes = 1_024;
+
+        faults.inject_read_back_mismatch(true);
+        let uncertain = handled(
+            handlers
+                .handle_submit(
+                    submit_request(REQUEST_ID, uncertain_payload.clone()),
+                    || context_for(READ_BACK_UNCERTAIN_TASK_ID),
+                )
+                .await,
+        );
+        assert!(matches!(
+            uncertain,
+            Response::Error {
+                payload: ErrorPayload {
+                    code: ErrorCode::EnvironmentUnavailable,
+                    retryable: false,
+                    ..
+                },
+                ..
+            }
+        ));
+        assert!(!uncertain_marker.exists());
+        assert!(fail_stop.is_fail_stopping());
+        assert_eq!(fail_stop_clock_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fail_stop.active_count(), 1);
+        assert_eq!(core.retained_capacity_for_test(), 1);
+        assert!(!core.capacity_is_available_for_test());
+        assert!(
+            jobs_path
+                .join(format!("job-{READ_BACK_UNCERTAIN_TASK_ID}"))
+                .exists()
+        );
+        assert_eq!(
+            core.snapshot_by_client_request_id(READ_BACK_UNCERTAIN_CLIENT_REQUEST_ID),
+            Ok(None)
+        );
+        let deadline = fail_stop.deadline().unwrap();
+        let repeated = fail_stop.activate(crate::fail_stop::CleanupFailureReport::new(
+            READ_BACK_UNCERTAIN_TASK_ID,
+            "read-back rollback 재관찰",
+            vec!["작업 cgroup"],
+            "기존 deadline 유지",
+        ));
+        assert_eq!(deadline, repeated);
+        assert_eq!(fail_stop_clock_calls.load(Ordering::SeqCst), 1);
+
+        let capabilities = handled(handlers.handle_get_capabilities(Request::GetCapabilities {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: OTHER_REQUEST_ID.to_owned(),
+            payload: EmptyPayload {},
+        }));
+        assert!(matches!(
+            capabilities,
+            Response::Capabilities { payload, .. } if !payload.cgroup_v2_ready
+        ));
+        let attempts_before_rejection = faults.read_back_attempts();
+        let rejected = handled(
+            handlers
+                .handle_submit(submit_request(OTHER_REQUEST_ID, uncertain_payload), || {
+                    context_for("17171717-1717-1717-1717-171717171717")
+                })
+                .await,
+        );
+        assert!(matches!(
+            rejected,
+            Response::Error {
+                payload: ErrorPayload {
+                    code: ErrorCode::EnvironmentUnavailable,
+                    ..
+                },
+                ..
+            }
+        ));
+        assert_eq!(faults.read_back_attempts(), attempts_before_rejection);
+        assert!(!uncertain_marker.exists());
+        assert_eq!(
+            core.snapshot("17171717-1717-1717-1717-171717171717"),
+            Ok(None)
+        );
+
+        fs::remove_dir(jobs_path.join(format!("job-{READ_BACK_UNCERTAIN_TASK_ID}"))).unwrap();
+        fs::remove_file(marker).unwrap();
     }
 
     #[cfg(target_os = "linux")]
