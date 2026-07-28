@@ -18,6 +18,8 @@ use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use self::registry::MonotonicClock;
 #[cfg(any(target_os = "linux", test))]
+pub(crate) use self::registry::TaskRegistrySettings;
+#[cfg(any(target_os = "linux", test))]
 use self::registry::{RegistryClock, SubmitExecutionOwner, SubmitReservation, TaskRegistry};
 #[cfg(any(target_os = "linux", test))]
 pub(crate) use self::registry::{RegistryError, SubmitFailure, SubmitObservation};
@@ -276,10 +278,11 @@ impl SubmitCoordinator {
     pub(crate) fn initialize(
         environment: VerifiedEnvironment,
         capacity_settings: TaskCapacitySettings,
+        registry_settings: TaskRegistrySettings,
         fail_stop: Arc<FailStopCoordinator>,
     ) -> crate::Result<Self> {
         Ok(Self {
-            registry: TaskRegistry::new(),
+            registry: TaskRegistry::initialize(registry_settings),
             runner: Arc::new(TaskRunner::initialize(environment, Arc::clone(&fail_stop))?),
             capacity: Arc::new(TaskCapacity::new(capacity_settings)),
             fail_stop,
@@ -290,11 +293,12 @@ impl SubmitCoordinator {
     pub(crate) fn initialize_with_cgroup_create_faults(
         environment: VerifiedEnvironment,
         capacity_settings: TaskCapacitySettings,
+        registry_settings: TaskRegistrySettings,
         fail_stop: Arc<FailStopCoordinator>,
         faults: Arc<crate::cgroup::CgroupCreateFaults>,
     ) -> crate::Result<Self> {
         Ok(Self {
-            registry: TaskRegistry::new(),
+            registry: TaskRegistry::initialize(registry_settings),
             runner: Arc::new(TaskRunner::initialize_with_cgroup_create_faults(
                 environment,
                 Arc::clone(&fail_stop),
@@ -309,11 +313,12 @@ impl SubmitCoordinator {
     pub(crate) fn initialize_with_cleanup_faults(
         environment: VerifiedEnvironment,
         capacity_settings: TaskCapacitySettings,
+        registry_settings: TaskRegistrySettings,
         fail_stop: Arc<FailStopCoordinator>,
         faults: Arc<crate::cleanup_fault::CleanupFaults>,
     ) -> crate::Result<Self> {
         Ok(Self {
-            registry: TaskRegistry::new(),
+            registry: TaskRegistry::initialize(registry_settings),
             runner: Arc::new(TaskRunner::initialize_with_cleanup_faults(
                 environment,
                 Arc::clone(&fail_stop),
@@ -1145,6 +1150,11 @@ mod tests {
         ))
     }
 
+    #[cfg(target_os = "linux")]
+    fn registry_settings() -> TaskRegistrySettings {
+        TaskRegistrySettings::new(16).unwrap()
+    }
+
     #[test]
     fn task_start_clock_is_lazy_and_captured_once() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1628,6 +1638,85 @@ mod tests {
         assert_eq!(report.stage, "활성 실행 소유권 종료");
         assert!(!format!("{report:?}").contains("/usr/bin/true"));
         assert!(!format!("{report:?}").contains("LANG"));
+    }
+
+    #[tokio::test]
+    async fn full_registry_rejects_before_task_id_capacity_and_executor_side_effects() {
+        let registry = TaskRegistry::initialize(TaskRegistrySettings::new(1).unwrap());
+        let capacity = task_capacity(2);
+        let executor_starts = Arc::new(AtomicUsize::new(0));
+        let first_starts = Arc::clone(&executor_starts);
+        let first = coordinate_submit(
+            registry.clone(),
+            Arc::clone(&capacity),
+            request(PROTOCOL_VERSION, REQUEST_ID, payload()),
+            metadata(TASK_ID),
+            move |config, running_sender, _cancellation| async move {
+                first_starts.fetch_add(1, Ordering::SeqCst);
+                running_sender.send(verified_running(&config)).unwrap();
+                Ok(ExecutionCompletion::Test(finished(&config.task_id)))
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            first.observation,
+            SubmitObservation::Task(TaskPayload::Running { .. })
+        ));
+        timeout(TokioDuration::from_secs(1), async {
+            while !matches!(
+                registry.snapshot(TASK_ID).unwrap(),
+                Some(TaskPayload::Finished { .. })
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("첫 작업의 정리된 FINISHED 저장이 끝나야 합니다");
+
+        let task_id_calls = Arc::new(AtomicUsize::new(0));
+        let fail_stop = fail_stop_runtime();
+        let metadata = SubmitMetadata::lazy(
+            {
+                let task_id_calls = Arc::clone(&task_id_calls);
+                move || {
+                    task_id_calls.fetch_add(1, Ordering::SeqCst);
+                    OTHER_TASK_ID.to_owned()
+                }
+            },
+            "2026-07-24T10:00:00.000Z".to_owned(),
+            || TaskStartTime::new("unused".to_owned(), Instant::now()),
+            Duration::from_secs(5),
+        );
+        let rejected_starts = Arc::clone(&executor_starts);
+        let error = coordinate_validated_submit(
+            registry.clone(),
+            Arc::clone(&capacity),
+            Arc::clone(&fail_stop),
+            OTHER_REQUEST_ID.to_owned(),
+            ValidatedSubmit::try_from_payload(payload_for(NONZERO_CLIENT_REQUEST_ID)).unwrap(),
+            metadata,
+            move |_config, _running_sender, _cancellation| async move {
+                rejected_starts.fetch_add(1, Ordering::SeqCst);
+                Ok(ExecutionCompletion::Test(finished(OTHER_TASK_ID)))
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SubmitError::Registry(RegistryError::CapacityExhausted)
+        ));
+        assert_eq!(task_id_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(executor_starts.load(Ordering::SeqCst), 1);
+        assert_eq!(fail_stop.active_count(), 0);
+        assert_eq!(registry.snapshot(OTHER_TASK_ID), Ok(None));
+        assert_eq!(
+            registry.snapshot_by_client_request_id(NONZERO_CLIENT_REQUEST_ID),
+            Ok(None)
+        );
+        assert!(capacity.try_acquire().is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2175,6 +2264,7 @@ mod tests {
             SubmitCoordinator::initialize(
                 environment,
                 TaskCapacitySettings::new(1).unwrap(),
+                registry_settings(),
                 Arc::clone(&fail_stop),
             )
             .unwrap(),
@@ -2325,6 +2415,7 @@ mod tests {
         let coordinator = SubmitCoordinator::initialize(
             environment,
             TaskCapacitySettings::new(1).unwrap(),
+            registry_settings(),
             FailStopCoordinator::new(FailStopSettings::new(Duration::from_secs(5)).unwrap()),
         )
         .unwrap();
@@ -2514,6 +2605,7 @@ mod tests {
             SubmitCoordinator::initialize(
                 environment,
                 TaskCapacitySettings::new(1).unwrap(),
+                registry_settings(),
                 Arc::clone(&fail_stop),
             )
             .unwrap(),
@@ -2638,6 +2730,7 @@ mod tests {
         let coordinator = SubmitCoordinator::initialize(
             environment,
             TaskCapacitySettings::new(2).unwrap(),
+            registry_settings(),
             Arc::clone(&fail_stop),
         )
         .unwrap();
@@ -2830,6 +2923,7 @@ mod tests {
         let coordinator = SubmitCoordinator::initialize_with_cleanup_faults(
             environment,
             TaskCapacitySettings::new(1).unwrap(),
+            registry_settings(),
             Arc::clone(&fail_stop),
             Arc::clone(&faults),
         )
@@ -3034,6 +3128,7 @@ mod tests {
         let coordinator = SubmitCoordinator::initialize_with_cleanup_faults(
             environment,
             TaskCapacitySettings::new(2).unwrap(),
+            registry_settings(),
             Arc::clone(&fail_stop),
             Arc::clone(&faults),
         )

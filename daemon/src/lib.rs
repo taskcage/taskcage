@@ -76,7 +76,7 @@ use startup::StartupOwnership;
 #[cfg(target_os = "linux")]
 use startup_cgroup::recover_from_environment;
 #[cfg(target_os = "linux")]
-use submit::{TaskStartTime, TaskStartTimeSource};
+use submit::{TaskRegistrySettings, TaskStartTime, TaskStartTimeSource};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -139,6 +139,7 @@ pub struct RunOnceConfig {
 pub struct DaemonConfig {
     socket_path: PathBuf,
     max_concurrent_tasks: u32,
+    max_registry_tasks: usize,
     max_concurrent_connections: NonZeroUsize,
     cleanup_timeout: Duration,
     fail_stop_timeout: Duration,
@@ -148,6 +149,7 @@ impl DaemonConfig {
     pub fn new(
         socket_path: PathBuf,
         max_concurrent_tasks: u32,
+        max_registry_tasks: usize,
         max_concurrent_connections: usize,
         cleanup_timeout: Duration,
         fail_stop_timeout: Duration,
@@ -160,6 +162,19 @@ impl DaemonConfig {
         if max_concurrent_tasks == 0 {
             return Err(Error::InvalidArgument(
                 "max-concurrent-tasks 값은 0보다 커야 합니다".to_owned(),
+            ));
+        }
+        let max_registry_tasks = NonZeroUsize::new(max_registry_tasks).ok_or_else(|| {
+            Error::InvalidArgument("max-registry-tasks 값은 0보다 커야 합니다".to_owned())
+        })?;
+        let max_concurrent_tasks_usize = usize::try_from(max_concurrent_tasks).map_err(|_| {
+            Error::InvalidArgument(
+                "max-concurrent-tasks 값을 Registry 작업 수와 비교할 수 없습니다".to_owned(),
+            )
+        })?;
+        if max_registry_tasks.get() < max_concurrent_tasks_usize {
+            return Err(Error::InvalidArgument(
+                "max-registry-tasks 값은 max-concurrent-tasks 이상이어야 합니다".to_owned(),
             ));
         }
         let max_concurrent_connections =
@@ -178,6 +193,7 @@ impl DaemonConfig {
         Ok(Self {
             socket_path,
             max_concurrent_tasks,
+            max_registry_tasks: max_registry_tasks.get(),
             max_concurrent_connections,
             cleanup_timeout,
             fail_stop_timeout,
@@ -206,6 +222,8 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let startup = StartupOwnership::acquire(&config.socket_path)
         .map_err(|error| Error::Startup(error.to_string()))?;
     let capacity_settings = TaskCapacitySettings::new(config.max_concurrent_tasks)
+        .map_err(|error| Error::InvalidArgument(error.to_string()))?;
+    let registry_settings = TaskRegistrySettings::new(config.max_registry_tasks)
         .map_err(|error| Error::InvalidArgument(error.to_string()))?;
     let environment = run_startup_steps(
         || match recover_from_environment(config.cleanup_timeout) {
@@ -244,6 +262,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let handlers = Arc::new(ProtocolHandlers::initialize(
         Ok(environment),
         capacity_settings,
+        registry_settings,
         fail_stop,
     )?);
     tracing::info!(socket = %config.socket_path.display(), "TaskCage daemon started");

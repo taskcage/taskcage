@@ -1,6 +1,7 @@
 //! 실행 중인 작업, 완료 결과와 idempotent submit 예약을 메모리에 보관한다.
 
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,32 @@ use crate::resource_budget::VerifiedEffectiveLimits;
 use crate::submit::ValidatedSubmit;
 
 pub(crate) const MIN_FINISHED_RETENTION: Duration = Duration::from_secs(10 * 60);
+
+pub(crate) const REGISTRY_CAPACITY_EXHAUSTED_MESSAGE: &str =
+    "task registry retention capacity is exhausted";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TaskRegistrySettings {
+    max_tasks: NonZeroUsize,
+}
+
+impl TaskRegistrySettings {
+    pub(crate) fn new(max_tasks: usize) -> Result<Self, TaskRegistrySettingsError> {
+        let max_tasks =
+            NonZeroUsize::new(max_tasks).ok_or(TaskRegistrySettingsError::ZeroMaximum)?;
+        Ok(Self { max_tasks })
+    }
+
+    pub(crate) fn max_tasks(self) -> usize {
+        self.max_tasks.get()
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskRegistrySettingsError {
+    #[error("최대 Registry 작업 수는 0보다 커야 합니다")]
+    ZeroMaximum,
+}
 
 pub(crate) trait RegistryClock {
     fn now(&self) -> Instant;
@@ -49,6 +76,8 @@ pub(crate) enum RegistryError {
     StateUnavailable,
     #[error("RUNNING 작업에 적용 확인된 effectiveLimits가 없습니다: {0}")]
     VerifiedEffectiveLimitsRequired(String),
+    #[error("{REGISTRY_CAPACITY_EXHAUSTED_MESSAGE}")]
+    CapacityExhausted,
 }
 
 impl RegistryError {
@@ -59,6 +88,7 @@ impl RegistryError {
             Self::TaskAlreadyFinished(_) => Some(ErrorCode::TaskAlreadyFinished),
             Self::StateUnavailable => Some(ErrorCode::InternalError),
             Self::VerifiedEffectiveLimitsRequired(_) => Some(ErrorCode::InternalError),
+            Self::CapacityExhausted => Some(ErrorCode::CapacityExhausted),
             _ => None,
         }
     }
@@ -88,6 +118,7 @@ struct FinishedExpiration {
 #[derive(Debug)]
 struct RegistryState<C> {
     clock: C,
+    settings: TaskRegistrySettings,
     tasks: HashMap<String, TaskRecord>,
     requests: HashMap<String, RequestRecord>,
     task_requests: HashMap<String, String>,
@@ -107,6 +138,7 @@ impl<C> Clone for TaskRegistry<C> {
     }
 }
 
+#[cfg(test)]
 impl Default for TaskRegistry<MonotonicClock> {
     fn default() -> Self {
         Self::new()
@@ -114,8 +146,13 @@ impl Default for TaskRegistry<MonotonicClock> {
 }
 
 impl TaskRegistry<MonotonicClock> {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::with_clock(MonotonicClock)
+    }
+
+    pub(crate) fn initialize(settings: TaskRegistrySettings) -> Self {
+        Self::with_clock_and_settings(MonotonicClock, settings)
     }
 }
 
@@ -123,10 +160,20 @@ impl<C> TaskRegistry<C>
 where
     C: RegistryClock,
 {
+    #[cfg(test)]
     pub(crate) fn with_clock(clock: C) -> Self {
+        Self::with_clock_and_settings(
+            clock,
+            TaskRegistrySettings::new(usize::MAX)
+                .expect("시험용 Registry 상한은 0보다 커야 합니다"),
+        )
+    }
+
+    pub(crate) fn with_clock_and_settings(clock: C, settings: TaskRegistrySettings) -> Self {
         Self {
             state: Arc::new(Mutex::new(RegistryState {
                 clock,
+                settings,
                 tasks: HashMap::new(),
                 requests: HashMap::new(),
                 task_requests: HashMap::new(),
@@ -141,6 +188,13 @@ where
             let _guard = self.state.lock().unwrap();
             panic!("injected registry state failure");
         }));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn logical_task_count_for_test(&self) -> Result<usize, RegistryError> {
+        let mut state = self.lock_state()?;
+        state.purge_expired();
+        Ok(state.requests.len())
     }
 
     /// clientRequestId 확인과 새 예약 등록을 같은 잠금 구간에서 결정한다.
@@ -174,6 +228,10 @@ where
                 task_id: existing.task_id.clone(),
                 signal: Arc::clone(&existing.reservation),
             }));
+        }
+        // requests는 예약부터 FINISHED 보존까지 논리 작업 하나를 정확히 한 번 나타낸다.
+        if state.requests.len() >= state.settings.max_tasks() {
+            return Err(RegistryError::CapacityExhausted);
         }
         let candidate_task_id = make_task_id();
         if state.task_requests.contains_key(&candidate_task_id) {
@@ -699,7 +757,7 @@ mod tests {
     const REQUEST_ID: &str = "11111111-1111-1111-1111-111111111111";
     const OTHER_REQUEST_ID: &str = "66666666-6666-6666-6666-666666666666";
 
-    #[derive(Clone)]
+    #[derive(Debug, Clone)]
     struct FakeClock {
         now: Arc<Mutex<Instant>>,
     }
@@ -802,6 +860,187 @@ mod tests {
     fn registry() -> (TaskRegistry<FakeClock>, FakeClock) {
         let clock = FakeClock::new();
         (TaskRegistry::with_clock(clock.clone()), clock)
+    }
+
+    fn bounded_registry(max_tasks: usize) -> (TaskRegistry<FakeClock>, FakeClock) {
+        let clock = FakeClock::new();
+        let settings = TaskRegistrySettings::new(max_tasks).unwrap();
+        (
+            TaskRegistry::with_clock_and_settings(clock.clone(), settings),
+            clock,
+        )
+    }
+
+    #[test]
+    fn registry_settings_require_a_positive_task_limit() {
+        assert_eq!(
+            TaskRegistrySettings::new(0),
+            Err(TaskRegistrySettingsError::ZeroMaximum)
+        );
+        assert_eq!(TaskRegistrySettings::new(1).unwrap().max_tasks(), 1);
+    }
+
+    #[test]
+    fn reservations_running_and_finished_each_consume_one_logical_slot() {
+        let (registry, _) = bounded_registry(3);
+        let reserved = reserve_owner(&registry, submit_payload(), TASK_ID);
+
+        let mut running_payload = submit_payload();
+        running_payload.client_request_id = OTHER_CLIENT_REQUEST_ID.to_owned();
+        let running_owner = reserve_owner(&registry, running_payload, OTHER_TASK_ID);
+        running_owner
+            .publish_running(running(OTHER_TASK_ID))
+            .unwrap();
+
+        let mut finished_payload = submit_payload();
+        finished_payload.client_request_id = OTHER_REQUEST_ID.to_owned();
+        let finished_owner = reserve_owner(
+            &registry,
+            finished_payload,
+            "77777777-7777-7777-7777-777777777777",
+        );
+        finished_owner
+            .finish_for_test(finished("77777777-7777-7777-7777-777777777777"))
+            .unwrap();
+
+        assert_eq!(registry.logical_task_count_for_test(), Ok(3));
+        let mut rejected = submit_payload();
+        rejected.client_request_id = "88888888-8888-8888-8888-888888888888".to_owned();
+        assert!(matches!(
+            registry.reserve_submit_with(validated(rejected), || {
+                panic!("Registry가 가득 차면 task ID를 만들면 안 됩니다")
+            }),
+            Err(RegistryError::CapacityExhausted)
+        ));
+        assert_eq!(
+            RegistryError::CapacityExhausted.error_code(),
+            Some(ErrorCode::CapacityExhausted)
+        );
+        assert_eq!(
+            RegistryError::CapacityExhausted.to_string(),
+            REGISTRY_CAPACITY_EXHAUSTED_MESSAGE
+        );
+
+        reserved.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        running_owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+    }
+
+    #[test]
+    fn full_registry_keeps_idempotency_and_conflict_precedence() {
+        let (registry, _) = bounded_registry(1);
+        let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
+        owner.publish_running(running(TASK_ID)).unwrap();
+
+        assert!(matches!(
+            registry.reserve_submit(validated(submit_payload()), OTHER_TASK_ID.to_owned()),
+            Ok(SubmitReservation::Existing(waiter)) if waiter.task_id() == TASK_ID
+        ));
+        let mut conflict = submit_payload();
+        conflict.command.args.push("different".to_owned());
+        assert!(matches!(
+            registry.reserve_submit(validated(conflict), OTHER_TASK_ID.to_owned()),
+            Err(RegistryError::IdempotencyConflict(client_request_id))
+                if client_request_id == CLIENT_REQUEST_ID
+        ));
+        owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+    }
+
+    #[test]
+    fn finished_retention_does_not_release_capacity_at_exact_boundary() {
+        let (registry, clock) = bounded_registry(1);
+        let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
+        owner.finish_for_test(finished(TASK_ID)).unwrap();
+
+        clock.advance(MIN_FINISHED_RETENTION);
+        let mut next = submit_payload();
+        next.client_request_id = OTHER_CLIENT_REQUEST_ID.to_owned();
+        assert!(matches!(
+            registry.reserve_submit(validated(next.clone()), OTHER_TASK_ID.to_owned()),
+            Err(RegistryError::CapacityExhausted)
+        ));
+
+        clock.advance(Duration::from_nanos(1));
+        let replacement = reserve_owner(&registry, next, OTHER_TASK_ID);
+        assert_eq!(registry.logical_task_count_for_test(), Ok(1));
+        replacement.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+    }
+
+    #[test]
+    fn rollback_reuses_registry_capacity_but_uncertain_running_does_not() {
+        let (registry, _) = bounded_registry(1);
+        for sequence in 0..100 {
+            let task_id = format!("90000000-0000-4000-8000-{sequence:012}");
+            let owner = reserve_owner(&registry, submit_payload(), &task_id);
+            owner
+                .rollback_before_running(SubmitFailure::new(
+                    ErrorCode::InternalError,
+                    "pre-running rollback",
+                ))
+                .unwrap();
+            assert_eq!(registry.logical_task_count_for_test(), Ok(0));
+        }
+
+        let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
+        owner.publish_running(running(TASK_ID)).unwrap();
+        owner.fail(SubmitFailure::new(
+            ErrorCode::InternalError,
+            "cleanup uncertain",
+        ));
+        assert_eq!(registry.logical_task_count_for_test(), Ok(1));
+
+        let mut next = submit_payload();
+        next.client_request_id = OTHER_CLIENT_REQUEST_ID.to_owned();
+        assert!(matches!(
+            registry.reserve_submit(validated(next), OTHER_TASK_ID.to_owned()),
+            Err(RegistryError::CapacityExhausted)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_new_requests_share_the_last_registry_slot_atomically() {
+        const CALLS: usize = 12;
+        let (registry, _) = bounded_registry(1);
+        let start = Arc::new(Barrier::new(CALLS));
+        let owners = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+
+        for sequence in 0..CALLS {
+            let registry = registry.clone();
+            let start = Arc::clone(&start);
+            let owners = Arc::clone(&owners);
+            handles.push(tokio::spawn(async move {
+                let mut request = submit_payload();
+                request.client_request_id = format!("a0000000-0000-4000-8000-{sequence:012}");
+                start.wait().await;
+                match registry.reserve_submit(
+                    validated(request),
+                    format!("b0000000-0000-4000-8000-{sequence:012}"),
+                ) {
+                    Ok(SubmitReservation::Owner(owner)) => {
+                        owners.fetch_add(1, Ordering::SeqCst);
+                        Ok(owner)
+                    }
+                    Err(RegistryError::CapacityExhausted) => Err(()),
+                    _ => panic!("예상하지 못한 Registry 결정"),
+                }
+            }));
+        }
+
+        let mut winner = None;
+        let mut rejected = 0;
+        for handle in handles {
+            match handle.await.unwrap() {
+                Ok(owner) => assert!(winner.replace(owner).is_none()),
+                Err(()) => rejected += 1,
+            }
+        }
+        assert_eq!(owners.load(Ordering::SeqCst), 1);
+        assert_eq!(rejected, CALLS - 1);
+        assert_eq!(registry.logical_task_count_for_test(), Ok(1));
+        winner
+            .unwrap()
+            .fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        assert_eq!(registry.logical_task_count_for_test(), Ok(0));
     }
 
     #[test]
