@@ -10,9 +10,13 @@ use std::time::{Duration, Instant};
 use crate::cancellation::CancellationRuntime;
 use crate::cgroup::{CgroupError, CgroupManager, JobCgroup, JobStats, VerifiedCgroupLimits};
 use crate::deadline::MonotonicDeadline;
+#[cfg(not(test))]
+use crate::executor::spawn_in_cgroup;
+#[cfg(test)]
+use crate::executor::spawn_in_cgroup_with_cleanup_faults;
 use crate::executor::{
     ExecFailure, PreparedCommand, ProcessExit, SpawnOutcome, SpawnedProcess, StartCommitToken,
-    WaitOutcome, spawn_in_cgroup,
+    WaitOutcome,
 };
 use crate::fail_stop::{CleanupFailureReport, FailStopCoordinator, StartCommitError};
 use crate::lifecycle::{
@@ -126,6 +130,18 @@ impl TaskRunner {
     ) -> Result<Self> {
         Ok(Self {
             manager: CgroupManager::initialize_with_create_faults(environment, faults)?,
+            fail_stop,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn initialize_with_cleanup_faults(
+        environment: VerifiedEnvironment,
+        fail_stop: Arc<FailStopCoordinator>,
+        faults: Arc<crate::cleanup_fault::CleanupFaults>,
+    ) -> Result<Self> {
+        Ok(Self {
+            manager: CgroupManager::initialize_with_cleanup_faults(environment, faults)?,
             fail_stop,
         })
     }
@@ -393,7 +409,16 @@ where
         );
     }
 
-    let mut pending = match spawn_in_cgroup(&prepared, job.raw_fd(), capture_limits) {
+    #[cfg(test)]
+    let spawn = spawn_in_cgroup_with_cleanup_faults(
+        &prepared,
+        job.raw_fd(),
+        capture_limits,
+        job.cleanup_faults(),
+    );
+    #[cfg(not(test))]
+    let spawn = spawn_in_cgroup(&prepared, job.raw_fd(), capture_limits);
+    let mut pending = match spawn {
         Ok(pending) => pending,
         Err(error) => {
             drop(prepared);
@@ -1064,7 +1089,9 @@ async fn cleanup_running_job(
     } = context;
     let pid = process.pid();
     let mut cleanup_errors = Vec::new();
-    let mut isolation_uncertain = false;
+    // 이 함수에 들어왔다는 것은 RUNNING 뒤 첫 정리 동작이 이미 실패했다는 뜻이다.
+    // 재시도가 성공해도 fail-stop 전환과 단일 복구 deadline을 건너뛰지 않는다.
+    let mut isolation_uncertain = true;
     let mut effective_deadline = deadline;
     let mut kill_result = job.kill_all();
     if let Err(error) = &kill_result {
@@ -1109,6 +1136,12 @@ async fn cleanup_running_job(
             .and_then(|coordinator| coordinator.deadline())
             .unwrap_or(effective_deadline),
     };
+    if reap_result.is_err() && finish_result.is_ok() {
+        reap_result = process.reap_after_kill_until(output_deadline).await;
+        if let Err(error) = &reap_result {
+            cleanup_errors.push(error.to_string());
+        }
+    }
     let output_result = process.finish_output_until(output_deadline).await;
     let output_failed = output_result.is_err();
     if let Err(error) = &output_result {
@@ -1171,6 +1204,9 @@ async fn finish_job_with_retry(
         vec!["작업 cgroup"],
         "process-wide deadline으로 whole-cgroup 정리를 재시도함",
     ));
+    if job.is_cleaned() {
+        return Err(first_error);
+    }
     match job.finish_until(retry_deadline).await {
         Ok(stats) => {
             tracing::error!(
@@ -1303,10 +1339,6 @@ fn run_failed(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use crate::capacity::{TaskCapacity, TaskCapacitySettings};
-
     use super::*;
 
     #[test]
@@ -1330,156 +1362,5 @@ mod tests {
         let deadline = execution_deadline(committed_at, Duration::MAX);
 
         assert_eq!(deadline.remaining_at(committed_at), None);
-    }
-
-    #[derive(Clone, Copy, Debug)]
-    enum InjectedCleanupFault {
-        PendingCloneAbort,
-        ExecGateCleanup,
-        CgroupKill,
-        DirectChildReap,
-        PopulatedZero,
-        Statistics,
-        CgroupRemoval,
-        StdoutReader,
-        StderrReader,
-    }
-
-    impl InjectedCleanupFault {
-        fn stage(self) -> &'static str {
-            match self {
-                Self::PendingCloneAbort => "pending clone3 child 중단",
-                Self::ExecGateCleanup => "exec gate 실패 뒤 정리",
-                Self::CgroupKill => "cgroup.kill",
-                Self::DirectChildReap => "direct child 회수",
-                Self::PopulatedZero => "populated 0 확인",
-                Self::Statistics => "통계 수집",
-                Self::CgroupRemoval => "작업 cgroup 제거",
-                Self::StdoutReader => "stdout reader 회수",
-                Self::StderrReader => "stderr reader 회수",
-            }
-        }
-
-        fn uncleaned(self) -> Vec<&'static str> {
-            match self {
-                Self::PendingCloneAbort => vec!["pending child", "작업 cgroup"],
-                Self::ExecGateCleanup => vec!["exec gate child", "작업 cgroup"],
-                Self::CgroupKill | Self::PopulatedZero | Self::Statistics | Self::CgroupRemoval => {
-                    vec!["작업 cgroup"]
-                }
-                Self::DirectChildReap => vec!["direct child"],
-                Self::StdoutReader => vec!["stdout reader"],
-                Self::StderrReader => vec!["stderr reader"],
-            }
-        }
-    }
-
-    const CLEANUP_FAULTS: [InjectedCleanupFault; 9] = [
-        InjectedCleanupFault::PendingCloneAbort,
-        InjectedCleanupFault::ExecGateCleanup,
-        InjectedCleanupFault::CgroupKill,
-        InjectedCleanupFault::DirectChildReap,
-        InjectedCleanupFault::PopulatedZero,
-        InjectedCleanupFault::Statistics,
-        InjectedCleanupFault::CgroupRemoval,
-        InjectedCleanupFault::StdoutReader,
-        InjectedCleanupFault::StderrReader,
-    ];
-
-    #[test]
-    fn injected_runtime_cleanup_faults_fail_stop_without_finished_or_permit_reuse() {
-        for fault in CLEANUP_FAULTS {
-            let clock_calls = Arc::new(AtomicUsize::new(0));
-            let base = Instant::now();
-            let clock = {
-                let clock_calls = Arc::clone(&clock_calls);
-                Arc::new(move || {
-                    clock_calls.fetch_add(1, Ordering::SeqCst);
-                    base
-                })
-            };
-            let fail_stop = FailStopCoordinator::with_test_clock(
-                crate::fail_stop::FailStopSettings::new(Duration::from_secs(5)).unwrap(),
-                clock,
-            );
-            let active = fail_stop
-                .try_admit()
-                .unwrap()
-                .register(format!("task-{fault:?}"))
-                .unwrap();
-            let capacity = Arc::new(TaskCapacity::new(TaskCapacitySettings::new(1).unwrap()));
-            let permit = capacity.try_acquire().unwrap();
-            let lifecycle = SingleTaskLifecycle::running(
-                format!("task-{fault:?}"),
-                "submitted".to_owned(),
-                "started".to_owned(),
-                base,
-            );
-            let failure = uncertain_failure(
-                &format!("task-{fault:?}"),
-                fault.stage(),
-                "injected secret command and environment",
-                fault.uncleaned(),
-            );
-
-            assert!(failure.block_future_runs);
-            assert!(!failure.cleanup_complete);
-            assert!(!failure.report.stage.contains("secret"));
-            assert!(
-                failure
-                    .report
-                    .uncleaned
-                    .iter()
-                    .all(|value| !value.contains("secret"))
-            );
-            let deadline = fail_stop.activate(failure.report);
-            let repeated = fail_stop.activate(CleanupFailureReport::new(
-                "later-task",
-                "later failure",
-                vec!["작업 cgroup"],
-                "retry",
-            ));
-            permit.retain_for_fail_stop();
-            drop(active);
-
-            assert_eq!(deadline, repeated);
-            assert_eq!(clock_calls.load(Ordering::SeqCst), 1);
-            assert!(fail_stop.try_admit().is_none());
-            assert_eq!(fail_stop.active_count(), 1);
-            assert_eq!(capacity.retained_for_fail_stop(), 1);
-            assert!(capacity.try_acquire().is_none());
-            assert!(matches!(lifecycle.snapshot(), TaskPayload::Running { .. }));
-        }
-    }
-
-    #[test]
-    fn concurrent_cleanup_faults_keep_every_unresolved_execution_active() {
-        let fail_stop = FailStopCoordinator::new(
-            crate::fail_stop::FailStopSettings::new(Duration::from_secs(5)).unwrap(),
-        );
-        let active = (0..3)
-            .map(|index| {
-                fail_stop
-                    .try_admit()
-                    .unwrap()
-                    .register(format!("task-{index}"))
-                    .unwrap()
-            })
-            .collect::<Vec<_>>();
-
-        for (index, fault) in CLEANUP_FAULTS.into_iter().take(3).enumerate() {
-            let failure = uncertain_failure(
-                &format!("task-{index}"),
-                fault.stage(),
-                "injected",
-                fault.uncleaned(),
-            );
-            fail_stop.activate(failure.report);
-        }
-        drop(active);
-
-        assert!(fail_stop.is_fail_stopping());
-        assert_eq!(fail_stop.active_count(), 3);
-        assert!(fail_stop.try_admit().is_none());
     }
 }

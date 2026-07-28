@@ -13,6 +13,8 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -23,8 +25,16 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio::time::sleep;
 
+#[cfg(test)]
+use crate::cleanup_fault::{CleanupFaultPoint, CleanupFaults};
 use crate::deadline::MonotonicDeadline;
 use crate::output::{BoundedTail, CaptureLimits, CapturedOutput, CapturedStream};
+
+#[cfg(test)]
+type CleanupFaultHandle = Option<Arc<CleanupFaults>>;
+#[cfg(not(test))]
+#[derive(Clone, Debug)]
+struct CleanupFaultHandle;
 
 const CLONE_INTO_CGROUP: u64 = 0x0002_0000_0000;
 
@@ -175,6 +185,10 @@ fn nul_terminated_pointers(values: &[CString]) -> Vec<*const libc::c_char> {
 pub struct SpawnedProcess {
     pid: libc::pid_t,
     output_readers: OutputReaders,
+    #[cfg(test)]
+    cleanup_faults: CleanupFaultHandle,
+    #[cfg(test)]
+    reaped_exit: Mutex<Option<ProcessExit>>,
 }
 
 #[derive(Debug)]
@@ -183,6 +197,9 @@ pub struct PendingProcess {
     exec_read_end: Option<OwnedFd>,
     start_write_end: Option<OwnedFd>,
     output_readers: Option<OutputReaders>,
+    #[cfg(test)]
+    cleanup_faults: CleanupFaultHandle,
+    reaped: bool,
 }
 
 #[derive(Debug)]
@@ -195,6 +212,8 @@ pub(crate) struct StartCommittedProcess {
     pid: libc::pid_t,
     exec_read_end: Option<OwnedFd>,
     output_readers: Option<OutputReaders>,
+    #[cfg(test)]
+    cleanup_faults: CleanupFaultHandle,
 }
 
 impl PendingProcess {
@@ -204,6 +223,15 @@ impl PendingProcess {
 
     /// fail-stop 상태 잠금 안에서는 gate 신호 한 번만 기록하고 정리는 수행하지 않는다.
     pub(crate) fn commit_start_signal(&mut self) -> Result<StartCommitToken, ExecutorError> {
+        #[cfg(test)]
+        if self.cleanup_faults.as_ref().is_some_and(|faults| {
+            faults.is(CleanupFaultPoint::PendingCloneAbort)
+                || faults.should_fail(CleanupFaultPoint::ExecGateCleanup)
+        }) {
+            return Err(ExecutorError::StartGateSignal(CleanupFaults::error(
+                CleanupFaultPoint::ExecGateCleanup,
+            )));
+        }
         let start_write_end = self
             .start_write_end
             .take()
@@ -218,11 +246,16 @@ impl PendingProcess {
 
     pub(crate) fn into_start_committed(mut self, token: StartCommitToken) -> StartCommittedProcess {
         debug_assert_eq!(self.pid, token.pid);
-        StartCommittedProcess {
+        let committed = StartCommittedProcess {
             pid: self.pid,
             exec_read_end: self.exec_read_end.take(),
             output_readers: self.output_readers.take(),
-        }
+            #[cfg(test)]
+            cleanup_faults: self.cleanup_faults.clone(),
+        };
+        // child 회수 책임은 start-committed owner로 이동했다.
+        self.reaped = true;
+        committed
     }
 
     pub(crate) async fn abort_until(
@@ -231,21 +264,44 @@ impl PendingProcess {
     ) -> Result<(), ExecutorError> {
         self.start_write_end.take();
         unsafe { libc::kill(self.pid, libc::SIGKILL) };
-        let wait_result = loop {
-            if let Some(status) = wait_nohang(self.pid)? {
-                break Ok(status);
+        #[cfg(test)]
+        let injected = self
+            .cleanup_faults
+            .as_ref()
+            .is_some_and(|faults| faults.should_fail(CleanupFaultPoint::PendingCloneAbort));
+        #[cfg(not(test))]
+        let injected = false;
+        let wait_result = if injected {
+            #[cfg(test)]
+            {
+                Err(ExecutorError::Wait(CleanupFaults::error(
+                    CleanupFaultPoint::PendingCloneAbort,
+                )))
             }
-            let Some(remaining) = deadline.remaining() else {
-                break Err(ExecutorError::Wait(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "pending clone3 child의 종료 상태를 회수하지 못했습니다",
-                )));
-            };
-            sleep(remaining.min(Duration::from_millis(10))).await;
+            #[cfg(not(test))]
+            {
+                unreachable!("운영 빌드에는 cleanup fault가 없습니다")
+            }
+        } else {
+            loop {
+                if let Some(status) = wait_nohang(self.pid)? {
+                    break Ok(status);
+                }
+                let Some(remaining) = deadline.remaining() else {
+                    break Err(ExecutorError::Wait(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "pending clone3 child의 종료 상태를 회수하지 못했습니다",
+                    )));
+                };
+                sleep(remaining.min(Duration::from_millis(10))).await;
+            }
         };
         self.exec_read_end.take();
         if let Some(output_readers) = self.output_readers.take() {
             output_readers.cancel_and_join();
+        }
+        if wait_result.is_ok() {
+            self.reaped = true;
         }
         wait_result.map(|_| ())
     }
@@ -257,6 +313,9 @@ impl PendingProcess {
         self.exec_read_end.take();
         if let Some(output_readers) = self.output_readers.take() {
             output_readers.cancel_and_join();
+        }
+        if wait_result.is_ok() {
+            self.reaped = true;
         }
         wait_result.map(|_| ())
     }
@@ -282,6 +341,10 @@ impl StartCommittedProcess {
             Ok(SpawnOutcome::Started(SpawnedProcess {
                 pid: self.pid,
                 output_readers,
+                #[cfg(test)]
+                cleanup_faults: self.cleanup_faults.clone(),
+                #[cfg(test)]
+                reaped_exit: Mutex::new(None),
             }))
         } else if payload.len() == size_of::<i32>() {
             let errno = i32::from_ne_bytes(payload.try_into().expect("길이를 먼저 확인했습니다"));
@@ -314,7 +377,7 @@ impl StartCommittedProcess {
 
 impl Drop for PendingProcess {
     fn drop(&mut self) {
-        if self.output_readers.is_some() {
+        if !self.reaped {
             let _ = self.stop_and_reap();
         }
     }
@@ -352,6 +415,25 @@ impl SpawnedProcess {
         &self,
         deadline: MonotonicDeadline,
     ) -> Result<ProcessExit, ExecutorError> {
+        #[cfg(test)]
+        {
+            if self
+                .cleanup_faults
+                .as_ref()
+                .is_some_and(|faults| faults.should_fail(CleanupFaultPoint::DirectChildReap))
+            {
+                let mut cached = self.reaped_exit.lock().expect("시험용 child 상태 잠금");
+                if cached.is_none() {
+                    *cached = Some(wait_blocking(self.pid)?);
+                }
+                return Err(ExecutorError::Wait(CleanupFaults::error(
+                    CleanupFaultPoint::DirectChildReap,
+                )));
+            }
+            if let Some(exit) = *self.reaped_exit.lock().expect("시험용 child 상태 잠금") {
+                return Ok(exit);
+            }
+        }
         loop {
             if let Some(status) = wait_nohang(self.pid)? {
                 return Ok(status);
@@ -378,6 +460,7 @@ impl SpawnedProcess {
 struct PreparedOutputReader {
     descriptor: OwnedFd,
     limit: std::num::NonZeroUsize,
+    cleanup_faults: CleanupFaultHandle,
 }
 
 impl PreparedOutputReader {
@@ -385,10 +468,15 @@ impl PreparedOutputReader {
         descriptor: OwnedFd,
         limit: std::num::NonZeroUsize,
         stream: &'static str,
+        cleanup_faults: CleanupFaultHandle,
     ) -> Result<Self, ExecutorError> {
         set_nonblocking(descriptor.as_raw_fd())
             .map_err(|source| ExecutorError::OutputPipe { stream, source })?;
-        Ok(Self { descriptor, limit })
+        Ok(Self {
+            descriptor,
+            limit,
+            cleanup_faults,
+        })
     }
 
     fn start(
@@ -396,9 +484,18 @@ impl PreparedOutputReader {
         stream: &'static str,
         cancelled: Arc<AtomicBool>,
     ) -> Result<thread::JoinHandle<Result<CapturedStream, io::Error>>, ExecutorError> {
+        let cleanup_faults = self.cleanup_faults;
         thread::Builder::new()
             .name(format!("taskcage-{stream}-reader"))
-            .spawn(move || drain_output(self.descriptor, self.limit, &cancelled))
+            .spawn(move || {
+                drain_output(
+                    self.descriptor,
+                    self.limit,
+                    &cancelled,
+                    stream,
+                    cleanup_faults,
+                )
+            })
             .map_err(|source| ExecutorError::OutputReaderStart { stream, source })
     }
 }
@@ -551,6 +648,29 @@ pub fn spawn_in_cgroup(
     cgroup_fd: RawFd,
     capture_limits: CaptureLimits,
 ) -> Result<PendingProcess, ExecutorError> {
+    #[cfg(test)]
+    let cleanup_faults = None;
+    #[cfg(not(test))]
+    let cleanup_faults = CleanupFaultHandle;
+    spawn_in_cgroup_with_fault_handle(command, cgroup_fd, capture_limits, cleanup_faults)
+}
+
+#[cfg(test)]
+pub(crate) fn spawn_in_cgroup_with_cleanup_faults(
+    command: &PreparedCommand,
+    cgroup_fd: RawFd,
+    capture_limits: CaptureLimits,
+    cleanup_faults: Option<Arc<CleanupFaults>>,
+) -> Result<PendingProcess, ExecutorError> {
+    spawn_in_cgroup_with_fault_handle(command, cgroup_fd, capture_limits, cleanup_faults)
+}
+
+fn spawn_in_cgroup_with_fault_handle(
+    command: &PreparedCommand,
+    cgroup_fd: RawFd,
+    capture_limits: CaptureLimits,
+    cleanup_faults: CleanupFaultHandle,
+) -> Result<PendingProcess, ExecutorError> {
     let (exec_read_end, exec_write_end) = pipe_cloexec().map_err(ExecutorError::ExecPipe)?;
     let (start_read_end, start_write_end) = pipe_cloexec().map_err(ExecutorError::StartGatePipe)?;
     // coordinator 잠금 안의 한 바이트 기록이 대기 상태에 빠지지 않게 부모 쓰기 끝만 비차단으로 둔다.
@@ -569,11 +689,13 @@ pub fn spawn_in_cgroup(
         stdout_read_end,
         capture_limits.stdout_tail_max_bytes(),
         "stdout",
+        cleanup_faults.clone(),
     )?;
     let stderr_reader = PreparedOutputReader::new(
         stderr_read_end,
         capture_limits.stderr_tail_max_bytes(),
         "stderr",
+        cleanup_faults.clone(),
     )?;
     let output_readers = OutputReaders::start(stdout_reader, stderr_reader)?;
     // clone3 전에만 할당한다. 자식은 복제된 포인터 배열을 그대로 execve에 사용한다.
@@ -627,6 +749,9 @@ pub fn spawn_in_cgroup(
         exec_read_end: Some(exec_read_end),
         start_write_end: Some(start_write_end),
         output_readers: Some(output_readers),
+        #[cfg(test)]
+        cleanup_faults,
+        reaped: false,
     })
 }
 
@@ -750,6 +875,8 @@ fn drain_output(
     descriptor: OwnedFd,
     limit: std::num::NonZeroUsize,
     cancelled: &AtomicBool,
+    _stream: &'static str,
+    _cleanup_faults: CleanupFaultHandle,
 ) -> Result<CapturedStream, io::Error> {
     let mut tail = BoundedTail::new(limit);
     let mut buffer = [0_u8; 8 * 1024];
@@ -776,6 +903,20 @@ fn drain_output(
         loop {
             if cancelled.load(Ordering::Acquire) {
                 return Ok(tail.finish());
+            }
+            #[cfg(test)]
+            {
+                let point = if _stream == "stdout" {
+                    CleanupFaultPoint::StdoutReader
+                } else {
+                    CleanupFaultPoint::StderrReader
+                };
+                if _cleanup_faults
+                    .as_ref()
+                    .is_some_and(|faults| faults.should_fail(point))
+                {
+                    return Err(CleanupFaults::error(point));
+                }
             }
             let read = unsafe {
                 libc::read(
@@ -988,9 +1129,9 @@ mod tests {
         let (stdout_read, stdout_write) = pipe_cloexec().unwrap();
         let (stderr_read, stderr_write) = pipe_cloexec().unwrap();
         let readers = OutputReaders::start(
-            PreparedOutputReader::new(stdout_read, NonZeroUsize::new(32).unwrap(), "stdout")
+            PreparedOutputReader::new(stdout_read, NonZeroUsize::new(32).unwrap(), "stdout", None)
                 .unwrap(),
-            PreparedOutputReader::new(stderr_read, NonZeroUsize::new(32).unwrap(), "stderr")
+            PreparedOutputReader::new(stderr_read, NonZeroUsize::new(32).unwrap(), "stderr", None)
                 .unwrap(),
         )
         .unwrap();
@@ -1014,9 +1155,9 @@ mod tests {
         let (stdout_read, stdout_write) = pipe_cloexec().unwrap();
         let (stderr_read, stderr_write) = pipe_cloexec().unwrap();
         let readers = OutputReaders::start(
-            PreparedOutputReader::new(stdout_read, NonZeroUsize::new(8).unwrap(), "stdout")
+            PreparedOutputReader::new(stdout_read, NonZeroUsize::new(8).unwrap(), "stdout", None)
                 .unwrap(),
-            PreparedOutputReader::new(stderr_read, NonZeroUsize::new(8).unwrap(), "stderr")
+            PreparedOutputReader::new(stderr_read, NonZeroUsize::new(8).unwrap(), "stderr", None)
                 .unwrap(),
         )
         .unwrap();
@@ -1039,9 +1180,9 @@ mod tests {
         let stdout_identity = descriptor_identity(stdout_fd).unwrap();
         let stderr_identity = descriptor_identity(stderr_fd).unwrap();
         let readers = OutputReaders::start(
-            PreparedOutputReader::new(stdout_read, NonZeroUsize::new(8).unwrap(), "stdout")
+            PreparedOutputReader::new(stdout_read, NonZeroUsize::new(8).unwrap(), "stdout", None)
                 .unwrap(),
-            PreparedOutputReader::new(stderr_read, NonZeroUsize::new(8).unwrap(), "stderr")
+            PreparedOutputReader::new(stderr_read, NonZeroUsize::new(8).unwrap(), "stderr", None)
                 .unwrap(),
         )
         .unwrap();
