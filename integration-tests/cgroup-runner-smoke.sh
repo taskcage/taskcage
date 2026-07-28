@@ -347,6 +347,82 @@ unit_sequence=$((unit_sequence + 1))
   --exact \
   --nocapture
 
+# 합성된 실패 보고서가 아니라 실제 child, cgroup과 reader cleanup 경계에서 오류를 발생시킨다.
+for cleanup_fault in \
+  pending-clone-abort \
+  exec-gate-cleanup \
+  cgroup-kill \
+  direct-child-reap \
+  populated-zero \
+  statistics \
+  cgroup-removal \
+  stdout-reader \
+  stderr-reader; do
+  unit_sequence=$((unit_sequence + 1))
+  "${taskcage_systemd[@]}" \
+    --quiet \
+    --wait \
+    --collect \
+    --pipe \
+    --unit="taskcage-cleanup-fault-${cleanup_fault}-$$-${unit_sequence}" \
+    --property=Type=exec \
+    --property=Delegate=yes \
+    --setenv=TASKCAGE_RUN_CLEANUP_FAULT_INTEGRATION=1 \
+    --setenv=TASKCAGE_CLEANUP_FAULT="${cleanup_fault}" \
+    --setenv=TASKCAGE_CLEANUP_FAULT_TOUCH_BIN="${touch_bin}" \
+    --setenv=TASKCAGE_CLEANUP_FAULT_OUTPUT_BIN="${output_flood_bin}" \
+    "${submit_test}" \
+    'submit::tests::actual_cleanup_fault_reaches_runner_and_submit_state' \
+    --exact \
+    --nocapture
+done
+
+# 재시도에서도 계속 실패하면 FINISHED와 capacity 재사용이 차단되고 Drop 방어가 자원을 회수한다.
+for cleanup_fault in \
+  pending-clone-abort \
+  cgroup-kill \
+  direct-child-reap \
+  populated-zero \
+  statistics \
+  cgroup-removal \
+  stdout-reader \
+  stderr-reader; do
+  unit_sequence=$((unit_sequence + 1))
+  "${taskcage_systemd[@]}" \
+    --quiet \
+    --wait \
+    --collect \
+    --pipe \
+    --unit="taskcage-cleanup-persistent-${cleanup_fault}-$$-${unit_sequence}" \
+    --property=Type=exec \
+    --property=Delegate=yes \
+    --setenv=TASKCAGE_RUN_CLEANUP_FAULT_INTEGRATION=1 \
+    --setenv=TASKCAGE_CLEANUP_FAULT="${cleanup_fault}" \
+    --setenv=TASKCAGE_CLEANUP_FAULT_MODE=persistent \
+    --setenv=TASKCAGE_CLEANUP_FAULT_TOUCH_BIN="${touch_bin}" \
+    --setenv=TASKCAGE_CLEANUP_FAULT_OUTPUT_BIN="${output_flood_bin}" \
+    "${submit_test}" \
+    'submit::tests::actual_cleanup_fault_reaches_runner_and_submit_state' \
+    --exact \
+    --nocapture
+done
+
+# 서로 다른 실제 작업의 cleanup 실패가 동시에 발생해도 최초 fail-stop deadline 하나만 유지한다.
+unit_sequence=$((unit_sequence + 1))
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-cleanup-concurrent-$$-${unit_sequence}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --setenv=TASKCAGE_RUN_CLEANUP_FAULT_CONCURRENT=1 \
+  "${submit_test}" \
+  'submit::tests::concurrent_actual_cleanup_faults_share_one_fail_stop_deadline' \
+  --exact \
+  --nocapture
+
 # 실제 serve process가 UDS 요청 중 fail-stop에 들어가 deadline 안에 0이 아닌 코드로 종료한다.
 process_e2e_test=""
 while IFS= read -r artifact; do

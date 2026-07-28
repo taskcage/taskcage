@@ -27,6 +27,8 @@ use thiserror::Error;
 #[cfg(target_os = "linux")]
 use tokio::time::sleep;
 
+#[cfg(all(target_os = "linux", test))]
+use crate::cleanup_fault::{CleanupFaultPoint, CleanupFaults};
 #[cfg(target_os = "linux")]
 use crate::deadline::MonotonicDeadline;
 #[cfg(target_os = "linux")]
@@ -358,6 +360,8 @@ pub struct CgroupManager {
     paths: CgroupPaths,
     #[cfg(test)]
     create_faults: Option<Arc<CgroupCreateFaults>>,
+    #[cfg(test)]
+    cleanup_faults: Option<Arc<CleanupFaults>>,
 }
 
 #[cfg(all(target_os = "linux", test))]
@@ -428,6 +432,8 @@ impl CgroupManager {
             paths,
             #[cfg(test)]
             create_faults: None,
+            #[cfg(test)]
+            cleanup_faults: None,
         })
     }
 
@@ -438,6 +444,16 @@ impl CgroupManager {
     ) -> Result<Self, CgroupError> {
         let mut manager = Self::initialize(environment)?;
         manager.create_faults = Some(faults);
+        Ok(manager)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn initialize_with_cleanup_faults(
+        environment: VerifiedEnvironment,
+        faults: Arc<CleanupFaults>,
+    ) -> Result<Self, CgroupError> {
+        let mut manager = Self::initialize(environment)?;
+        manager.cleanup_faults = Some(faults);
         Ok(manager)
     }
 
@@ -532,6 +548,8 @@ impl CgroupManager {
                 baseline,
                 verified_limits,
                 cleaned: false,
+                #[cfg(test)]
+                cleanup_faults: self.cleanup_faults.clone(),
             }),
             Err(error) => {
                 let _ = write_control(&path.join("cgroup.kill"), "1\n");
@@ -615,6 +633,8 @@ pub struct JobCgroup {
     baseline: KernelEvents,
     verified_limits: VerifiedCgroupLimits,
     cleaned: bool,
+    #[cfg(test)]
+    cleanup_faults: Option<Arc<CleanupFaults>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -635,8 +655,29 @@ impl JobCgroup {
         self.verified_limits
     }
 
+    pub(crate) fn is_cleaned(&self) -> bool {
+        self.cleaned
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cleanup_faults(&self) -> Option<Arc<CleanupFaults>> {
+        self.cleanup_faults.clone()
+    }
+
     pub fn is_populated(&self) -> Result<bool, CgroupError> {
         let path = self.path.join("cgroup.events");
+        #[cfg(test)]
+        if self
+            .cleanup_faults
+            .as_ref()
+            .is_some_and(|faults| faults.should_fail(CleanupFaultPoint::PopulatedZero))
+        {
+            return Err(injected_cleanup_error(
+                "작업 상태 확인",
+                &path,
+                CleanupFaultPoint::PopulatedZero,
+            ));
+        }
         let events = read_flat_keys(&path)?;
         Ok(required_key(&events, &path, "populated")? != 0)
     }
@@ -653,7 +694,20 @@ impl JobCgroup {
 
     /// 대표 PID 하나가 아니라 작업 cgroup 아래의 모든 프로세스를 종료한다.
     pub fn kill_all(&self) -> Result<(), CgroupError> {
-        write_control(&self.path.join("cgroup.kill"), "1\n")
+        let path = self.path.join("cgroup.kill");
+        #[cfg(test)]
+        if self
+            .cleanup_faults
+            .as_ref()
+            .is_some_and(|faults| faults.should_fail(CleanupFaultPoint::CgroupKill))
+        {
+            return Err(injected_cleanup_error(
+                "작업 전체 종료",
+                &path,
+                CleanupFaultPoint::CgroupKill,
+            ));
+        }
+        write_control(&path, "1\n")
     }
 
     pub(crate) async fn wait_empty_until(
@@ -676,6 +730,18 @@ impl JobCgroup {
 
     pub fn stats(&self) -> Result<JobStats, CgroupError> {
         let cpu_path = self.path.join("cpu.stat");
+        #[cfg(test)]
+        if self
+            .cleanup_faults
+            .as_ref()
+            .is_some_and(|faults| faults.should_fail(CleanupFaultPoint::Statistics))
+        {
+            return Err(injected_cleanup_error(
+                "작업 통계 수집",
+                &cpu_path,
+                CleanupFaultPoint::Statistics,
+            ));
+        }
         let cpu = read_flat_keys(&cpu_path)?;
         let current_events = read_kernel_events(&self.path)?;
         let memory_current = read_u64(&self.path.join("memory.current"))?;
@@ -721,6 +787,22 @@ impl JobCgroup {
 
         // 통계 읽기에 실패해도 빈 cgroup 제거는 반드시 시도한다.
         let stats = self.stats();
+        #[cfg(test)]
+        let removal = if self
+            .cleanup_faults
+            .as_ref()
+            .is_some_and(|faults| faults.should_fail(CleanupFaultPoint::CgroupRemoval))
+        {
+            Err(injected_cleanup_error(
+                "작업 cgroup 제거",
+                &self.path,
+                CleanupFaultPoint::CgroupRemoval,
+            ))
+        } else {
+            fs::remove_dir(&self.path)
+                .map_err(|source| cgroup_io_error("작업 cgroup 제거", &self.path, source))
+        };
+        #[cfg(not(test))]
         let removal = fs::remove_dir(&self.path)
             .map_err(|source| cgroup_io_error("작업 cgroup 제거", &self.path, source));
         if removal.is_ok() {
@@ -735,6 +817,19 @@ impl JobCgroup {
                 cleanup: cleanup.to_string(),
             }),
         }
+    }
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn injected_cleanup_error(
+    operation: &'static str,
+    path: &Path,
+    point: CleanupFaultPoint,
+) -> CgroupError {
+    CgroupError::Io {
+        operation,
+        path: path.to_path_buf(),
+        source: CleanupFaults::error(point),
     }
 }
 
@@ -1027,6 +1122,7 @@ mod tests {
                 jobs: jobs.clone(),
             },
             create_faults: None,
+            cleanup_faults: None,
         };
         let limits = CgroupLimits {
             memory_max_bytes: NonZeroU64::new(1).unwrap(),
@@ -1073,6 +1169,7 @@ mod tests {
                 jobs: jobs.clone(),
             },
             create_faults: None,
+            cleanup_faults: None,
         };
         let limits = CgroupLimits {
             memory_max_bytes: NonZeroU64::new(1).unwrap(),

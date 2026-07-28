@@ -305,6 +305,25 @@ impl SubmitCoordinator {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn initialize_with_cleanup_faults(
+        environment: VerifiedEnvironment,
+        capacity_settings: TaskCapacitySettings,
+        fail_stop: Arc<FailStopCoordinator>,
+        faults: Arc<crate::cleanup_fault::CleanupFaults>,
+    ) -> crate::Result<Self> {
+        Ok(Self {
+            registry: TaskRegistry::new(),
+            runner: Arc::new(TaskRunner::initialize_with_cleanup_faults(
+                environment,
+                Arc::clone(&fail_stop),
+                faults,
+            )?),
+            capacity: Arc::new(TaskCapacity::new(capacity_settings)),
+            fail_stop,
+        })
+    }
+
     #[cfg_attr(
         not(test),
         expect(
@@ -971,6 +990,8 @@ mod tests {
     use tokio::time::{Duration as TokioDuration, timeout};
 
     #[cfg(target_os = "linux")]
+    use crate::cleanup_fault::{CleanupFaultMode, CleanupFaultPoint, CleanupFaults};
+    #[cfg(target_os = "linux")]
     use crate::preflight::{CapabilityProbe, SystemProbe};
     use crate::protocol::{
         CommandSpec, CpuMax, OutputLimits, ProcessResult, ResourceLimits, TaskOutput, TaskTiming,
@@ -1039,6 +1060,65 @@ mod tests {
             || TaskStartTime::new("2026-07-24T10:00:00.010Z".to_owned(), Instant::now()),
             Duration::from_secs(5),
         )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cleanup_fault_metadata(task_id: &str) -> SubmitMetadata {
+        SubmitMetadata::fixed(
+            task_id.to_owned(),
+            "2026-07-24T10:00:00.000Z".to_owned(),
+            || TaskStartTime::new("2026-07-24T10:00:00.010Z".to_owned(), Instant::now()),
+            Duration::from_millis(100),
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn teardown_persistent_kill_fault(job_path: &Path, child_pid: u32) {
+        if let Err(error) = fs::write(job_path.join("cgroup.kill"), "1\n")
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            panic!("시험 teardown cgroup.kill이 실패했습니다: {error}");
+        }
+
+        timeout(TokioDuration::from_secs(2), async {
+            let mut child_reaped = false;
+            loop {
+                if !child_reaped {
+                    let mut status = 0;
+                    // 이 PID는 같은 시험 프로세스가 clone3로 만든 direct child다.
+                    let waited = unsafe {
+                        libc::waitpid(child_pid as libc::pid_t, &mut status, libc::WNOHANG)
+                    };
+                    child_reaped = waited == child_pid as libc::pid_t
+                        || (waited == -1
+                            && std::io::Error::last_os_error().raw_os_error()
+                                == Some(libc::ECHILD));
+                    assert!(
+                        waited >= 0 || child_reaped,
+                        "시험 teardown waitpid가 실패했습니다"
+                    );
+                }
+
+                let populated = match fs::read_to_string(job_path.join("cgroup.events")) {
+                    Ok(events) => events.lines().any(|line| line == "populated 1"),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(error) => {
+                        panic!("시험 teardown cgroup.events 읽기가 실패했습니다: {error}")
+                    }
+                };
+                if child_reaped && !populated {
+                    if let Err(error) = fs::remove_dir(job_path)
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        panic!("시험 teardown 작업 cgroup 제거가 실패했습니다: {error}");
+                    }
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("시험 teardown에서 target과 작업 cgroup을 회수해야 합니다");
     }
 
     fn metadata_with_start_clock(
@@ -2700,5 +2780,330 @@ mod tests {
             "fail-stop 뒤 ghost descendant가 남아 있습니다: {ghost_pids:?}"
         );
         fs::remove_file(ready_path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn actual_cleanup_fault_reaches_runner_and_submit_state() {
+        if std::env::var_os("TASKCAGE_RUN_CLEANUP_FAULT_INTEGRATION").is_none() {
+            eprintln!("NOT EXECUTED: 실제 cgroup v2 위임 환경이 필요합니다");
+            return;
+        }
+
+        let point = match std::env::var("TASKCAGE_CLEANUP_FAULT")
+            .expect("실제 cleanup fault 이름이 필요합니다")
+            .as_str()
+        {
+            "pending-clone-abort" => CleanupFaultPoint::PendingCloneAbort,
+            "exec-gate-cleanup" => CleanupFaultPoint::ExecGateCleanup,
+            "cgroup-kill" => CleanupFaultPoint::CgroupKill,
+            "direct-child-reap" => CleanupFaultPoint::DirectChildReap,
+            "populated-zero" => CleanupFaultPoint::PopulatedZero,
+            "statistics" => CleanupFaultPoint::Statistics,
+            "cgroup-removal" => CleanupFaultPoint::CgroupRemoval,
+            "stdout-reader" => CleanupFaultPoint::StdoutReader,
+            "stderr-reader" => CleanupFaultPoint::StderrReader,
+            other => panic!("알 수 없는 cleanup fault입니다: {other}"),
+        };
+        let mode = match std::env::var("TASKCAGE_CLEANUP_FAULT_MODE")
+            .unwrap_or_else(|_| "once".to_owned())
+            .as_str()
+        {
+            "once" => CleanupFaultMode::Once,
+            "persistent" => CleanupFaultMode::Persistent,
+            other => panic!("알 수 없는 cleanup fault mode입니다: {other}"),
+        };
+        let faults = Arc::new(CleanupFaults::new(point, mode));
+        let clock_calls = Arc::new(AtomicUsize::new(0));
+        let fail_stop = FailStopCoordinator::with_test_clock(
+            FailStopSettings::new(Duration::from_secs(1)).unwrap(),
+            {
+                let clock_calls = Arc::clone(&clock_calls);
+                Arc::new(move || {
+                    clock_calls.fetch_add(1, Ordering::SeqCst);
+                    Instant::now()
+                })
+            },
+        );
+        let environment = SystemProbe::from_environment().check().unwrap();
+        let jobs_path = environment.report().delegated_root.join("jobs");
+        let coordinator = SubmitCoordinator::initialize_with_cleanup_faults(
+            environment,
+            TaskCapacitySettings::new(1).unwrap(),
+            Arc::clone(&fail_stop),
+            Arc::clone(&faults),
+        )
+        .unwrap();
+        let marker = std::env::temp_dir().join(format!(
+            "taskcage-cleanup-fault-{}-{point:?}",
+            std::process::id()
+        ));
+
+        if matches!(
+            point,
+            CleanupFaultPoint::PendingCloneAbort | CleanupFaultPoint::ExecGateCleanup
+        ) {
+            let touch_bin = std::env::var("TASKCAGE_CLEANUP_FAULT_TOUCH_BIN")
+                .expect("cleanup fault target marker 실행 파일이 필요합니다");
+            let outcome = coordinator
+                .submit(
+                    request(
+                        PROTOCOL_VERSION,
+                        REQUEST_ID,
+                        linux_payload(
+                            CLIENT_REQUEST_ID,
+                            &touch_bin,
+                            &[marker.to_string_lossy().as_ref()],
+                            30_000,
+                        ),
+                    ),
+                    cleanup_fault_metadata(TASK_ID),
+                    || ("finished".to_owned(), Instant::now()),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                outcome.observation,
+                SubmitObservation::Failed(SubmitFailure {
+                    code: ErrorCode::InternalError,
+                    ..
+                })
+            ));
+            assert!(
+                !marker.exists(),
+                "exec gate 전에 target이 실행되면 안 됩니다"
+            );
+            assert_eq!(coordinator.snapshot(TASK_ID), Ok(None));
+            assert_eq!(
+                faults.attempts(),
+                if point == CleanupFaultPoint::PendingCloneAbort {
+                    2
+                } else {
+                    1
+                }
+            );
+
+            if point == CleanupFaultPoint::PendingCloneAbort {
+                assert!(fail_stop.is_fail_stopping());
+                assert_eq!(clock_calls.load(Ordering::SeqCst), 1);
+                assert_eq!(coordinator.capacity.retained_for_fail_stop(), 1);
+            } else {
+                assert!(!fail_stop.is_fail_stopping());
+                assert_eq!(clock_calls.load(Ordering::SeqCst), 0);
+                assert!(coordinator.capacity.try_acquire().is_some());
+            }
+        } else {
+            let (program, args) = if matches!(
+                point,
+                CleanupFaultPoint::StdoutReader | CleanupFaultPoint::StderrReader
+            ) {
+                (
+                    std::env::var("TASKCAGE_CLEANUP_FAULT_OUTPUT_BIN")
+                        .expect("cleanup fault output fixture가 필요합니다"),
+                    vec!["both"],
+                )
+            } else {
+                ("/bin/sleep".to_owned(), vec!["30"])
+            };
+            let outcome = coordinator
+                .submit(
+                    request(
+                        PROTOCOL_VERSION,
+                        REQUEST_ID,
+                        linux_payload(CLIENT_REQUEST_ID, &program, &args, 60_000),
+                    ),
+                    cleanup_fault_metadata(TASK_ID),
+                    || ("finished".to_owned(), Instant::now()),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                outcome.observation,
+                SubmitObservation::Task(TaskPayload::Running { .. })
+            ));
+            let job_path = jobs_path.join(format!("job-{TASK_ID}"));
+            let child_pid = fs::read_to_string(job_path.join("cgroup.procs"))
+                .unwrap()
+                .lines()
+                .next()
+                .expect("실제 target PID가 필요합니다")
+                .parse::<u32>()
+                .unwrap();
+            coordinator.registry.request_cancel(TASK_ID).unwrap();
+
+            timeout(TokioDuration::from_secs(10), async {
+                while coordinator.capacity.retained_for_fail_stop() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("실제 cleanup fault가 fail-stop capacity 보존으로 이어져야 합니다");
+            assert!(fail_stop.is_fail_stopping());
+            assert_eq!(clock_calls.load(Ordering::SeqCst), 1);
+            assert!(faults.attempts() >= 1);
+            if mode == CleanupFaultMode::Persistent {
+                faults.disable();
+            }
+
+            let recovered = mode == CleanupFaultMode::Once
+                && matches!(
+                    point,
+                    CleanupFaultPoint::CgroupKill
+                        | CleanupFaultPoint::DirectChildReap
+                        | CleanupFaultPoint::PopulatedZero
+                        | CleanupFaultPoint::CgroupRemoval
+                );
+            let snapshot = coordinator.snapshot(TASK_ID).unwrap().unwrap();
+            if recovered {
+                assert!(matches!(
+                    snapshot,
+                    TaskPayload::Finished {
+                        termination_reason: TerminationReason::Cancelled,
+                        ..
+                    }
+                ));
+                assert!(
+                    faults.attempts() >= 2,
+                    "첫 실패 뒤 실제 재시도가 필요합니다"
+                );
+            } else {
+                assert!(matches!(snapshot, TaskPayload::Running { .. }));
+            }
+
+            let rejected = coordinator
+                .submit(
+                    request(
+                        PROTOCOL_VERSION,
+                        OTHER_REQUEST_ID,
+                        linux_payload(NONZERO_CLIENT_REQUEST_ID, "/bin/true", &[], 5_000),
+                    ),
+                    metadata(NONZERO_TASK_ID),
+                    || ("finished".to_owned(), Instant::now()),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                rejected.observation,
+                SubmitObservation::Failed(SubmitFailure {
+                    code: ErrorCode::EnvironmentUnavailable,
+                    ..
+                })
+            ));
+            assert_eq!(coordinator.snapshot(NONZERO_TASK_ID), Ok(None));
+
+            if point == CleanupFaultPoint::CgroupKill && mode == CleanupFaultMode::Persistent {
+                teardown_persistent_kill_fault(&job_path, child_pid).await;
+            }
+
+            timeout(TokioDuration::from_secs(2), async {
+                while job_path.exists() || Path::new(&format!("/proc/{child_pid}")).exists() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("시험 종료 전에 target과 작업 cgroup을 회수해야 합니다");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_actual_cleanup_faults_share_one_fail_stop_deadline() {
+        if std::env::var_os("TASKCAGE_RUN_CLEANUP_FAULT_CONCURRENT").is_none() {
+            eprintln!("NOT EXECUTED: 실제 cgroup v2 위임 환경이 필요합니다");
+            return;
+        }
+
+        let faults = Arc::new(CleanupFaults::new_pair(
+            CleanupFaultPoint::StdoutReader,
+            CleanupFaultPoint::StderrReader,
+            CleanupFaultMode::Persistent,
+        ));
+        let clock_calls = Arc::new(AtomicUsize::new(0));
+        let fail_stop = FailStopCoordinator::with_test_clock(
+            FailStopSettings::new(Duration::from_secs(1)).unwrap(),
+            {
+                let clock_calls = Arc::clone(&clock_calls);
+                Arc::new(move || {
+                    clock_calls.fetch_add(1, Ordering::SeqCst);
+                    Instant::now()
+                })
+            },
+        );
+        let environment = SystemProbe::from_environment().check().unwrap();
+        let jobs_path = environment.report().delegated_root.join("jobs");
+        let coordinator = SubmitCoordinator::initialize_with_cleanup_faults(
+            environment,
+            TaskCapacitySettings::new(2).unwrap(),
+            Arc::clone(&fail_stop),
+            Arc::clone(&faults),
+        )
+        .unwrap();
+
+        for (request_id, client_request_id, task_id) in [
+            (REQUEST_ID, CLIENT_REQUEST_ID, TASK_ID),
+            (OTHER_REQUEST_ID, NONZERO_CLIENT_REQUEST_ID, OTHER_TASK_ID),
+        ] {
+            let outcome = coordinator
+                .submit(
+                    request(
+                        PROTOCOL_VERSION,
+                        request_id,
+                        linux_payload(client_request_id, "/bin/sleep", &["30"], 60_000),
+                    ),
+                    cleanup_fault_metadata(task_id),
+                    || ("finished".to_owned(), Instant::now()),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                outcome.observation,
+                SubmitObservation::Task(TaskPayload::Running { .. })
+            ));
+        }
+
+        let resources = [TASK_ID, OTHER_TASK_ID].map(|task_id| {
+            let job_path = jobs_path.join(format!("job-{task_id}"));
+            let pid = fs::read_to_string(job_path.join("cgroup.procs"))
+                .unwrap()
+                .lines()
+                .next()
+                .expect("동시 실행 target PID가 필요합니다")
+                .parse::<u32>()
+                .unwrap();
+            (job_path, pid)
+        });
+        let first_cancel = coordinator.registry.request_cancel(TASK_ID).unwrap();
+        let second_cancel = coordinator.registry.request_cancel(OTHER_TASK_ID).unwrap();
+        drop((first_cancel, second_cancel));
+
+        timeout(TokioDuration::from_secs(5), async {
+            while coordinator.capacity.retained_for_fail_stop() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("두 실제 cleanup 실패가 모두 capacity를 보존해야 합니다");
+        assert_eq!(clock_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fail_stop.active_count(), 2);
+        assert!(faults.attempts_for(CleanupFaultPoint::StdoutReader) >= 2);
+        assert!(faults.attempts_for(CleanupFaultPoint::StderrReader) >= 2);
+        for task_id in [TASK_ID, OTHER_TASK_ID] {
+            assert!(matches!(
+                coordinator.snapshot(task_id).unwrap(),
+                Some(TaskPayload::Running { .. })
+            ));
+        }
+        faults.disable();
+
+        timeout(TokioDuration::from_secs(2), async {
+            while resources
+                .iter()
+                .any(|(path, pid)| path.exists() || Path::new(&format!("/proc/{pid}")).exists())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("동시 fault 시험 뒤 target과 작업 cgroup을 회수해야 합니다");
     }
 }

@@ -8,6 +8,8 @@ mod cancellation;
 pub mod capability;
 mod capacity;
 pub mod cgroup;
+#[cfg(all(target_os = "linux", test))]
+mod cleanup_fault;
 pub mod codec;
 mod deadline;
 #[cfg(target_os = "linux")]
