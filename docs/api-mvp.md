@@ -239,7 +239,33 @@ SDK는 응답 유실이나 재연결 뒤 같은 작업을 재전송할 수 있�
 `execve`가 실패하면 그 commit 시각을 `startedAt`으로 사용한 `EXECUTION_FAILED` 결과를 정리 뒤
 반환한다.
 
-`effectiveLimits`는 실제 cgroup에 적용된 값이며 요청값과 다르면 데몬은 작업을 수락하지 않고 `LIMIT_EXCEEDS_POLICY` 오류를 반환한다. 슬롯이 없으면 데몬은 작업을 만들지 않고 `CAPACITY_EXHAUSTED` 오류를 반환한다. 같은 `clientRequestId` 재전송에는 새 작업 대신 기존 `taskId`와 현재 상태를 반환한다.
+`effectiveLimits`는 요청을 검증한 뒤 cgroup 제어 파일에 쓰고 다시 읽어 요청값과 정확히 같음을
+확인한 적용값이다. MVP는 커널이 다른 값으로 정규화한 결과를 조용히 허용하지 않는다. 확인한 값이
+요청값과 다르면 target을 시작하거나 `taskAccepted`와 공개 `taskId`를 반환하지 않고, 해당
+`submitTask`를 `INTERNAL_ERROR`와 `retryable: false`로 실패시킨다.
+
+read-back 불일치 전에 만든 임시 cgroup과 Registry·idempotency·capacity 예약은 전체 정리를 확인한
+뒤 원상 복구한다. 정리를 확인할 수 없으면 일반 `INTERNAL_ERROR` 응답으로 끝내지 않고 기존
+process-wide fail-stop 계약으로 전환한다. `LIMIT_EXCEEDS_POLICY`는 cgroup을 만들기 전에 요청 제한이
+명시적인 daemon 배포 정책을 벗어났다고 판정한 경우에만 사용한다. 지원하지 않는 cgroup 환경을 시작
+전에 발견하는 `ENVIRONMENT_UNAVAILABLE` 계약은 바뀌지 않는다. 자세한 선택 근거는
+[ADR 0006](decisions/0006-use-internal-error-for-cgroup-read-back-mismatch.md)을 따른다.
+
+```json
+{
+  "protocolVersion": 1,
+  "requestId": "a1f6d5f2-2bf7-4a8d-b6d9-2e4d0a8860e2",
+  "type": "error",
+  "payload": {
+    "code": "INTERNAL_ERROR",
+    "message": "cgroup limit read-back verification failed",
+    "retryable": false
+  }
+}
+```
+
+슬롯이 없으면 데몬은 작업을 만들지 않고 `CAPACITY_EXHAUSTED` 오류를 반환한다. 같은
+`clientRequestId` 재전송에는 새 작업 대신 기존 `taskId`와 현재 상태를 반환한다.
 
 ### `getTask`
 
@@ -417,11 +443,16 @@ SDK는 응답 유실이나 재연결 뒤 같은 작업을 재전송할 수 있�
 | `TASK_NOT_FOUND` | 작업이 없거나 보관 기간이 지남 | 아니오 |
 | `TASK_ALREADY_FINISHED` | 완료된 작업 취소 요청 | 아니오 |
 | `IDEMPOTENCY_CONFLICT` | 같은 clientRequestId에 다른 요청 본문을 사용함 | 아니오 |
-| `LIMIT_EXCEEDS_POLICY` | 요청 제한이 데몬의 배포 정책을 벗어남 | 아니오 |
+| `LIMIT_EXCEEDS_POLICY` | cgroup 생성 전에 요청 제한이 데몬의 명시적인 배포 정책을 벗어남 | 아니오 |
 | `DAEMON_UNAVAILABLE` | SDK가 UDS 연결 또는 응답을 얻지 못함 | 예 |
-| `INTERNAL_ERROR` | 예상하지 못한 데몬 오류로 안전한 공개 결과를 만들 수 없음 | 상황에 따라 |
+| `INTERNAL_ERROR` | 예상하지 못한 데몬 오류 또는 cgroup 제한값 read-back 불일치 | 상황에 따라. read-back 불일치는 아니오 |
 
 `DAEMON_UNAVAILABLE`은 소켓 연결·읽기·쓰기 실패를 Java SDK가 표현하는 로컬 오류이며, 데몬이 전송하는 JSON 오류가 아니다.
+
+cgroup 제한값 read-back 불일치의 `INTERNAL_ERROR`는 `retryable: false`다. 같은 daemon에서 같은 요청을
+즉시 다시 보내도 안전한 제한 적용을 보장할 수 없기 때문이다. 이 응답에는 cgroup 경로, 제어 파일,
+예상값·실제값 같은 내부 진단 정보를 새 field로 넣지 않으며 SDK는 `message`를 분기 기준으로 사용하지
+않는다.
 
 정리 불확실 상태에서 받은 `ENVIRONMENT_UNAVAILABLE`은 같은 데몬 프로세스에 `submitTask`를 다시
 시도하라는 뜻이 아니다. SDK는 해당 프로세스의 연결이 종료될 때까지 새 실행을 재시도하지 않는다.
