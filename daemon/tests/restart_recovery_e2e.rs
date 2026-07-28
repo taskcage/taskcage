@@ -269,6 +269,8 @@ fn spawn_daemon(
         .arg(socket_path)
         .arg("--max-concurrent-tasks")
         .arg("2")
+        .arg("--max-concurrent-connections")
+        .arg("8")
         .arg("--cleanup-timeout-ms")
         .arg(CLEANUP_TIMEOUT.as_millis().to_string())
         .arg("--fail-stop-timeout-ms")

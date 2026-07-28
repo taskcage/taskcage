@@ -45,6 +45,7 @@ use std::ffi::OsString;
 #[cfg(test)]
 use std::future::Future;
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
@@ -138,6 +139,7 @@ pub struct RunOnceConfig {
 pub struct DaemonConfig {
     socket_path: PathBuf,
     max_concurrent_tasks: u32,
+    max_concurrent_connections: NonZeroUsize,
     cleanup_timeout: Duration,
     fail_stop_timeout: Duration,
 }
@@ -146,6 +148,7 @@ impl DaemonConfig {
     pub fn new(
         socket_path: PathBuf,
         max_concurrent_tasks: u32,
+        max_concurrent_connections: usize,
         cleanup_timeout: Duration,
         fail_stop_timeout: Duration,
     ) -> Result<Self> {
@@ -159,6 +162,12 @@ impl DaemonConfig {
                 "max-concurrent-tasks 값은 0보다 커야 합니다".to_owned(),
             ));
         }
+        let max_concurrent_connections =
+            NonZeroUsize::new(max_concurrent_connections).ok_or_else(|| {
+                Error::InvalidArgument(
+                    "max-concurrent-connections 값은 0보다 커야 합니다".to_owned(),
+                )
+            })?;
         if cleanup_timeout.is_zero() {
             return Err(Error::InvalidArgument(
                 "cleanup-timeout-ms 값은 0보다 커야 합니다".to_owned(),
@@ -169,6 +178,7 @@ impl DaemonConfig {
         Ok(Self {
             socket_path,
             max_concurrent_tasks,
+            max_concurrent_connections,
             cleanup_timeout,
             fail_stop_timeout,
         })
@@ -237,15 +247,18 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         fail_stop,
     )?);
     tracing::info!(socket = %config.socket_path.display(), "TaskCage daemon started");
-    let result =
-        server::serve_protocol_until(startup, config.cleanup_timeout, handlers, shutdown_signal())
-            .await
-            .map_err(|error| match error {
-                server::ServerError::FailStop { task_id, stage } => {
-                    Error::FailStop { task_id, stage }
-                }
-                other => Error::Server(other.to_string()),
-            });
+    let result = server::serve_protocol_until(
+        startup,
+        config.cleanup_timeout,
+        config.max_concurrent_connections,
+        handlers,
+        shutdown_signal(),
+    )
+    .await
+    .map_err(|error| match error {
+        server::ServerError::FailStop { task_id, stage } => Error::FailStop { task_id, stage },
+        other => Error::Server(other.to_string()),
+    });
     if result.is_ok() {
         tracing::info!(socket = %config.socket_path.display(), "TaskCage daemon stopped");
     } else {

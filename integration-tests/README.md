@@ -70,6 +70,9 @@ Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 
 21. 요청 수신 뒤 cgroup과 pending child 준비가 지연되어도 시작 clock은 exec gate commit 뒤 한 번만
     호출되며, `RUNNING.startedAt`과 `FINISHED.timing.startedAt`이 같고 준비 시간은 `wallTimeMs`에
     포함되지 않는다.
+22. 실제 `taskcaged serve` process가 명시한 UDS 연결 수까지만 partial frame handler를 유지하고,
+    초과 연결을 요청 처리 없이 닫으며 반복 연결 뒤에도 file descriptor가 증가하지 않고 슬롯을
+    재사용한다.
 
 실행 방법:
 

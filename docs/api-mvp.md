@@ -26,6 +26,13 @@ MVP는 단일 Linux 호스트에서 Java 17+ SDK와 `taskcaged`가 통신하는 
 - 전송 계층은 Unix domain socket의 `SOCK_STREAM`이다.
 - SDK는 소켓 경로를 설정할 수 있어야 한다. 기본 경로는 배포 설정의 책임이며 이 명세에서 고정하지 않는다.
 - 하나의 연결에서는 요청과 응답을 순서대로 처리한다. 동시 호출은 별도 연결 또는 순서를 보장하는 연결 풀을 사용한다.
+- daemon은 0보다 큰 UDS 동시 연결 상한을 명시적인 서비스 설정으로 받으며 기본값을 가정하지 않는다.
+  이 상한은 실행 작업 수인 `maxConcurrentTasks`와 별개이며 Protocol v1 응답 field가 아니다.
+- 연결 상한에는 실행 중인 handler와 완료됐지만 아직 회수되지 않은 handler가 모두 포함된다. 내부 연결
+  대기열은 만들지 않는다.
+- 상한을 넘은 연결은 요청 prefix, JSON 또는 본문을 읽거나 dispatcher를 호출하지 않고 즉시 닫는다.
+  Protocol v1 오류 응답은 만들지 않으므로 SDK는 이를 다른 UDS 연결·응답 실패와 같이
+  `DAEMON_UNAVAILABLE` transport 오류로 다룰 수 있다.
 - 데몬은 socket 절대 경로를 서비스 설정으로 명시적으로 받으며 UID/GID를 임의로 바꾸지 않는다.
 - MVP socket mode는 owner-only `0600`이다.
 - 일반 bind는 기존 일반 파일, 디렉터리, symlink와 socket을 삭제하지 않고 시작을 거절한다.
@@ -34,6 +41,8 @@ MVP는 단일 Linux 호스트에서 Java 17+ SDK와 `taskcaged`가 통신하는 
   socket을 제거할 수 있다. 연결 성공, 권한 오류, timeout 또는 불확실한 결과에서는 삭제하지 않는다.
 - 정상 종료에서는 자신이 성공적으로 bind한 동일 device·inode의 socket만 제거한다. lock 파일은
   삭제하지 않고 file descriptor를 닫아 lock만 해제한다.
+- 자세한 연결 admission과 슬롯 회수 규칙은
+  [ADR 0007](decisions/0007-bound-concurrent-uds-connections.md)을 따른다.
 
 ### 프레임
 

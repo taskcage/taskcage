@@ -54,6 +54,7 @@ async fn main() -> taskcaged::Result<()> {
 fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
     let mut socket_path = None;
     let mut max_concurrent_tasks = None;
+    let mut max_concurrent_connections = None;
     let mut cleanup_timeout_ms = None;
     let mut fail_stop_timeout_ms = None;
     let mut index = 0;
@@ -69,6 +70,9 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             "--max-concurrent-tasks" if max_concurrent_tasks.is_none() => {
                 max_concurrent_tasks = Some(parse_number(name, value)?);
             }
+            "--max-concurrent-connections" if max_concurrent_connections.is_none() => {
+                max_concurrent_connections = Some(parse_number(name, value)?);
+            }
             "--cleanup-timeout-ms" if cleanup_timeout_ms.is_none() => {
                 cleanup_timeout_ms = Some(parse_number(name, value)?);
             }
@@ -77,6 +81,7 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             }
             "--socket"
             | "--max-concurrent-tasks"
+            | "--max-concurrent-connections"
             | "--cleanup-timeout-ms"
             | "--fail-stop-timeout-ms" => {
                 return Err(Error::InvalidArgument(format!(
@@ -95,6 +100,7 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
     DaemonConfig::new(
         required_option("socket", socket_path)?,
         required_option("max-concurrent-tasks", max_concurrent_tasks)?,
+        required_option("max-concurrent-connections", max_concurrent_connections)?,
         Duration::from_millis(required_option("cleanup-timeout-ms", cleanup_timeout_ms)?),
         Duration::from_millis(required_option(
             "fail-stop-timeout-ms",
@@ -298,6 +304,8 @@ mod tests {
             socket.into_os_string(),
             OsString::from("--max-concurrent-tasks"),
             OsString::from("2"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("8"),
             OsString::from("--cleanup-timeout-ms"),
             OsString::from("5000"),
             OsString::from("--fail-stop-timeout-ms"),
@@ -305,12 +313,15 @@ mod tests {
         ])
         .unwrap();
         assert!(format!("{config:?}").contains("max_concurrent_tasks: 2"));
+        assert!(format!("{config:?}").contains("max_concurrent_connections: 8"));
 
         let error = parse_serve(vec![
             OsString::from("--socket"),
             OsString::from("relative.sock"),
             OsString::from("--max-concurrent-tasks"),
             OsString::from("2"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("8"),
             OsString::from("--cleanup-timeout-ms"),
             OsString::from("5000"),
             OsString::from("--fail-stop-timeout-ms"),
@@ -328,6 +339,8 @@ mod tests {
             socket.clone().into_os_string(),
             OsString::from("--max-concurrent-tasks"),
             OsString::from("0"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("8"),
             OsString::from("--cleanup-timeout-ms"),
             OsString::from("5000"),
             OsString::from("--fail-stop-timeout-ms"),
@@ -341,6 +354,8 @@ mod tests {
             socket.clone().into_os_string(),
             OsString::from("--max-concurrent-tasks"),
             OsString::from("1"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("8"),
         ])
         .unwrap_err();
         assert!(error.to_string().contains("cleanup-timeout-ms 옵션은 필수"));
@@ -350,6 +365,8 @@ mod tests {
             socket.clone().into_os_string(),
             OsString::from("--max-concurrent-tasks"),
             OsString::from("1"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("8"),
             OsString::from("--cleanup-timeout-ms"),
             OsString::from("5000"),
             OsString::from("--fail-stop-timeout-ms"),
@@ -363,6 +380,8 @@ mod tests {
             socket.into_os_string(),
             OsString::from("--max-concurrent-tasks"),
             OsString::from("1"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("8"),
             OsString::from("--cleanup-timeout-ms"),
             OsString::from("5000"),
         ])
@@ -372,6 +391,79 @@ mod tests {
                 .to_string()
                 .contains("fail-stop-timeout-ms 옵션은 필수")
         );
+
+        let error = parse_serve(vec![
+            OsString::from("--socket"),
+            std::env::temp_dir().join("taskcaged.sock").into_os_string(),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("1"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("0"),
+            OsString::from("--cleanup-timeout-ms"),
+            OsString::from("5000"),
+            OsString::from("--fail-stop-timeout-ms"),
+            OsString::from("10000"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("max-concurrent-connections"));
+
+        let error = parse_serve(vec![
+            OsString::from("--socket"),
+            std::env::temp_dir().join("taskcaged.sock").into_os_string(),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("1"),
+            OsString::from("--cleanup-timeout-ms"),
+            OsString::from("5000"),
+            OsString::from("--fail-stop-timeout-ms"),
+            OsString::from("10000"),
+        ])
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("max-concurrent-connections 옵션은 필수")
+        );
+    }
+
+    #[test]
+    fn serve_rejects_invalid_or_duplicate_connection_limit() {
+        let socket = std::env::temp_dir().join("taskcaged.sock");
+        let common_tail = [
+            OsString::from("--cleanup-timeout-ms"),
+            OsString::from("5000"),
+            OsString::from("--fail-stop-timeout-ms"),
+            OsString::from("10000"),
+        ];
+        let mut invalid = vec![
+            OsString::from("--socket"),
+            socket.clone().into_os_string(),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("1"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("many"),
+        ];
+        invalid.extend(common_tail.iter().cloned());
+        let error = parse_serve(invalid).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("잘못된 --max-concurrent-connections 값")
+        );
+
+        let mut duplicate = vec![
+            OsString::from("--socket"),
+            socket.into_os_string(),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("1"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("2"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("3"),
+        ];
+        duplicate.extend(common_tail);
+        let error = parse_serve(duplicate).unwrap_err();
+        assert!(error.to_string().contains("serve 옵션이 중복되었습니다"));
+        assert!(error.to_string().contains("--max-concurrent-connections"));
     }
 
     #[test]
