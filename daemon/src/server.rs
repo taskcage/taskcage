@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::io;
+use std::num::NonZeroUsize;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -198,6 +199,7 @@ fn remove_owned_path(path: &Path, identity: SocketIdentity) -> Result<(), Server
 pub(crate) async fn serve_protocol_until<S>(
     startup: StartupOwnership,
     cleanup_timeout: Duration,
+    max_concurrent_connections: NonZeroUsize,
     handlers: Arc<ProtocolHandlers<SubmitCoordinator>>,
     shutdown: S,
 ) -> Result<(), ServerError>
@@ -217,6 +219,7 @@ where
     let result = serve_socket_until_fail_stop(
         &startup,
         dispatch,
+        max_concurrent_connections,
         shutdown,
         Arc::clone(handlers.fail_stop()),
     )
@@ -284,6 +287,7 @@ where
 async fn serve_socket_until<S>(
     startup: StartupOwnership,
     dispatch: Dispatch,
+    max_concurrent_connections: NonZeroUsize,
     shutdown: S,
 ) -> Result<(), ServerError>
 where
@@ -291,7 +295,8 @@ where
 {
     let mut socket = BoundSocket::bind(startup.socket_path())?;
     let listener = socket.take_listener();
-    let result = accept_until_shutdown(listener, dispatch, shutdown).await;
+    let result =
+        accept_until_shutdown(listener, dispatch, max_concurrent_connections, shutdown).await;
     let cleanup = socket.cleanup();
     combine_server_and_cleanup(result, cleanup)
 }
@@ -299,6 +304,7 @@ where
 async fn serve_socket_until_fail_stop<S>(
     startup: &StartupOwnership,
     dispatch: Dispatch,
+    max_concurrent_connections: NonZeroUsize,
     shutdown: S,
     fail_stop: Arc<FailStopCoordinator>,
 ) -> Result<(), ServerError>
@@ -307,7 +313,14 @@ where
 {
     let mut socket = BoundSocket::bind(startup.socket_path())?;
     let listener = socket.take_listener();
-    let result = accept_until_shutdown_or_fail_stop(listener, dispatch, shutdown, fail_stop).await;
+    let result = accept_until_shutdown_or_fail_stop(
+        listener,
+        dispatch,
+        max_concurrent_connections,
+        shutdown,
+        fail_stop,
+    )
+    .await;
     let cleanup = socket.cleanup();
     combine_server_and_cleanup(result, cleanup)
 }
@@ -331,29 +344,46 @@ fn combine_server_and_cleanup(
 async fn accept_until_shutdown<S>(
     listener: UnixListener,
     dispatch: Dispatch,
+    max_concurrent_connections: NonZeroUsize,
     shutdown: S,
 ) -> Result<(), ServerError>
 where
     S: Future<Output = io::Result<()>>,
 {
-    accept_connections(listener, dispatch, shutdown, None).await
+    accept_connections(
+        listener,
+        dispatch,
+        max_concurrent_connections,
+        shutdown,
+        None,
+    )
+    .await
 }
 
 async fn accept_until_shutdown_or_fail_stop<S>(
     listener: UnixListener,
     dispatch: Dispatch,
+    max_concurrent_connections: NonZeroUsize,
     shutdown: S,
     fail_stop: Arc<FailStopCoordinator>,
 ) -> Result<(), ServerError>
 where
     S: Future<Output = io::Result<()>>,
 {
-    accept_connections(listener, dispatch, shutdown, Some(fail_stop)).await
+    accept_connections(
+        listener,
+        dispatch,
+        max_concurrent_connections,
+        shutdown,
+        Some(fail_stop),
+    )
+    .await
 }
 
 async fn accept_connections<S>(
     listener: UnixListener,
     dispatch: Dispatch,
+    max_concurrent_connections: NonZeroUsize,
     shutdown: S,
     fail_stop: Option<Arc<FailStopCoordinator>>,
 ) -> Result<(), ServerError>
@@ -367,30 +397,41 @@ where
 
     tokio::pin!(shutdown);
     let mut connections = JoinSet::new();
+    let mut rejected_connections = 0_u64;
     let stop = loop {
+        // 완료된 handler를 먼저 회수해야 짧은 연결이 새 연결 수락에 밀리지 않는다.
+        while let Some(result) = connections.try_join_next() {
+            log_connection_result(result);
+        }
         tokio::select! {
             biased;
             deadline = wait_for_fail_stop(fail_stop.as_deref()) => break Stop::FailStop(deadline),
             result = &mut shutdown => break Stop::Normal(result.map_err(ServerError::Shutdown)),
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
-                    let connection_dispatch = Arc::clone(&dispatch);
-                    connections.spawn(async move {
-                        handle_connection(stream, connection_dispatch).await
-                    });
-                }
-                Err(error) => break Stop::Normal(Err(ServerError::Accept(error))),
-            },
             joined = connections.join_next(), if !connections.is_empty() => {
                 if let Some(result) = joined {
                     log_connection_result(result);
                 }
             }
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => {
+                    if connections.len() >= max_concurrent_connections.get() {
+                        rejected_connections = rejected_connections.saturating_add(1);
+                        // 한도 초과 연결은 요청을 읽거나 protocol 응답을 만들지 않는다.
+                        drop(stream);
+                    } else {
+                        let connection_dispatch = Arc::clone(&dispatch);
+                        connections.spawn(async move {
+                            handle_connection(stream, connection_dispatch).await
+                        });
+                    }
+                }
+                Err(error) => break Stop::Normal(Err(ServerError::Accept(error))),
+            },
         }
     };
     drop(listener);
 
-    match stop {
+    let result = match stop {
         Stop::Normal(result) => {
             abort_connections(&mut connections).await;
             result
@@ -400,7 +441,15 @@ where
             drain_fail_stop_connections(&mut connections, &coordinator, deadline).await;
             Err(fail_stop_error(&coordinator))
         }
+    };
+    if rejected_connections > 0 {
+        tracing::debug!(
+            rejected_connections,
+            max_concurrent_connections = max_concurrent_connections.get(),
+            "UDS 연결 한도 초과 연결을 종료했습니다"
+        );
     }
+    result
 }
 
 fn fail_stop_error(fail_stop: &FailStopCoordinator) -> ServerError {
@@ -601,7 +650,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::sync::{Notify, oneshot};
+    use tokio::sync::{Notify, Semaphore, oneshot};
     use tokio::time::{sleep, timeout};
 
     use super::*;
@@ -684,13 +733,29 @@ mod tests {
         oneshot::Sender<()>,
         tokio::task::JoinHandle<Result<(), ServerError>>,
     ) {
+        start_server_with_limit(path, dispatch, 16).await
+    }
+
+    async fn start_server_with_limit(
+        path: PathBuf,
+        dispatch: Dispatch,
+        max_concurrent_connections: usize,
+    ) -> (
+        oneshot::Sender<()>,
+        tokio::task::JoinHandle<Result<(), ServerError>>,
+    ) {
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         let startup = StartupOwnership::acquire(&path).unwrap();
         let server = tokio::spawn(async move {
-            serve_socket_until(startup, dispatch, async move {
-                let _ = shutdown_receiver.await;
-                Ok(())
-            })
+            serve_socket_until(
+                startup,
+                dispatch,
+                NonZeroUsize::new(max_concurrent_connections).unwrap(),
+                async move {
+                    let _ = shutdown_receiver.await;
+                    Ok(())
+                },
+            )
             .await
         });
         (shutdown_sender, server)
@@ -706,6 +771,7 @@ mod tests {
             serve_socket_until_fail_stop(
                 &startup,
                 dispatch,
+                NonZeroUsize::new(16).unwrap(),
                 std::future::pending::<io::Result<()>>(),
                 fail_stop,
             )
@@ -742,6 +808,25 @@ mod tests {
         read_json_frame(stream).await.unwrap()
     }
 
+    async fn assert_closed_without_response(mut stream: UnixStream) {
+        let mut byte = [0_u8; 1];
+        let result = timeout(Duration::from_secs(1), stream.read(&mut byte))
+            .await
+            .expect("한도 초과 연결은 응답 없이 바로 닫혀야 합니다");
+        match result {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::UnexpectedEof
+                ) => {}
+            Ok(read) => panic!("한도 초과 연결에서 {read}바이트 응답을 받았습니다"),
+            Err(error) => panic!("한도 초과 연결 종료 오류가 예상과 다릅니다: {error}"),
+        }
+    }
+
     #[tokio::test]
     async fn one_connection_processes_multiple_requests_in_order() {
         let path = TestSocketPath::new("sequential");
@@ -755,7 +840,7 @@ mod tests {
                 capabilities(request_id)
             })
         });
-        let (shutdown, server) = start_server(path.socket.clone(), dispatch).await;
+        let (shutdown, server) = start_server_with_limit(path.socket.clone(), dispatch, 1).await;
         let mut stream = connect(&path.socket).await;
 
         for request_id in [FIRST_REQUEST_ID, SECOND_REQUEST_ID] {
@@ -810,6 +895,216 @@ mod tests {
 
         release_first.notify_one();
         assert_eq!(first.await.unwrap().request_id(), FIRST_REQUEST_ID);
+        shutdown.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_limit_closes_overflow_before_dispatch_and_reuses_slots() {
+        let path = TestSocketPath::new("connection-limit");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Semaphore::new(0));
+        let dispatch: Dispatch = {
+            let calls = Arc::clone(&calls);
+            let active = Arc::clone(&active);
+            let peak = Arc::clone(&peak);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            Arc::new(move |request| {
+                let request_id = request.request_id().to_owned();
+                let calls = Arc::clone(&calls);
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    let call = calls.fetch_add(1, Ordering::SeqCst);
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(current, Ordering::SeqCst);
+                    if call < 2 {
+                        started.notify_one();
+                        let permit = release.acquire().await.unwrap();
+                        permit.forget();
+                    }
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    capabilities(request_id)
+                })
+            })
+        };
+        let (shutdown, server) = start_server_with_limit(path.socket.clone(), dispatch, 2).await;
+
+        let mut first = connect(&path.socket).await;
+        let mut second = connect(&path.socket).await;
+        write_json_frame(&mut first, &capability_request(FIRST_REQUEST_ID))
+            .await
+            .unwrap();
+        write_json_frame(&mut second, &capability_request(SECOND_REQUEST_ID))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), async {
+            while calls.load(Ordering::SeqCst) < 2 {
+                started.notified().await;
+            }
+        })
+        .await
+        .expect("두 connection handler가 시작돼야 합니다");
+
+        let mut overflow = connect(&path.socket).await;
+        let _ = write_json_frame(&mut overflow, &capability_request("overflow")).await;
+        assert_closed_without_response(overflow).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(active.load(Ordering::SeqCst), 2);
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+
+        release.add_permits(2);
+        assert_eq!(
+            read_json_frame::<_, Response>(&mut first)
+                .await
+                .unwrap()
+                .request_id(),
+            FIRST_REQUEST_ID
+        );
+        assert_eq!(
+            read_json_frame::<_, Response>(&mut second)
+                .await
+                .unwrap()
+                .request_id(),
+            SECOND_REQUEST_ID
+        );
+        drop(first);
+        drop(second);
+
+        let response = timeout(Duration::from_secs(1), async {
+            loop {
+                let mut retry = connect(&path.socket).await;
+                if write_json_frame(&mut retry, &capability_request("retry"))
+                    .await
+                    .is_ok()
+                    && let Ok(response) = read_json_frame::<_, Response>(&mut retry).await
+                {
+                    break response;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("완료 handler 회수 뒤 슬롯을 다시 사용해야 합니다");
+        assert_eq!(response.request_id(), "retry");
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+
+        shutdown.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn slow_partial_prefixes_consume_slots_without_unbounded_handlers() {
+        let path = TestSocketPath::new("partial-prefix-limit");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatch_calls = Arc::clone(&calls);
+        let dispatch: Dispatch = Arc::new(move |request| {
+            dispatch_calls.fetch_add(1, Ordering::SeqCst);
+            let request_id = request.request_id().to_owned();
+            Box::pin(async move { capabilities(request_id) })
+        });
+        let (shutdown, server) = start_server_with_limit(path.socket.clone(), dispatch, 2).await;
+        let mut first = connect(&path.socket).await;
+        let mut second = connect(&path.socket).await;
+        first.write_all(&[0]).await.unwrap();
+        second.write_all(&[0]).await.unwrap();
+        sleep(Duration::from_millis(20)).await;
+
+        for _ in 0..32 {
+            let overflow = connect(&path.socket).await;
+            assert_closed_without_response(overflow).await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        shutdown.send(()).unwrap();
+        timeout(Duration::from_secs(1), server)
+            .await
+            .expect("shutdown은 부분 frame handler를 모두 회수해야 합니다")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn short_connection_churn_does_not_accumulate_unjoined_handlers() {
+        let path = TestSocketPath::new("connection-churn");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatch_calls = Arc::clone(&calls);
+        let dispatch: Dispatch = Arc::new(move |request| {
+            dispatch_calls.fetch_add(1, Ordering::SeqCst);
+            let request_id = request.request_id().to_owned();
+            Box::pin(async move { capabilities(request_id) })
+        });
+        let (shutdown, server) = start_server_with_limit(path.socket.clone(), dispatch, 2).await;
+
+        for sequence in 0..64 {
+            let request_id = format!("churn-{sequence}");
+            let response = timeout(Duration::from_secs(1), async {
+                loop {
+                    let mut stream = connect(&path.socket).await;
+                    if write_json_frame(&mut stream, &capability_request(&request_id))
+                        .await
+                        .is_ok()
+                        && let Ok(response) = read_json_frame::<_, Response>(&mut stream).await
+                    {
+                        break response;
+                    }
+                    sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await
+            .expect("짧은 연결 완료 handler를 계속 회수해야 합니다");
+            assert_eq!(response.request_id(), request_id);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 64);
+
+        shutdown.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn panicked_handler_is_joined_and_its_slot_is_reused() {
+        let path = TestSocketPath::new("panic-slot");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatch_calls = Arc::clone(&calls);
+        let dispatch: Dispatch = Arc::new(move |request| {
+            let request_id = request.request_id().to_owned();
+            let call = dispatch_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                assert_ne!(call, 0, "의도한 첫 handler panic");
+                capabilities(request_id)
+            })
+        });
+        let (shutdown, server) = start_server_with_limit(path.socket.clone(), dispatch, 1).await;
+
+        let mut first = connect(&path.socket).await;
+        write_json_frame(&mut first, &capability_request(FIRST_REQUEST_ID))
+            .await
+            .unwrap();
+        assert_closed_without_response(first).await;
+
+        let response = timeout(Duration::from_secs(1), async {
+            loop {
+                let mut retry = connect(&path.socket).await;
+                if write_json_frame(&mut retry, &capability_request(SECOND_REQUEST_ID))
+                    .await
+                    .is_ok()
+                    && let Ok(response) = read_json_frame::<_, Response>(&mut retry).await
+                {
+                    break response;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("panic handler를 join한 뒤 연결 슬롯을 재사용해야 합니다");
+        assert_eq!(response.request_id(), SECOND_REQUEST_ID);
+
         shutdown.send(()).unwrap();
         server.await.unwrap().unwrap();
     }
@@ -1395,6 +1690,7 @@ mod tests {
             serve_protocol_until(
                 startup,
                 Duration::from_secs(5),
+                NonZeroUsize::new(16).unwrap(),
                 server_handlers,
                 async move {
                     let _ = shutdown_receiver.await;

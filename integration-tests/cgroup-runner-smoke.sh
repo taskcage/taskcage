@@ -489,6 +489,45 @@ trap cleanup_shutdown_fail_stop_unit EXIT INT TERM
   --nocapture
 trap - EXIT INT TERM
 
+# 실제 serve process에서 UDS handler와 file descriptor가 명시한 연결 상한을 넘지 않는지 확인한다.
+uds_connection_limit_test=""
+while IFS= read -r artifact; do
+  if [[ "${artifact}" == *'"target":{"kind":["test"]'* &&
+        "${artifact}" == *'"name":"uds_connection_limit_e2e"'* &&
+        "${artifact}" == *'"executable":"'* ]]; then
+    uds_connection_limit_test="${artifact#*\"executable\":\"}"
+    uds_connection_limit_test="${uds_connection_limit_test%%\"*}"
+  fi
+done < <(cargo test -p taskcaged --test uds_connection_limit_e2e --no-run --message-format=json)
+if [[ -z "${uds_connection_limit_test}" || ! -x "${uds_connection_limit_test}" ]]; then
+  echo "FAIL: 실제 UDS connection limit E2E 실행 파일을 찾지 못했습니다" >&2
+  exit 1
+fi
+
+unit_sequence=$((unit_sequence + 1))
+uds_connection_limit_unit="taskcage-uds-connection-limit-$$-${unit_sequence}"
+cleanup_uds_connection_limit_unit() {
+  "${taskcage_systemctl[@]}" stop "${uds_connection_limit_unit}" >/dev/null 2>&1 || true
+  "${taskcage_systemctl[@]}" reset-failed "${uds_connection_limit_unit}" >/dev/null 2>&1 || true
+}
+trap cleanup_uds_connection_limit_unit EXIT INT TERM
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="${uds_connection_limit_unit}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --property=TimeoutStopSec=10s \
+  --setenv=TASKCAGE_RUN_UDS_CONNECTION_LIMIT_E2E=1 \
+  --setenv=TASKCAGE_UDS_CONNECTION_LIMIT_BIN="${taskcage_bin}" \
+  "${uds_connection_limit_test}" \
+  'actual_serve_process_bounds_uds_connections_and_reuses_slots' \
+  --exact \
+  --nocapture
+trap - EXIT INT TERM
+
 # 실제 daemon crash 뒤 stale socket과 잔여 실행을 다음 serve process가 요청 수락 전에 복구한다.
 restart_recovery_test=""
 while IFS= read -r artifact; do
