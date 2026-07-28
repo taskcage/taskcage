@@ -21,6 +21,8 @@ use crate::fail_stop::FailStopCoordinator;
 use crate::handlers::{ProtocolHandlers, SubmitContext};
 use crate::protocol::{ErrorCode, ErrorPayload, PROTOCOL_VERSION, Request, Response};
 use crate::startup::StartupOwnership;
+#[cfg(test)]
+use crate::submit::TaskRegistrySettings;
 use crate::submit::{SubmitCoordinator, SubmitMetadata, TaskStartTime};
 
 type DispatchFuture = Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
@@ -1678,6 +1680,7 @@ mod tests {
             ProtocolHandlers::initialize(
                 Ok(environment),
                 TaskCapacitySettings::new(2).unwrap(),
+                TaskRegistrySettings::new(16).unwrap(),
                 FailStopCoordinator::new(
                     crate::fail_stop::FailStopSettings::new(Duration::from_secs(5)).unwrap(),
                 ),

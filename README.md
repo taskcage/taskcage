@@ -158,6 +158,7 @@ taskcaged serve \
   --socket /run/taskcage/taskcaged.sock \
   --max-concurrent-tasks 4 \
   --max-concurrent-connections 32 \
+  --max-registry-tasks 1000 \
   --cleanup-timeout-ms 5000 \
   --fail-stop-timeout-ms 10000
 ```
@@ -165,7 +166,9 @@ taskcaged serve \
 위 경로와 숫자는 배포 예시이며 protocol 기본값이 아니다. 상위 디렉터리와 서비스 계정은 배포 설정이
 준비하고, daemon은 socket을 owner-only `0600`으로 만든다. `max-concurrent-connections`는 UDS 연결
 handler의 메모리와 file descriptor 사용을 제한하는 서비스 설정이며 작업 실행 한도인
-`max-concurrent-tasks`와 별개다.
+`max-concurrent-tasks`와 별개다. `max-registry-tasks`는 예약, 실행 중 작업과 최소 10분 보존하는 완료
+결과를 합친 메모리 Registry 작업 수를 제한한다. 이 값은 `max-concurrent-tasks` 이상이어야 하며,
+Protocol v1 capability field나 공개 기본값은 아니다.
 
 ## Java SDK 배포 계획
 

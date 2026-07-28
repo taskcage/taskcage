@@ -17,17 +17,19 @@ use taskcaged::cgroup::CgroupPaths;
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 #[test]
-fn actual_serve_process_bounds_uds_connections_and_reuses_slots() {
-    if std::env::var_os("TASKCAGE_RUN_UDS_CONNECTION_LIMIT_E2E").is_none() {
+fn actual_serve_process_bounds_registry_without_execution_side_effects() {
+    if std::env::var_os("TASKCAGE_RUN_REGISTRY_CAPACITY_E2E").is_none() {
         eprintln!("NOT EXECUTED: 실제 Ubuntu cgroup v2 위임 환경이 필요합니다");
         return;
     }
 
-    let daemon_bin = required_path("TASKCAGE_UDS_CONNECTION_LIMIT_BIN");
+    let daemon_bin = required_path("TASKCAGE_REGISTRY_CAPACITY_BIN");
+    let true_bin = required_path("TASKCAGE_REGISTRY_CAPACITY_TRUE_BIN");
+    let touch_bin = required_path("TASKCAGE_REGISTRY_CAPACITY_TOUCH_BIN");
     let outer = CgroupPaths::resolve(None).expect("시험 process의 위임 cgroup root 확인");
     let nonce = unique_nonce();
     let outer_root = outer.root().to_path_buf();
-    let harness = outer_root.join(format!("uds-limit-harness-{nonce}"));
+    let harness = outer_root.join(format!("registry-limit-harness-{nonce}"));
     fs::create_dir(&harness).expect("E2E harness cgroup 생성");
     fs::write(
         harness.join("cgroup.procs"),
@@ -36,15 +38,16 @@ fn actual_serve_process_bounds_uds_connections_and_reuses_slots() {
     .expect("E2E harness를 별도 cgroup으로 이동");
     enable_controllers(&outer_root, &["cpu", "memory", "pids"]);
 
-    let daemon_root = outer_root.join(format!("uds-limit-e2e-{nonce}"));
+    let daemon_root = outer_root.join(format!("registry-limit-e2e-{nonce}"));
     fs::create_dir(&daemon_root).expect("실제 daemon용 전용 cgroup root 생성");
     require_controllers(&daemon_root, &["cpu", "memory", "pids"]);
-    let runtime = PathBuf::from("/run").join(format!("taskcage-uds-limit-{nonce}"));
+    let runtime = PathBuf::from("/run").join(format!("taskcage-registry-limit-{nonce}"));
     fs::create_dir(&runtime).expect("owner-only runtime directory 생성");
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))
         .expect("runtime directory mode 설정");
     let socket_path = runtime.join("taskcaged.sock");
     let log_path = runtime.join("taskcaged.log");
+    let rejected_marker = runtime.join("rejected-target-started");
     let mut guard = E2eGuard::new(daemon_root.clone(), runtime.clone(), log_path.clone());
 
     let log = OpenOptions::new()
@@ -61,9 +64,9 @@ fn actual_serve_process_bounds_uds_connections_and_reuses_slots() {
         .arg("--max-concurrent-tasks")
         .arg("1")
         .arg("--max-registry-tasks")
-        .arg("16")
-        .arg("--max-concurrent-connections")
         .arg("2")
+        .arg("--max-concurrent-connections")
+        .arg("4")
         .arg("--cleanup-timeout-ms")
         .arg("1000")
         .arg("--fail-stop-timeout-ms")
@@ -77,68 +80,71 @@ fn actual_serve_process_bounds_uds_connections_and_reuses_slots() {
     guard.child = Some(command.spawn().expect("실제 taskcaged serve 실행"));
     wait_for_socket(&socket_path, guard.child.as_mut().unwrap(), &log_path);
 
-    let baseline_fds = fd_count(guard.child.as_ref().unwrap().id());
-    let mut first = connect(&socket_path);
-    let mut second = connect(&socket_path);
-    first.write_all(&[0]).expect("첫 partial prefix 쓰기");
-    second.write_all(&[0]).expect("둘째 partial prefix 쓰기");
-    let fds_at_limit = wait_for_fd_count(
-        guard.child.as_ref().unwrap().id(),
-        baseline_fds + 2,
-        Duration::from_secs(2),
-    );
-    assert!(
-        fds_at_limit >= baseline_fds + 2,
-        "두 연결이 실제 daemon handler에 유지돼야 합니다: baseline={baseline_fds}, limit={fds_at_limit}"
-    );
-
-    for sequence in 0..100 {
-        let mut overflow = connect(&socket_path);
-        let request = json!({
+    let capabilities = send_request(
+        &socket_path,
+        &json!({
             "protocolVersion": 1,
-            "requestId": request_id(sequence),
-            "type": "submitTask",
-            "payload": {
-                "clientRequestId": client_request_id(sequence),
-                "command": {
-                    "program": "/bin/sleep",
-                    "args": ["5"],
-                    "workingDirectory": "/",
-                    "environment": {}
-                },
-                "limits": {
-                    "cpuMax": { "quotaMicros": 50000, "periodMicros": 100000 },
-                    "memoryMaxBytes": 67108864,
-                    "pidsMax": 8,
-                    "wallTimeLimitMs": 10000
-                },
-                "output": {
-                    "stdoutTailMaxBytes": 64,
-                    "stderrTailMaxBytes": 64
-                }
-            }
-        });
-        let _ = write_frame(&mut overflow, &request);
-        assert_closed_without_response(&mut overflow);
-    }
-    thread::sleep(Duration::from_millis(50));
-    let fds_after_overflow = fd_count(guard.child.as_ref().unwrap().id());
-    assert!(
-        fds_after_overflow <= fds_at_limit + 1,
-        "초과 연결 반복으로 daemon FD가 증가했습니다: at_limit={fds_at_limit}, after={fds_after_overflow}"
+            "requestId": request_id(0),
+            "type": "getCapabilities",
+            "payload": {}
+        }),
     );
+    assert_eq!(capabilities["payload"]["maxConcurrentTasks"], 1);
+    assert_eq!(capabilities["payload"].get("maxRegistryTasks"), None);
+
+    let first_payload = submit_payload(client_request_id(1), &true_bin, Vec::new());
+    let first = send_request(&socket_path, &submit_request(1, first_payload.clone()));
+    assert_eq!(first["type"], "taskAccepted", "첫 submit 응답: {first}");
+    let first_task_id = first["payload"]["taskId"]
+        .as_str()
+        .expect("첫 taskId")
+        .to_owned();
+    let first_finished = wait_for_finished(&socket_path, &first_task_id, 10);
+    assert_eq!(first_finished["payload"]["terminationReason"], "EXITED");
+
+    let second_payload = submit_payload(client_request_id(2), &true_bin, Vec::new());
+    let second = send_request(&socket_path, &submit_request(2, second_payload));
+    assert_eq!(second["type"], "taskAccepted", "둘째 submit 응답: {second}");
+    let second_task_id = second["payload"]["taskId"]
+        .as_str()
+        .expect("둘째 taskId")
+        .to_owned();
+    let second_finished = wait_for_finished(&socket_path, &second_task_id, 20);
+    assert_eq!(second_finished["payload"]["terminationReason"], "EXITED");
     assert_eq!(count_job_cgroups(&daemon_root.join("jobs")), 0);
 
-    drop(first);
-    let response = retry_capabilities(&socket_path);
-    assert_eq!(
-        response["type"], "capabilities",
-        "slot 재사용 응답: {response}"
+    let rejected_payload = submit_payload(
+        client_request_id(3),
+        &touch_bin,
+        vec![rejected_marker.to_string_lossy().into_owned()],
     );
-    assert_eq!(response["payload"]["maxConcurrentTasks"], 1);
-    assert_eq!(response["payload"].get("maxConcurrentConnections"), None);
+    let rejected = send_request(&socket_path, &submit_request(3, rejected_payload));
+    assert_eq!(rejected["type"], "error", "셋째 submit 응답: {rejected}");
+    assert_eq!(rejected["payload"]["code"], "CAPACITY_EXHAUSTED");
+    assert_eq!(rejected["payload"]["retryable"], true);
+    assert_eq!(
+        rejected["payload"]["message"],
+        "task registry retention capacity is exhausted"
+    );
+    thread::sleep(Duration::from_millis(100));
+    assert!(!rejected_marker.exists(), "거절된 target이 실행됐습니다");
+    assert_eq!(count_job_cgroups(&daemon_root.join("jobs")), 0);
 
-    drop(second);
+    let existing = send_request(&socket_path, &get_task_request(30, &first_task_id));
+    assert_eq!(existing["type"], "task");
+    assert_eq!(existing["payload"]["state"], "FINISHED");
+
+    let duplicate = send_request(&socket_path, &submit_request(31, first_payload.clone()));
+    assert_eq!(duplicate["type"], "task");
+    assert_eq!(duplicate["payload"]["taskId"], first_task_id);
+
+    let mut conflict_payload = first_payload;
+    conflict_payload["command"]["args"] = json!(["different"]);
+    let conflict = send_request(&socket_path, &submit_request(32, conflict_payload));
+    assert_eq!(conflict["type"], "error");
+    assert_eq!(conflict["payload"]["code"], "IDEMPOTENCY_CONFLICT");
+    assert_eq!(count_job_cgroups(&daemon_root.join("jobs")), 0);
+
     let daemon_pid = i32::try_from(guard.child.as_ref().unwrap().id()).expect("daemon PID 변환");
     assert_eq!(unsafe { libc::kill(daemon_pid, libc::SIGTERM) }, 0);
     let status = wait_for_exit(guard.child.as_mut().unwrap(), Duration::from_secs(5))
@@ -165,70 +171,84 @@ fn actual_serve_process_bounds_uds_connections_and_reuses_slots() {
     assert!(!runtime.exists(), "시험용 runtime directory가 남았습니다");
 }
 
-fn retry_capabilities(socket: &Path) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(2);
+fn submit_payload(client_request_id: String, program: &Path, args: Vec<String>) -> Value {
+    json!({
+        "clientRequestId": client_request_id,
+        "command": {
+            "program": program,
+            "args": args,
+            "workingDirectory": "/",
+            "environment": {}
+        },
+        "limits": {
+            "cpuMax": { "quotaMicros": 50000, "periodMicros": 100000 },
+            "memoryMaxBytes": 67108864,
+            "pidsMax": 8,
+            "wallTimeLimitMs": 5000
+        },
+        "output": {
+            "stdoutTailMaxBytes": 64,
+            "stderrTailMaxBytes": 64
+        }
+    })
+}
+
+fn submit_request(sequence: u32, payload: Value) -> Value {
+    json!({
+        "protocolVersion": 1,
+        "requestId": request_id(sequence),
+        "type": "submitTask",
+        "payload": payload
+    })
+}
+
+fn get_task_request(sequence: u32, task_id: &str) -> Value {
+    json!({
+        "protocolVersion": 1,
+        "requestId": request_id(sequence),
+        "type": "getTask",
+        "payload": { "taskId": task_id }
+    })
+}
+
+fn wait_for_finished(socket: &Path, task_id: &str, request_sequence: u32) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        let mut stream = connect(socket);
-        let request = json!({
-            "protocolVersion": 1,
-            "requestId": request_id(999),
-            "type": "getCapabilities",
-            "payload": {}
-        });
-        if write_frame(&mut stream, &request).is_ok()
-            && let Ok(response) = read_frame(&mut stream)
-        {
+        let response = send_request(socket, &get_task_request(request_sequence, task_id));
+        if response["type"] == "task" && response["payload"]["state"] == "FINISHED" {
             return response;
         }
-        assert!(Instant::now() < deadline, "연결 슬롯 재사용 timeout");
+        assert!(
+            Instant::now() < deadline,
+            "FINISHED polling timeout: {response}"
+        );
         thread::sleep(POLL_INTERVAL);
     }
 }
 
-fn connect(path: &Path) -> std::os::unix::net::UnixStream {
-    let stream = std::os::unix::net::UnixStream::connect(path).expect("UDS 연결");
+fn send_request(socket: &Path, value: &Value) -> Value {
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).expect("UDS 연결");
     stream
-        .set_read_timeout(Some(Duration::from_millis(500)))
+        .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("UDS read timeout 설정");
-    stream
-        .set_write_timeout(Some(Duration::from_secs(1)))
-        .expect("UDS write timeout 설정");
-    stream
-}
-
-fn write_frame(stream: &mut std::os::unix::net::UnixStream, value: &Value) -> io::Result<()> {
     let payload = serde_json::to_vec(value).expect("protocol 요청 직렬화");
     let length = u32::try_from(payload.len()).expect("시험 frame 길이");
-    stream.write_all(&length.to_be_bytes())?;
-    stream.write_all(&payload)
-}
+    stream
+        .write_all(&length.to_be_bytes())
+        .expect("frame prefix 쓰기");
+    stream.write_all(&payload).expect("frame payload 쓰기");
 
-fn read_frame(stream: &mut std::os::unix::net::UnixStream) -> io::Result<Value> {
     let mut prefix = [0_u8; 4];
-    stream.read_exact(&mut prefix)?;
-    let length = usize::try_from(u32::from_be_bytes(prefix)).expect("frame 길이 변환");
-    if !(1..=1_048_576).contains(&length) {
-        return Err(io::Error::other("응답 frame 길이가 범위를 벗어났습니다"));
-    }
-    let mut payload = vec![0_u8; length];
-    stream.read_exact(&mut payload)?;
-    serde_json::from_slice(&payload).map_err(io::Error::other)
-}
-
-fn assert_closed_without_response(stream: &mut std::os::unix::net::UnixStream) {
-    let mut byte = [0_u8; 1];
-    match stream.read(&mut byte) {
-        Ok(0) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::ConnectionReset
-                    | io::ErrorKind::BrokenPipe
-                    | io::ErrorKind::UnexpectedEof
-            ) => {}
-        Ok(read) => panic!("한도 초과 연결에서 {read}바이트 응답을 받았습니다"),
-        Err(error) => panic!("한도 초과 연결이 즉시 닫히지 않았습니다: {error}"),
-    }
+    stream
+        .read_exact(&mut prefix)
+        .expect("response prefix 읽기");
+    let length = usize::try_from(u32::from_be_bytes(prefix)).expect("response 길이 변환");
+    assert!((1..=1_048_576).contains(&length));
+    let mut response = vec![0_u8; length];
+    stream
+        .read_exact(&mut response)
+        .expect("response payload 읽기");
+    serde_json::from_slice(&response).expect("response JSON 파싱")
 }
 
 fn move_child_before_exec(command: &mut Command, daemon_root: &Path) {
@@ -291,27 +311,6 @@ fn wait_for_exit(child: &mut Child, timeout: Duration) -> Option<std::process::E
     }
 }
 
-fn fd_count(pid: u32) -> usize {
-    fs::read_dir(format!("/proc/{pid}/fd"))
-        .expect("daemon fd directory 읽기")
-        .count()
-}
-
-fn wait_for_fd_count(pid: u32, minimum: usize, timeout: Duration) -> usize {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let count = fd_count(pid);
-        if count >= minimum {
-            return count;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "daemon FD가 연결 한도까지 증가하지 않았습니다: expected={minimum}, actual={count}"
-        );
-        thread::sleep(POLL_INTERVAL);
-    }
-}
-
 fn count_job_cgroups(jobs: &Path) -> usize {
     fs::read_dir(jobs)
         .expect("jobs cgroup 열거")
@@ -360,11 +359,11 @@ fn cgroup_populated(path: &Path) -> io::Result<bool> {
 }
 
 fn request_id(sequence: u32) -> String {
-    format!("70000000-0000-4000-8000-{sequence:012}")
+    format!("72000000-0000-4000-8000-{sequence:012}")
 }
 
 fn client_request_id(sequence: u32) -> String {
-    format!("71000000-0000-4000-8000-{sequence:012}")
+    format!("73000000-0000-4000-8000-{sequence:012}")
 }
 
 fn required_path(name: &str) -> PathBuf {
@@ -443,6 +442,7 @@ impl E2eGuard {
         for path in [
             self.runtime.join("taskcaged.sock"),
             self.runtime.join(".taskcaged.lock"),
+            self.runtime.join("rejected-target-started"),
             self.log.clone(),
         ] {
             remove_file_if_exists(&path, &mut errors);
@@ -456,11 +456,11 @@ impl E2eGuard {
 impl Drop for E2eGuard {
     fn drop(&mut self) {
         if std::thread::panicking() && self.log.exists() {
-            eprintln!("taskcaged UDS limit E2E log:\n{}", read_log(&self.log));
+            eprintln!("taskcaged Registry limit E2E log:\n{}", read_log(&self.log));
         }
         let errors = self.cleanup();
         if !errors.is_empty() {
-            eprintln!("taskcaged UDS limit E2E guard 오류: {errors:?}");
+            eprintln!("taskcaged Registry limit E2E guard 오류: {errors:?}");
         }
     }
 }

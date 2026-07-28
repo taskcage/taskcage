@@ -14,6 +14,8 @@ use crate::protocol::{
 };
 #[cfg(target_os = "linux")]
 use crate::submit::SubmitCoordinator;
+#[cfg(target_os = "linux")]
+use crate::submit::TaskRegistrySettings;
 #[cfg(test)]
 use crate::submit::TaskStartTime;
 use crate::submit::{
@@ -174,6 +176,7 @@ impl ProtocolHandlers<SubmitCoordinator> {
     pub(crate) fn initialize(
         preflight: Result<VerifiedEnvironment, PreflightError>,
         capacity_settings: TaskCapacitySettings,
+        registry_settings: TaskRegistrySettings,
         fail_stop: Arc<FailStopCoordinator>,
     ) -> crate::Result<Self> {
         let core_fail_stop = Arc::clone(&fail_stop);
@@ -182,7 +185,12 @@ impl ProtocolHandlers<SubmitCoordinator> {
             capacity_settings,
             fail_stop,
             move |environment, settings| {
-                SubmitCoordinator::initialize(environment, settings, core_fail_stop)
+                SubmitCoordinator::initialize(
+                    environment,
+                    settings,
+                    registry_settings,
+                    core_fail_stop,
+                )
             },
         )
     }
@@ -984,6 +992,29 @@ mod tests {
         .unwrap();
         assert_eq!(serde_json::to_value(capacity_response).unwrap(), expected);
 
+        let registry_capacity = ready_handlers(
+            FakeCore::with_submit(Err(SubmitError::Registry(RegistryError::CapacityExhausted))),
+            1,
+        );
+        let registry_capacity_response = handled(
+            registry_capacity
+                .handle_submit(submit_request(REQUEST_ID, submit_payload()), context)
+                .await,
+        );
+        assert!(matches!(
+            registry_capacity_response,
+            Response::Error {
+                request_id,
+                payload: ErrorPayload {
+                    code: ErrorCode::CapacityExhausted,
+                    message,
+                    retryable: true,
+                },
+                ..
+            } if request_id == REQUEST_ID
+                && message == "task registry retention capacity is exhausted"
+        ));
+
         let conflict = ready_handlers(
             FakeCore::with_submit(Err(SubmitError::Registry(
                 RegistryError::IdempotencyConflict(CLIENT_REQUEST_ID.to_owned()),
@@ -1272,6 +1303,7 @@ mod tests {
         let handlers = ProtocolHandlers::initialize(
             Ok(environment),
             TaskCapacitySettings::new(1).unwrap(),
+            TaskRegistrySettings::new(16).unwrap(),
             test_fail_stop(),
         )
         .unwrap();
@@ -1437,6 +1469,7 @@ mod tests {
                 SubmitCoordinator::initialize_with_cgroup_create_faults(
                     environment,
                     settings,
+                    TaskRegistrySettings::new(16).unwrap(),
                     core_fail_stop,
                     core_faults,
                 )
@@ -1658,6 +1691,7 @@ mod tests {
         let handlers = ProtocolHandlers::initialize(
             Ok(environment),
             TaskCapacitySettings::new(1).unwrap(),
+            TaskRegistrySettings::new(16).unwrap(),
             test_fail_stop(),
         )
         .unwrap();

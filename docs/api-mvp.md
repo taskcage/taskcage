@@ -16,6 +16,7 @@ MVP는 단일 Linux 호스트에서 Java 17+ SDK와 `taskcaged`가 통신하는 
 | cgroup 진입 | 원자적 cgroup 진입이 불가능하면 작업을 거절하며 무제한 상태로 실행하지 않음 |
 | 자원 예산 | CPU·메모리·PID·벽시계 시간 제한을 모두 요청에 명시 |
 | 실행 슬롯 | 전역 슬롯이 모두 사용 중이면 즉시 `CAPACITY_EXHAUSTED` 오류. 대기열 없음 |
+| Registry 상한 | 예약·RUNNING·FINISHED 보존 작업 수가 명시한 상한이면 새 ID를 즉시 `CAPACITY_EXHAUSTED`로 거절 |
 | 출력 상한 | stdout/stderr의 마지막 N bytes만 유지하고, 상한을 넘으면 잘림 여부 반환 |
 | 결과 보관 | 메모리에 최소 10분 보관. 데몬 재시작 뒤 실행 중 작업의 재개는 지원하지 않음 |
 
@@ -273,8 +274,17 @@ process-wide fail-stop 계약으로 전환한다. `LIMIT_EXCEEDS_POLICY`는 cgro
 }
 ```
 
-슬롯이 없으면 데몬은 작업을 만들지 않고 `CAPACITY_EXHAUSTED` 오류를 반환한다. 같은
+실행 슬롯이 없으면 데몬은 작업을 만들지 않고 `CAPACITY_EXHAUSTED` 오류를 반환한다. 같은
 `clientRequestId` 재전송에는 새 작업 대신 기존 `taskId`와 현재 상태를 반환한다.
+
+daemon은 예약, `RUNNING`, 최소 보존 기간 안의 `FINISHED`와 정리 불확실 작업을 각각 한 건으로 세는
+0보다 큰 메모리 Registry 상한도 필수 서비스 설정으로 받는다. 이 값은 `maxConcurrentTasks` 이상이어야
+하며 공개 기본값이나 Protocol v1 field가 아니다. 만료된 완료 결과를 먼저 정리한 뒤에도 상한인 경우,
+서로 다른 새 `clientRequestId`는 task ID, Registry 항목, 실행 슬롯, cgroup과 process를 만들기 전에
+`CAPACITY_EXHAUSTED`, `retryable: true`와 `task registry retention capacity is exhausted` message로
+거절한다. 같은 ID·같은 본문은 Registry가 가득 차도 기존 작업을 반환하고, 같은 ID·다른 본문은
+`IDEMPOTENCY_CONFLICT`를 유지한다. SDK는 분기를 message가 아니라 error code로 수행한다. 자세한
+근거는 [ADR 0008](decisions/0008-bound-in-memory-task-registry.md)을 따른다.
 
 ### `getTask`
 
@@ -370,6 +380,9 @@ process-wide fail-stop 계약으로 전환한다. `LIMIT_EXCEEDS_POLICY`는 cgro
 ## 실행·출력·보관 정책
 
 - 데몬은 전역 최대 실행 수만 사용한다. 모든 슬롯이 사용 중이면 `submitTask`는 `CAPACITY_EXHAUSTED` 오류를 반환하며 작업을 만들지 않는다.
+- 메모리 Registry 작업 수는 명시적 상한을 넘지 않는다. 예약, RUNNING, FINISHED 보존과 정리 불확실
+  작업은 각각 한 슬롯을 사용하며, RUNNING 이전의 안전한 rollback과 보존 기간이 지난 FINISHED만
+  슬롯을 되돌린다. 정확히 10분 경계의 결과는 계속 보존한다.
 - stdout 또는 stderr가 각자의 상한을 초과하면 데몬은 해당 스트림의 오래된 바이트를 버리고 마지막 N raw bytes만 유지한다. 작업은 계속 실행하며, `stdoutTail` 또는 `stderrTail`과 `*Truncated: true`를 결과에 반환한다. 유효하지 않은 UTF-8 바이트는 응답 직전 U+FFFD로 치환한다.
 - 결과와 `clientRequestId` 매핑은 완료 시점부터 최소 10분 보관한다. 기간 뒤 조회와 취소는 `TASK_NOT_FOUND`를 반환할 수 있다.
 - 데몬 재시작으로 연결이 끊기면 SDK는 같은 `clientRequestId`로 제출을 재시도할 수 있다. 진행 중 작업의 재개는 지원하지 않으며, 데몬은 시작 시 남은 TaskCage cgroup을 안전하게 정리한다.
@@ -448,7 +461,7 @@ process-wide fail-stop 계약으로 전환한다. `LIMIT_EXCEEDS_POLICY`는 cgro
 | `UNSUPPORTED_PROTOCOL_VERSION` | 지원하지 않는 프로토콜 버전 | 아니오 |
 | `FRAME_TOO_LARGE` | 프레임 크기가 최대치를 넘음 | 아니오 |
 | `ENVIRONMENT_UNAVAILABLE` | cgroup v2, 필수 controller·권한 또는 안전한 작업 격리 상태를 사용할 수 없음 | 아니오 |
-| `CAPACITY_EXHAUSTED` | 전역 실행 슬롯이 모두 사용 중임 | 예 |
+| `CAPACITY_EXHAUSTED` | 전역 실행 슬롯이 모두 사용 중이거나 보존 계약을 지키면서 메모리 Registry에 새 작업을 수용할 수 없음 | 예 |
 | `TASK_NOT_FOUND` | 작업이 없거나 보관 기간이 지남 | 아니오 |
 | `TASK_ALREADY_FINISHED` | 완료된 작업 취소 요청 | 아니오 |
 | `IDEMPOTENCY_CONFLICT` | 같은 clientRequestId에 다른 요청 본문을 사용함 | 아니오 |

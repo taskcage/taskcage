@@ -528,6 +528,47 @@ trap cleanup_uds_connection_limit_unit EXIT INT TERM
   --nocapture
 trap - EXIT INT TERM
 
+# 실제 serve process가 FINISHED 보존을 포함한 Registry 작업 수를 제한하고 새 target을 만들지 않는다.
+registry_capacity_test=""
+while IFS= read -r artifact; do
+  if [[ "${artifact}" == *'"target":{"kind":["test"]'* &&
+        "${artifact}" == *'"name":"registry_capacity_e2e"'* &&
+        "${artifact}" == *'"executable":"'* ]]; then
+    registry_capacity_test="${artifact#*\"executable\":\"}"
+    registry_capacity_test="${registry_capacity_test%%\"*}"
+  fi
+done < <(cargo test -p taskcaged --test registry_capacity_e2e --no-run --message-format=json)
+if [[ -z "${registry_capacity_test}" || ! -x "${registry_capacity_test}" ]]; then
+  echo "FAIL: 실제 Registry capacity E2E 실행 파일을 찾지 못했습니다" >&2
+  exit 1
+fi
+
+unit_sequence=$((unit_sequence + 1))
+registry_capacity_unit="taskcage-registry-capacity-$$-${unit_sequence}"
+cleanup_registry_capacity_unit() {
+  "${taskcage_systemctl[@]}" stop "${registry_capacity_unit}" >/dev/null 2>&1 || true
+  "${taskcage_systemctl[@]}" reset-failed "${registry_capacity_unit}" >/dev/null 2>&1 || true
+}
+trap cleanup_registry_capacity_unit EXIT INT TERM
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="${registry_capacity_unit}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --property=TimeoutStopSec=10s \
+  --setenv=TASKCAGE_RUN_REGISTRY_CAPACITY_E2E=1 \
+  --setenv=TASKCAGE_REGISTRY_CAPACITY_BIN="${taskcage_bin}" \
+  --setenv=TASKCAGE_REGISTRY_CAPACITY_TRUE_BIN="${true_bin}" \
+  --setenv=TASKCAGE_REGISTRY_CAPACITY_TOUCH_BIN="${touch_bin}" \
+  "${registry_capacity_test}" \
+  'actual_serve_process_bounds_registry_without_execution_side_effects' \
+  --exact \
+  --nocapture
+trap - EXIT INT TERM
+
 # 실제 daemon crash 뒤 stale socket과 잔여 실행을 다음 serve process가 요청 수락 전에 복구한다.
 restart_recovery_test=""
 while IFS= read -r artifact; do

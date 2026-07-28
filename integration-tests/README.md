@@ -73,6 +73,9 @@ Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 
 22. 실제 `taskcaged serve` process가 명시한 UDS 연결 수까지만 partial frame handler를 유지하고,
     초과 연결을 요청 처리 없이 닫으며 반복 연결 뒤에도 file descriptor가 증가하지 않고 슬롯을
     재사용한다.
+23. 실제 `taskcaged serve` process가 예약·RUNNING·FINISHED를 합친 Registry 작업 수를 명시한 상한에
+    묶고, 보존 중 상한을 넘는 새 요청을 `CAPACITY_EXHAUSTED`로 거절하면서 task ID, cgroup과 target
+    실행 side effect를 만들지 않으며 기존 조회·멱등 응답과 충돌 판정을 유지한다.
 
 실행 방법:
 
