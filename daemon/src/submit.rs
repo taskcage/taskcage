@@ -32,11 +32,13 @@ use crate::fail_stop::{
 #[cfg(target_os = "linux")]
 use crate::preflight::VerifiedEnvironment;
 #[cfg(any(target_os = "linux", test))]
-use crate::protocol::{ErrorCode, ResourceLimits, TaskPayload};
+use crate::protocol::{ErrorCode, TaskPayload};
 use crate::protocol::{PROTOCOL_VERSION, Request, SubmitTaskPayload};
+#[cfg(any(target_os = "linux", test))]
+use crate::resource_budget::VerifiedEffectiveLimits;
 use crate::resource_budget::{ResourceBudget, ResourceBudgetError};
 #[cfg(target_os = "linux")]
-use crate::runner::{CompletedTask, TaskRunConfig, TaskRunner};
+use crate::runner::{CompletedTask, TaskRunConfig, TaskRunFailureKind, TaskRunner};
 
 #[cfg(any(target_os = "linux", test))]
 const CAPACITY_EXHAUSTED_MESSAGE: &str = "all task execution slots are in use";
@@ -176,8 +178,29 @@ impl SubmitMetadata {
 pub(crate) struct SubmitOutcome {
     pub(crate) request_id: String,
     pub(crate) task_id: String,
-    pub(crate) effective_limits: ResourceLimits,
+    pub(crate) effective_limits: Option<VerifiedEffectiveLimits>,
     pub(crate) observation: SubmitObservation,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug)]
+pub(crate) struct VerifiedRunningTask {
+    snapshot: TaskPayload,
+    effective_limits: VerifiedEffectiveLimits,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl VerifiedRunningTask {
+    pub(crate) fn new(snapshot: TaskPayload, effective_limits: VerifiedEffectiveLimits) -> Self {
+        Self {
+            snapshot,
+            effective_limits,
+        }
+    }
+
+    fn into_parts(self) -> (TaskPayload, VerifiedEffectiveLimits) {
+        (self.snapshot, self.effective_limits)
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -263,6 +286,25 @@ impl SubmitCoordinator {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn initialize_with_cgroup_create_faults(
+        environment: VerifiedEnvironment,
+        capacity_settings: TaskCapacitySettings,
+        fail_stop: Arc<FailStopCoordinator>,
+        faults: Arc<crate::cgroup::CgroupCreateFaults>,
+    ) -> crate::Result<Self> {
+        Ok(Self {
+            registry: TaskRegistry::new(),
+            runner: Arc::new(TaskRunner::initialize_with_cgroup_create_faults(
+                environment,
+                Arc::clone(&fail_stop),
+                faults,
+            )?),
+            capacity: Arc::new(TaskCapacity::new(capacity_settings)),
+            fail_stop,
+        })
+    }
+
     #[cfg_attr(
         not(test),
         expect(
@@ -323,14 +365,23 @@ impl SubmitCoordinator {
                     .map_err(|error| {
                         let capacity_reusable = error.capacity_reusable();
                         let cleanup_complete = error.cleanup_complete();
-                        ExecutionFailure::new(
-                            SubmitFailure::new(
+                        let failure = match error.kind() {
+                            TaskRunFailureKind::CgroupReadBackMismatch => SubmitFailure::new(
+                                ErrorCode::InternalError,
+                                "cgroup limit read-back verification failed",
+                            ),
+                            TaskRunFailureKind::CgroupReadBackRollbackUncertain => {
+                                SubmitFailure::new(
+                                    ErrorCode::EnvironmentUnavailable,
+                                    "cgroup v2 execution environment is unavailable",
+                                )
+                            }
+                            TaskRunFailureKind::Other => SubmitFailure::new(
                                 ErrorCode::InternalError,
                                 error.into_error().to_string(),
                             ),
-                            capacity_reusable,
-                            cleanup_complete,
-                        )
+                        };
+                        ExecutionFailure::new(failure, capacity_reusable, cleanup_complete)
                     })
             },
         )
@@ -364,6 +415,16 @@ impl SubmitCoordinator {
         self.registry
             .snapshot_by_client_request_id(client_request_id)
     }
+
+    #[cfg(test)]
+    pub(crate) fn capacity_is_available_for_test(&self) -> bool {
+        self.capacity.try_acquire().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_capacity_for_test(&self) -> u32 {
+        self.capacity.retained_for_fail_stop()
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -383,7 +444,11 @@ async fn coordinate_submit<C, E, Fut>(
 ) -> Result<SubmitOutcome, SubmitError>
 where
     C: RegistryClock + Send + 'static,
-    E: FnOnce(SubmitExecutionConfig, oneshot::Sender<TaskPayload>, CancellationRuntime) -> Fut
+    E: FnOnce(
+            SubmitExecutionConfig,
+            oneshot::Sender<VerifiedRunningTask>,
+            CancellationRuntime,
+        ) -> Fut
         + Send
         + 'static,
     Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>> + Send + 'static,
@@ -412,19 +477,23 @@ async fn coordinate_validated_submit<C, E, Fut>(
 ) -> Result<SubmitOutcome, SubmitError>
 where
     C: RegistryClock + Send + 'static,
-    E: FnOnce(SubmitExecutionConfig, oneshot::Sender<TaskPayload>, CancellationRuntime) -> Fut
+    E: FnOnce(
+            SubmitExecutionConfig,
+            oneshot::Sender<VerifiedRunningTask>,
+            CancellationRuntime,
+        ) -> Fut
         + Send
         + 'static,
     Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>> + Send + 'static,
 {
-    let effective_limits = validated.payload().limits.clone();
     if let Some(waiter) = registry.existing_submit(&validated)? {
         let task_id = waiter.task_id().to_owned();
+        let observation = waiter.wait().await;
         return Ok(SubmitOutcome {
             request_id,
+            effective_limits: registry.effective_limits_for(&task_id, &observation)?,
             task_id,
-            effective_limits,
-            observation: waiter.wait().await,
+            observation,
         });
     }
     let mut metadata = metadata;
@@ -433,7 +502,7 @@ where
             return Ok(SubmitOutcome {
                 request_id,
                 task_id: String::new(),
-                effective_limits,
+                effective_limits: None,
                 observation: SubmitObservation::Failed(SubmitFailure::new(
                     ErrorCode::EnvironmentUnavailable,
                     "cgroup v2 execution environment is unavailable",
@@ -471,7 +540,7 @@ where
                 return Ok(SubmitOutcome {
                     request_id,
                     task_id,
-                    effective_limits,
+                    effective_limits: None,
                     observation,
                 });
             };
@@ -502,8 +571,8 @@ where
 
     Ok(SubmitOutcome {
         request_id,
+        effective_limits: registry.effective_limits_for(&task_id, &observation)?,
         task_id,
-        effective_limits,
         observation,
     })
 }
@@ -519,7 +588,11 @@ async fn run_owner<C, E, Fut>(
     fail_stop: Arc<FailStopCoordinator>,
 ) where
     C: RegistryClock,
-    E: FnOnce(SubmitExecutionConfig, oneshot::Sender<TaskPayload>, CancellationRuntime) -> Fut,
+    E: FnOnce(
+        SubmitExecutionConfig,
+        oneshot::Sender<VerifiedRunningTask>,
+        CancellationRuntime,
+    ) -> Fut,
     Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>>,
 {
     let (running_sender, mut running_receiver) = oneshot::channel();
@@ -575,7 +648,7 @@ async fn run_owner<C, E, Fut>(
 #[cfg(any(target_os = "linux", test))]
 async fn run_after_running<C, Fut>(
     owner: SubmitExecutionOwner<C>,
-    running: TaskPayload,
+    running: VerifiedRunningTask,
     execution: Fut,
     cancellation: RunningCancellation,
     initial_sender: oneshot::Sender<SubmitObservation>,
@@ -589,17 +662,19 @@ async fn run_after_running<C, Fut>(
         active,
         fail_stop,
     } = runtime;
-    let running = match owner.publish_running_with_cancellation(running, cancellation) {
-        Ok(running) => running,
-        Err(error) => {
-            let failure = SubmitFailure::new(ErrorCode::InternalError, error.to_string());
-            let observation = owner.fail(failure);
-            let _ = initial_sender.send(observation);
-            capacity_permit.retain_for_fail_stop();
-            let _ = execution.await;
-            return;
-        }
-    };
+    let (running, effective_limits) = running.into_parts();
+    let running =
+        match owner.publish_running_with_cancellation(running, effective_limits, cancellation) {
+            Ok(running) => running,
+            Err(error) => {
+                let failure = SubmitFailure::new(ErrorCode::InternalError, error.to_string());
+                let observation = owner.fail(failure);
+                let _ = initial_sender.send(observation);
+                capacity_permit.retain_for_fail_stop();
+                let _ = execution.await;
+                return;
+            }
+        };
     // 빠른 종료가 뒤따라도 최초 submit 호출에는 RUNNING을 고정해 전달한다.
     let _ = initial_sender.send(SubmitObservation::Task(running));
     match execution.await {
@@ -625,7 +700,7 @@ async fn run_after_running<C, Fut>(
 #[cfg(any(target_os = "linux", test))]
 fn finish_after_running<C>(
     owner: SubmitExecutionOwner<C>,
-    running: TaskPayload,
+    running: VerifiedRunningTask,
     cancellation: RunningCancellation,
     completion: Result<ExecutionCompletion, ExecutionFailure>,
     initial_sender: oneshot::Sender<SubmitObservation>,
@@ -638,16 +713,18 @@ fn finish_after_running<C>(
         active,
         fail_stop,
     } = runtime;
-    let running = match owner.publish_running_with_cancellation(running, cancellation) {
-        Ok(running) => running,
-        Err(error) => {
-            let failure = SubmitFailure::new(ErrorCode::InternalError, error.to_string());
-            let observation = owner.fail(failure);
-            let _ = initial_sender.send(observation);
-            capacity_permit.retain_for_fail_stop();
-            return;
-        }
-    };
+    let (running, effective_limits) = running.into_parts();
+    let running =
+        match owner.publish_running_with_cancellation(running, effective_limits, cancellation) {
+            Ok(running) => running,
+            Err(error) => {
+                let failure = SubmitFailure::new(ErrorCode::InternalError, error.to_string());
+                let observation = owner.fail(failure);
+                let _ = initial_sender.send(observation);
+                capacity_permit.retain_for_fail_stop();
+                return;
+            }
+        };
     let _ = initial_sender.send(SubmitObservation::Task(running));
     match completion {
         Ok(completed) => {
@@ -1027,6 +1104,13 @@ mod tests {
         }
     }
 
+    fn verified_running(config: &SubmitExecutionConfig) -> VerifiedRunningTask {
+        VerifiedRunningTask::new(
+            running(&config.task_id),
+            config.budget.verified_effective_limits_for_test(),
+        )
+    }
+
     fn finished(task_id: &str) -> TaskPayload {
         TaskPayload::Finished {
             task_id: task_id.to_owned(),
@@ -1232,7 +1316,7 @@ mod tests {
                     metadata(&format!("33333333-3333-3333-3333-{index:012}")),
                     move |config, running_sender, _cancellation| async move {
                         executor_starts.fetch_add(1, Ordering::SeqCst);
-                        running_sender.send(running(&config.task_id)).unwrap();
+                        running_sender.send(verified_running(&config)).unwrap();
                         release.notified().await;
                         Ok(ExecutionCompletion::Test(finished(&config.task_id)))
                     },
@@ -1309,7 +1393,7 @@ mod tests {
                             for counter in &counters[index] {
                                 counter.fetch_add(1, Ordering::SeqCst);
                             }
-                            running_sender.send(running(&config.task_id)).unwrap();
+                            running_sender.send(verified_running(&config)).unwrap();
                             Ok(ExecutionCompletion::Test(finished(&config.task_id)))
                         }
                     },
@@ -1390,7 +1474,7 @@ mod tests {
             metadata(OTHER_TASK_ID),
             move |config, running_sender, _cancellation| async move {
                 retry_starts.fetch_add(1, Ordering::SeqCst);
-                running_sender.send(running(&config.task_id)).unwrap();
+                running_sender.send(verified_running(&config)).unwrap();
                 Ok(ExecutionCompletion::Test(finished(&config.task_id)))
             },
         )
@@ -1433,7 +1517,7 @@ mod tests {
             {
                 let release = Arc::clone(&release);
                 move |config, running_sender, _cancellation| async move {
-                    running_sender.send(running(&config.task_id)).unwrap();
+                    running_sender.send(verified_running(&config)).unwrap();
                     release.notified().await;
                     Ok(ExecutionCompletion::Test(finished(&config.task_id)))
                 }
@@ -1492,7 +1576,7 @@ mod tests {
                     for counter in side_effects.iter() {
                         counter.fetch_add(1, Ordering::SeqCst);
                     }
-                    running_sender.send(running(&config.task_id)).unwrap();
+                    running_sender.send(verified_running(&config)).unwrap();
                     release.notified().await;
                     Ok(ExecutionCompletion::Test(finished(&config.task_id)))
                 },
@@ -1579,7 +1663,7 @@ mod tests {
                 for counter in retried_side_effects.iter() {
                     counter.fetch_add(1, Ordering::SeqCst);
                 }
-                running_sender.send(running(&config.task_id)).unwrap();
+                running_sender.send(verified_running(&config)).unwrap();
                 Ok(ExecutionCompletion::Test(finished(&config.task_id)))
             },
         )
@@ -1612,7 +1696,7 @@ mod tests {
                 let cleanup_release = Arc::clone(&cleanup_release);
                 let cancel_actions = Arc::clone(&cancel_actions);
                 move |config, running_sender, cancellation| async move {
-                    running_sender.send(running(&config.task_id)).unwrap();
+                    running_sender.send(verified_running(&config)).unwrap();
                     cancellation.cancelled().await;
                     cancel_actions.fetch_add(1, Ordering::SeqCst);
                     cleanup_started.notify_one();
@@ -1692,7 +1776,7 @@ mod tests {
             metadata(NONZERO_TASK_ID),
             move |config, running_sender, _cancellation| async move {
                 reused_counter.fetch_add(1, Ordering::SeqCst);
-                running_sender.send(running(&config.task_id)).unwrap();
+                running_sender.send(verified_running(&config)).unwrap();
                 Ok(ExecutionCompletion::Test(finished(&config.task_id)))
             },
         )
@@ -1721,7 +1805,7 @@ mod tests {
             metadata(TASK_ID),
             move |config, running_sender, _cancellation| async move {
                 first_starts.fetch_add(1, Ordering::SeqCst);
-                running_sender.send(running(&config.task_id)).unwrap();
+                running_sender.send(verified_running(&config)).unwrap();
                 first_fail.notified().await;
                 Err(retained_failure(SubmitFailure::new(
                     ErrorCode::InternalError,
@@ -1858,7 +1942,7 @@ mod tests {
             validated.clone(),
             metadata(TASK_ID),
             move |config, running_sender, _cancellation| async move {
-                running_sender.send(running(&config.task_id)).unwrap();
+                running_sender.send(verified_running(&config)).unwrap();
                 Ok(ExecutionCompletion::Test(finished(&config.task_id)))
             },
         )
@@ -1931,6 +2015,69 @@ mod tests {
         assert_eq!(new_task_ids.load(Ordering::SeqCst), 0);
         assert_eq!(new_start_times.load(Ordering::SeqCst), 0);
         assert_eq!(executor_starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn idempotent_running_response_reuses_the_original_verified_effective_limits() {
+        let registry = TaskRegistry::new();
+        let capacity = task_capacity(1);
+        let fail_stop = fail_stop_runtime();
+        let validated = ValidatedSubmit::try_from_payload(payload()).unwrap();
+        let mut applied_limits = validated.payload().limits.clone();
+        applied_limits.memory_max_bytes += 1;
+        let release = Arc::new(Notify::new());
+        let release_owner = Arc::clone(&release);
+        let verified_for_owner = VerifiedEffectiveLimits::for_test(applied_limits.clone());
+
+        let first = coordinate_validated_submit(
+            registry.clone(),
+            Arc::clone(&capacity),
+            Arc::clone(&fail_stop),
+            REQUEST_ID.to_owned(),
+            validated.clone(),
+            metadata(TASK_ID),
+            move |config, running_sender, _cancellation| async move {
+                running_sender
+                    .send(VerifiedRunningTask::new(
+                        running(&config.task_id),
+                        verified_for_owner,
+                    ))
+                    .unwrap();
+                release_owner.notified().await;
+                Ok(ExecutionCompletion::Test(finished(&config.task_id)))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            first.effective_limits.unwrap().into_protocol(),
+            applied_limits
+        );
+
+        let duplicate_executor_calls = Arc::new(AtomicUsize::new(0));
+        let duplicate_calls = Arc::clone(&duplicate_executor_calls);
+        let duplicate = coordinate_validated_submit(
+            registry,
+            capacity,
+            fail_stop,
+            OTHER_REQUEST_ID.to_owned(),
+            validated,
+            metadata(OTHER_TASK_ID),
+            move |_config, _running_sender, _cancellation| async move {
+                duplicate_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(ExecutionCompletion::Test(finished(OTHER_TASK_ID)))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(duplicate.task_id, TASK_ID);
+        assert_eq!(
+            duplicate.effective_limits.unwrap().into_protocol(),
+            applied_limits
+        );
+        assert_eq!(duplicate_executor_calls.load(Ordering::SeqCst), 0);
+        release.notify_waiters();
     }
 
     #[cfg(target_os = "linux")]

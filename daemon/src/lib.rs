@@ -308,7 +308,7 @@ pub async fn run_once(config: RunOnceConfig) -> Result<RunOnceReport> {
         cancellation,
         None,
         TaskStartTimeSource::new(|| TaskStartTime::new(String::new(), std::time::Instant::now())),
-        |_| {},
+        |_, _| {},
     )
     .await
     .map_err(|failure| failure.into_error())?;

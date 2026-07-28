@@ -279,6 +279,23 @@ unit_sequence=$((unit_sequence + 1))
   --exact \
   --nocapture
 
+# read-back 불일치의 공개 오류, rollback, capacity와 fail-stop 계약을 실제 cgroup에서 확인한다.
+unit_sequence=$((unit_sequence + 1))
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-read-back-contract-$$-${unit_sequence}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --setenv=TASKCAGE_RUN_LINUX_READ_BACK_CONTRACT=1 \
+  --setenv=TASKCAGE_READ_BACK_MARKER_BIN="${touch_bin}" \
+  "${submit_test}" \
+  'handlers::tests::actual_read_back_mismatch_enforces_public_error_and_rollback_contract' \
+  --exact \
+  --nocapture
+
 # cancelTask는 descendant 전체와 출력 reader를 정리한 뒤에만 CANCELLED를 반환한다.
 unit_sequence=$((unit_sequence + 1))
 "${taskcage_systemd[@]}" \

@@ -117,8 +117,6 @@ fn submit_fixture_converts_to_execution_budget_without_loss() {
     let Request::SubmitTask { payload, .. } = request else {
         panic!("submit fixture must contain submitTask");
     };
-    let expected_limits = payload.limits.clone();
-
     let budget = ResourceBudget::try_from_protocol(payload.limits, payload.output).unwrap();
     let cgroup = budget.cgroup_limits();
 
@@ -129,7 +127,6 @@ fn submit_fixture_converts_to_execution_budget_without_loss() {
     assert_eq!(budget.wall_timeout(), std::time::Duration::from_secs(120));
     assert_eq!(budget.stdout_tail_max_bytes(), 65_536);
     assert_eq!(budget.stderr_tail_max_bytes(), 65_536);
-    assert_eq!(budget.effective_limits(), &expected_limits);
 }
 
 #[test]
