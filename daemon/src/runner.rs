@@ -22,7 +22,7 @@ use crate::output::{CaptureLimits, CapturedOutput};
 use crate::preflight::VerifiedEnvironment;
 use crate::protocol::{CommandSpec, TaskPayload};
 use crate::resource_budget::ResourceBudget;
-use crate::submit::RunnerPermit;
+use crate::submit::{RunnerPermit, TaskStartTime, TaskStartTimeSource};
 use crate::{Error, Result};
 
 #[derive(Debug)]
@@ -51,8 +51,7 @@ impl CompletedTask {
 pub(crate) struct TaskRunConfig {
     pub(crate) task_id: String,
     pub(crate) submitted_at: String,
-    pub(crate) started_at: String,
-    pub(crate) started_monotonic: Instant,
+    pub(crate) start_time: TaskStartTimeSource,
     pub(crate) cleanup_timeout: Duration,
     pub(crate) command: CommandSpec,
     pub(crate) budget: ResourceBudget,
@@ -128,14 +127,11 @@ impl TaskRunner {
 
         let prepared = prepare_protocol_command(&config.command)
             .map_err(TaskRunFailure::with_reusable_capacity)?;
-        let mut lifecycle = SingleTaskLifecycle::running(
-            config.task_id.clone(),
-            config.submitted_at,
-            config.started_at,
-            config.started_monotonic,
-        );
+        let task_id = config.task_id;
+        let submitted_at = config.submitted_at;
+        let mut lifecycle = None;
         let execution = ExecutionConfig {
-            job_id: config.task_id,
+            job_id: task_id.clone(),
             limits: config.budget.cgroup_limits(),
             wall_timeout: config.budget.wall_timeout(),
             cleanup_timeout: config.cleanup_timeout,
@@ -148,9 +144,17 @@ impl TaskRunner {
             execution,
             cancellation,
             Some(&self.fail_stop),
-            || {
+            config.start_time,
+            |start_time| {
+                let running_lifecycle = SingleTaskLifecycle::running(
+                    task_id.clone(),
+                    submitted_at.clone(),
+                    start_time.wall_clock().to_owned(),
+                    start_time.monotonic(),
+                );
                 // execve 성공을 확인한 뒤 실제로 완료할 같은 lifecycle의 snapshot만 공개한다.
-                let _ = running_sender.send(lifecycle.snapshot());
+                let _ = running_sender.send(running_lifecycle.snapshot());
+                lifecycle = Some(running_lifecycle);
             },
         )
         .await
@@ -167,6 +171,15 @@ impl TaskRunner {
                 });
             }
         };
+        let start_time = cleaned.start_time().clone();
+        let mut lifecycle = lifecycle.unwrap_or_else(|| {
+            SingleTaskLifecycle::running(
+                task_id,
+                submitted_at,
+                start_time.wall_clock().to_owned(),
+                start_time.monotonic(),
+            )
+        });
         let (finished_at, finished_monotonic) = finished_time();
         let payload = lifecycle
             .complete(cleaned, finished_at, finished_monotonic)
@@ -213,6 +226,7 @@ pub(crate) struct CleanedRun {
     job_id: String,
     pid: i32,
     membership_verified: bool,
+    start_time: TaskStartTime,
     evidence: ExecutionEvidence,
     control: ControlTriggers,
     stats: JobStats,
@@ -221,6 +235,10 @@ pub(crate) struct CleanedRun {
 }
 
 impl CleanedRun {
+    fn start_time(&self) -> &TaskStartTime {
+        &self.start_time
+    }
+
     pub(crate) fn into_lifecycle_parts(
         self,
     ) -> (
@@ -303,10 +321,11 @@ pub(crate) async fn execute<F>(
     config: ExecutionConfig,
     cancellation: CancellationRuntime,
     fail_stop: Option<&Arc<FailStopCoordinator>>,
+    start_time: TaskStartTimeSource,
     on_started: F,
 ) -> std::result::Result<CleanedRun, CoreFailure>
 where
-    F: FnOnce(),
+    F: FnOnce(&TaskStartTime),
 {
     let ExecutionConfig {
         job_id,
@@ -440,6 +459,8 @@ where
             .await);
         }
     };
+    let start_time = start_time.capture();
+    let wall_deadline = execution_deadline(start_time.monotonic(), wall_timeout);
     let committed = pending.into_start_committed(token);
     let spawn = match committed.wait_for_exec() {
         Ok(spawn) => spawn,
@@ -463,13 +484,14 @@ where
 
     match spawn {
         SpawnOutcome::ExecFailed(failure) => {
-            finish_exec_failure(job_id, job, failure, cleanup_timeout, fail_stop).await
+            finish_exec_failure(job_id, job, failure, start_time, cleanup_timeout, fail_stop).await
         }
         SpawnOutcome::Started(process) => {
             finish_started_process(
                 StartedProcessConfig {
                     job_id,
-                    wall_timeout,
+                    start_time,
+                    wall_deadline,
                     cleanup_timeout,
                 },
                 job,
@@ -483,10 +505,17 @@ where
     }
 }
 
+fn execution_deadline(started_at: Instant, wall_timeout: Duration) -> MonotonicDeadline {
+    MonotonicDeadline::from_start(started_at, wall_timeout)
+        // Instant 표현 범위를 넘는 실행 예산은 보호 없이 기다리지 않고 즉시 timeout 처리한다.
+        .unwrap_or_else(|| MonotonicDeadline::expired_at(started_at))
+}
+
 async fn finish_exec_failure(
     job_id: String,
     mut job: JobCgroup,
     failure: ExecFailure,
+    start_time: TaskStartTime,
     cleanup_timeout: Duration,
     fail_stop: Option<&Arc<FailStopCoordinator>>,
 ) -> std::result::Result<CleanedRun, CoreFailure> {
@@ -505,6 +534,7 @@ async fn finish_exec_failure(
             job_id,
             pid: failure.pid,
             membership_verified: true,
+            start_time,
             evidence: ExecutionEvidence::StartFailed {
                 errno: failure.errno,
             },
@@ -524,7 +554,8 @@ async fn finish_exec_failure(
 
 struct StartedProcessConfig {
     job_id: String,
-    wall_timeout: Duration,
+    start_time: TaskStartTime,
+    wall_deadline: MonotonicDeadline,
     cleanup_timeout: Duration,
 }
 
@@ -537,14 +568,15 @@ async fn finish_started_process<F>(
     on_started: F,
 ) -> std::result::Result<CleanedRun, CoreFailure>
 where
-    F: FnOnce(),
+    F: FnOnce(&TaskStartTime),
 {
     let StartedProcessConfig {
         job_id,
-        wall_timeout,
+        start_time,
+        wall_deadline,
         cleanup_timeout,
     } = config;
-    on_started();
+    on_started(&start_time);
     enum WaitDecision {
         Cancelled,
         FailStop(MonotonicDeadline),
@@ -554,7 +586,7 @@ where
         biased;
         _ = cancellation.cancelled() => WaitDecision::Cancelled,
         deadline = wait_for_fail_stop(fail_stop) => WaitDecision::FailStop(deadline),
-        outcome = process.wait_for(wall_timeout) => WaitDecision::Process(outcome),
+        outcome = process.wait_until(wall_deadline) => WaitDecision::Process(outcome),
     };
 
     let (control, exit, kill_already_sent) = match wait_decision {
@@ -565,6 +597,7 @@ where
                 process,
                 RecoveryContext::new(
                     job_id,
+                    start_time,
                     deadline,
                     "target 종료 대기",
                     error.to_string(),
@@ -595,12 +628,15 @@ where
             cancellation.observe_timeout();
             let deadline = cleanup_deadline(cleanup_timeout, &job_id, "시간 초과 전체 종료")?;
             return finish_controlled_process(
-                job_id,
+                ControlledProcessConfig {
+                    job_id,
+                    start_time,
+                    cleanup_deadline: deadline,
+                    control: cancellation.control_snapshot(),
+                    daemon_error: false,
+                },
                 job,
                 process,
-                deadline,
-                cancellation.control_snapshot(),
-                false,
                 fail_stop,
             )
             .await;
@@ -608,24 +644,30 @@ where
         WaitDecision::Cancelled => {
             let deadline = cleanup_deadline(cleanup_timeout, &job_id, "취소 전체 종료")?;
             return finish_controlled_process(
-                job_id,
+                ControlledProcessConfig {
+                    job_id,
+                    start_time,
+                    cleanup_deadline: deadline,
+                    control: cancellation.control_snapshot(),
+                    daemon_error: false,
+                },
                 job,
                 process,
-                deadline,
-                cancellation.control_snapshot(),
-                false,
                 fail_stop,
             )
             .await;
         }
         WaitDecision::FailStop(deadline) => {
             return finish_controlled_process(
-                job_id,
+                ControlledProcessConfig {
+                    job_id,
+                    start_time,
+                    cleanup_deadline: deadline,
+                    control: cancellation.control_snapshot(),
+                    daemon_error: true,
+                },
                 job,
                 process,
-                deadline,
-                cancellation.control_snapshot(),
-                true,
                 fail_stop,
             )
             .await;
@@ -637,6 +679,7 @@ where
         job,
         StartedCompletion {
             job_id,
+            start_time,
             process,
             exit,
             control,
@@ -650,15 +693,27 @@ where
     .await
 }
 
-async fn finish_controlled_process(
+struct ControlledProcessConfig {
     job_id: String,
-    job: JobCgroup,
-    process: SpawnedProcess,
+    start_time: TaskStartTime,
     cleanup_deadline: MonotonicDeadline,
     control: ControlTriggers,
     daemon_error: bool,
+}
+
+async fn finish_controlled_process(
+    config: ControlledProcessConfig,
+    job: JobCgroup,
+    process: SpawnedProcess,
     fail_stop: Option<&Arc<FailStopCoordinator>>,
 ) -> std::result::Result<CleanedRun, CoreFailure> {
+    let ControlledProcessConfig {
+        job_id,
+        start_time,
+        cleanup_deadline,
+        control,
+        daemon_error,
+    } = config;
     let stage = match control.first() {
         Some(ControlTrigger::Cancelled) => "취소 전체 종료",
         Some(ControlTrigger::TimedOut) => "시간 초과 전체 종료",
@@ -670,6 +725,7 @@ async fn finish_controlled_process(
             process,
             RecoveryContext::new(
                 job_id,
+                start_time,
                 cleanup_deadline,
                 stage,
                 error.to_string(),
@@ -688,6 +744,7 @@ async fn finish_controlled_process(
                 process,
                 RecoveryContext::new(
                     job_id,
+                    start_time,
                     cleanup_deadline,
                     "제어 종료 상태 회수",
                     error.to_string(),
@@ -703,6 +760,7 @@ async fn finish_controlled_process(
         job,
         StartedCompletion {
             job_id,
+            start_time,
             process,
             exit,
             control,
@@ -718,6 +776,7 @@ async fn finish_controlled_process(
 
 struct StartedCompletion {
     job_id: String,
+    start_time: TaskStartTime,
     process: SpawnedProcess,
     exit: ProcessExit,
     control: ControlTriggers,
@@ -734,6 +793,7 @@ async fn finish_cleaned_started(
 ) -> std::result::Result<CleanedRun, CoreFailure> {
     let StartedCompletion {
         job_id,
+        start_time,
         process,
         exit,
         control,
@@ -765,6 +825,7 @@ async fn finish_cleaned_started(
             job_id,
             pid,
             membership_verified,
+            start_time,
             evidence: ExecutionEvidence::Started(ProcessEvidence::from(exit)),
             control,
             stats,
@@ -906,6 +967,7 @@ async fn cleanup_pending_job_until(
 
 struct RecoveryContext {
     job_id: String,
+    start_time: TaskStartTime,
     deadline: MonotonicDeadline,
     stage: &'static str,
     cause: String,
@@ -916,6 +978,7 @@ struct RecoveryContext {
 impl RecoveryContext {
     fn new(
         job_id: String,
+        start_time: TaskStartTime,
         deadline: MonotonicDeadline,
         stage: &'static str,
         cause: impl Into<String>,
@@ -924,6 +987,7 @@ impl RecoveryContext {
     ) -> Self {
         Self {
             job_id,
+            start_time,
             deadline,
             stage,
             cause: cause.into(),
@@ -941,6 +1005,7 @@ async fn cleanup_running_job(
 ) -> std::result::Result<CleanedRun, CoreFailure> {
     let RecoveryContext {
         job_id,
+        start_time,
         deadline,
         stage,
         cause,
@@ -1007,6 +1072,7 @@ async fn cleanup_running_job(
                 job_id,
                 pid,
                 membership_verified,
+                start_time,
                 evidence: ExecutionEvidence::Started(ProcessEvidence::from(exit)),
                 control,
                 stats,
@@ -1188,6 +1254,29 @@ mod tests {
     use crate::capacity::{TaskCapacity, TaskCapacitySettings};
 
     use super::*;
+
+    #[test]
+    fn execution_deadline_keeps_time_spent_confirming_exec() {
+        let committed_at = Instant::now();
+        let deadline = execution_deadline(committed_at, Duration::from_secs(2));
+
+        assert_eq!(
+            deadline.remaining_at(committed_at + Duration::from_millis(1_500)),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            deadline.remaining_at(committed_at + Duration::from_secs(2)),
+            None
+        );
+    }
+
+    #[test]
+    fn unrepresentable_execution_deadline_is_immediately_expired() {
+        let committed_at = Instant::now();
+        let deadline = execution_deadline(committed_at, Duration::MAX);
+
+        assert_eq!(deadline.remaining_at(committed_at), None);
+    }
 
     #[derive(Clone, Copy, Debug)]
     enum InjectedCleanupFault {

@@ -14,6 +14,8 @@ use crate::protocol::{
 };
 #[cfg(target_os = "linux")]
 use crate::submit::SubmitCoordinator;
+#[cfg(test)]
+use crate::submit::TaskStartTime;
 use crate::submit::{
     RegistryError, SubmitError, SubmitFailure, SubmitMetadata, SubmitObservation, SubmitOutcome,
     SubmitValidationError, ValidatedSubmit,
@@ -691,8 +693,7 @@ mod tests {
             SubmitMetadata::fixed(
                 task_id.to_owned(),
                 "2026-07-20T09:00:00Z".to_owned(),
-                "2026-07-20T09:00:00Z".to_owned(),
-                Instant::now(),
+                || TaskStartTime::new("2026-07-20T09:00:00Z".to_owned(), Instant::now()),
                 Duration::from_secs(5),
             ),
             Box::new(|| ("2026-07-20T09:00:01Z".to_owned(), Instant::now())),

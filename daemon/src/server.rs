@@ -20,7 +20,7 @@ use crate::fail_stop::FailStopCoordinator;
 use crate::handlers::{ProtocolHandlers, SubmitContext};
 use crate::protocol::{ErrorCode, ErrorPayload, PROTOCOL_VERSION, Request, Response};
 use crate::startup::StartupOwnership;
-use crate::submit::{SubmitCoordinator, SubmitMetadata};
+use crate::submit::{SubmitCoordinator, SubmitMetadata, TaskStartTime};
 
 type DispatchFuture = Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
 type Dispatch = Arc<dyn Fn(Request) -> DispatchFuture + Send + Sync + 'static>;
@@ -520,14 +520,14 @@ fn invalid_request_response(request_id: String) -> Response {
 
 fn submit_context(cleanup_timeout: Duration) -> SubmitContext {
     let submitted_at = timestamp_now();
-    let started_at = timestamp_now();
-    let started_monotonic = Instant::now();
     SubmitContext::new(
         SubmitMetadata::lazy(
             new_task_id,
             submitted_at,
-            started_at,
-            started_monotonic,
+            || {
+                let monotonic = Instant::now();
+                TaskStartTime::new(timestamp_now(), monotonic)
+            },
             cleanup_timeout,
         ),
         Box::new(|| (timestamp_now(), Instant::now())),

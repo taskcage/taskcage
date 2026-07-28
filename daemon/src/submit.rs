@@ -75,9 +75,60 @@ impl std::fmt::Debug for TaskIdSource {
 pub(crate) struct SubmitMetadata {
     task_id: Option<TaskIdSource>,
     pub(crate) submitted_at: String,
-    pub(crate) started_at: String,
-    pub(crate) started_monotonic: Instant,
+    start_time: TaskStartTimeSource,
     pub(crate) cleanup_timeout: Duration,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone)]
+pub(crate) struct TaskStartTime {
+    wall_clock: String,
+    monotonic: Instant,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl TaskStartTime {
+    pub(crate) fn new(wall_clock: String, monotonic: Instant) -> Self {
+        Self {
+            wall_clock,
+            monotonic,
+        }
+    }
+
+    pub(crate) fn wall_clock(&self) -> &str {
+        &self.wall_clock
+    }
+
+    pub(crate) fn monotonic(&self) -> Instant {
+        self.monotonic
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) struct TaskStartTimeSource {
+    capture: Option<Box<dyn FnOnce() -> TaskStartTime + Send + 'static>>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl std::fmt::Debug for TaskStartTimeSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TaskStartTimeSource(<lazy clock>)")
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl TaskStartTimeSource {
+    pub(crate) fn new(capture: impl FnOnce() -> TaskStartTime + Send + 'static) -> Self {
+        Self {
+            capture: Some(Box::new(capture)),
+        }
+    }
+
+    pub(crate) fn capture(mut self) -> TaskStartTime {
+        self.capture
+            .take()
+            .expect("작업 시작 시각 source는 한 번만 호출할 수 있습니다")()
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -86,15 +137,13 @@ impl SubmitMetadata {
     pub(crate) fn fixed(
         task_id: String,
         submitted_at: String,
-        started_at: String,
-        started_monotonic: Instant,
+        capture_start_time: impl FnOnce() -> TaskStartTime + Send + 'static,
         cleanup_timeout: Duration,
     ) -> Self {
         Self {
             task_id: Some(TaskIdSource::Fixed(task_id)),
             submitted_at,
-            started_at,
-            started_monotonic,
+            start_time: TaskStartTimeSource::new(capture_start_time),
             cleanup_timeout,
         }
     }
@@ -102,15 +151,13 @@ impl SubmitMetadata {
     pub(crate) fn lazy(
         make_task_id: impl FnOnce() -> String + Send + 'static,
         submitted_at: String,
-        started_at: String,
-        started_monotonic: Instant,
+        capture_start_time: impl FnOnce() -> TaskStartTime + Send + 'static,
         cleanup_timeout: Duration,
     ) -> Self {
         Self {
             task_id: Some(TaskIdSource::Lazy(Box::new(make_task_id))),
             submitted_at,
-            started_at,
-            started_monotonic,
+            start_time: TaskStartTimeSource::new(capture_start_time),
             cleanup_timeout,
         }
     }
@@ -149,8 +196,7 @@ pub(crate) enum SubmitError {
 struct SubmitExecutionConfig {
     task_id: String,
     submitted_at: String,
-    started_at: String,
-    started_monotonic: Instant,
+    start_time: TaskStartTimeSource,
     cleanup_timeout: Duration,
     command: crate::protocol::CommandSpec,
     budget: ResourceBudget,
@@ -263,8 +309,7 @@ impl SubmitCoordinator {
                         TaskRunConfig {
                             task_id: config.task_id,
                             submitted_at: config.submitted_at,
-                            started_at: config.started_at,
-                            started_monotonic: config.started_monotonic,
+                            start_time: config.start_time,
                             cleanup_timeout: config.cleanup_timeout,
                             command: config.command,
                             budget: config.budget,
@@ -433,8 +478,7 @@ where
             let config = SubmitExecutionConfig {
                 task_id: task_id.clone(),
                 submitted_at: metadata.submitted_at,
-                started_at: metadata.started_at,
-                started_monotonic: metadata.started_monotonic,
+                start_time: metadata.start_time,
                 cleanup_timeout: metadata.cleanup_timeout,
                 command: owner.request().payload().command.clone(),
                 budget: owner.request().budget().clone(),
@@ -915,8 +959,25 @@ mod tests {
         SubmitMetadata::fixed(
             task_id.to_owned(),
             "2026-07-24T10:00:00.000Z".to_owned(),
-            "2026-07-24T10:00:00.010Z".to_owned(),
-            Instant::now(),
+            || TaskStartTime::new("2026-07-24T10:00:00.010Z".to_owned(), Instant::now()),
+            Duration::from_secs(5),
+        )
+    }
+
+    fn metadata_with_start_clock(
+        task_id: &str,
+        started_at: &str,
+        started_monotonic: Instant,
+        calls: Arc<AtomicUsize>,
+    ) -> SubmitMetadata {
+        let started_at = started_at.to_owned();
+        SubmitMetadata::fixed(
+            task_id.to_owned(),
+            "2026-07-24T10:00:00.000Z".to_owned(),
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                TaskStartTime::new(started_at, started_monotonic)
+            },
             Duration::from_secs(5),
         )
     }
@@ -925,6 +986,25 @@ mod tests {
         Arc::new(TaskCapacity::new(
             TaskCapacitySettings::new(maximum).unwrap(),
         ))
+    }
+
+    #[test]
+    fn task_start_clock_is_lazy_and_captured_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let expected_monotonic = Instant::now();
+        let source = TaskStartTimeSource::new({
+            let calls = Arc::clone(&calls);
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                TaskStartTime::new("started".to_owned(), expected_monotonic)
+            }
+        });
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let captured = source.capture();
+        assert_eq!(captured.wall_clock(), "started");
+        assert_eq!(captured.monotonic(), expected_monotonic);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     fn reusable_failure(failure: SubmitFailure) -> ExecutionFailure {
@@ -1710,8 +1790,10 @@ mod tests {
             "실패",
         ));
         let task_ids = Arc::new(AtomicUsize::new(0));
+        let start_times = Arc::new(AtomicUsize::new(0));
         let executor_starts = Arc::new(AtomicUsize::new(0));
         let task_id_calls = Arc::clone(&task_ids);
+        let start_time_calls = Arc::clone(&start_times);
         let executor_calls = Arc::clone(&executor_starts);
         let metadata = SubmitMetadata::lazy(
             move || {
@@ -1719,8 +1801,10 @@ mod tests {
                 TASK_ID.to_owned()
             },
             "submitted".to_owned(),
-            "started".to_owned(),
-            Instant::now(),
+            move || {
+                start_time_calls.fetch_add(1, Ordering::SeqCst);
+                TaskStartTime::new("started".to_owned(), Instant::now())
+            },
             Duration::from_secs(1),
         );
         let validated = ValidatedSubmit::try_from_payload(payload()).unwrap();
@@ -1749,6 +1833,7 @@ mod tests {
         ));
         assert!(outcome.task_id.is_empty());
         assert_eq!(task_ids.load(Ordering::SeqCst), 0);
+        assert_eq!(start_times.load(Ordering::SeqCst), 0);
         assert_eq!(executor_starts.load(Ordering::SeqCst), 0);
         assert!(
             registry
@@ -1792,8 +1877,10 @@ mod tests {
             "실패",
         ));
         let new_task_ids = Arc::new(AtomicUsize::new(0));
+        let new_start_times = Arc::new(AtomicUsize::new(0));
         let executor_starts = Arc::new(AtomicUsize::new(0));
         let task_id_calls = Arc::clone(&new_task_ids);
+        let start_time_calls = Arc::clone(&new_start_times);
         let executor_calls = Arc::clone(&executor_starts);
         let duplicate = coordinate_validated_submit(
             registry.clone(),
@@ -1807,8 +1894,10 @@ mod tests {
                     OTHER_TASK_ID.to_owned()
                 },
                 "submitted".to_owned(),
-                "started".to_owned(),
-                Instant::now(),
+                move || {
+                    start_time_calls.fetch_add(1, Ordering::SeqCst);
+                    TaskStartTime::new("started".to_owned(), Instant::now())
+                },
                 Duration::from_secs(1),
             ),
             move |_config, _running_sender, _cancellation| async move {
@@ -1840,7 +1929,160 @@ mod tests {
             Err(SubmitError::Registry(RegistryError::IdempotencyConflict(_)))
         ));
         assert_eq!(new_task_ids.load(Ordering::SeqCst), 0);
+        assert_eq!(new_start_times.load(Ordering::SeqCst), 0);
         assert_eq!(executor_starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actual_task_timing_begins_after_exec_gate_commit() {
+        if std::env::var_os("TASKCAGE_RUN_LINUX_TASK_TIMING_INTEGRATION").is_none() {
+            eprintln!("NOT EXECUTED: 실제 cgroup v2 위임 환경이 필요합니다");
+            return;
+        }
+
+        let environment = SystemProbe::from_environment().check().unwrap();
+        let jobs_path = environment.report().delegated_root.join("jobs");
+        let fail_stop = fail_stop_runtime();
+        let coordinator = Arc::new(
+            SubmitCoordinator::initialize(
+                environment,
+                TaskCapacitySettings::new(1).unwrap(),
+                Arc::clone(&fail_stop),
+            )
+            .unwrap(),
+        );
+        let reached = Arc::new(ThreadBarrier::new(2));
+        let release = Arc::new(ThreadBarrier::new(2));
+        fail_stop.set_before_start_commit_hook({
+            let reached = Arc::clone(&reached);
+            let release = Arc::clone(&release);
+            Arc::new(move || {
+                reached.wait();
+                release.wait();
+            })
+        });
+
+        let logical_base = Instant::now();
+        let start_calls = Arc::new(AtomicUsize::new(0));
+        let finish_calls = Arc::new(AtomicUsize::new(0));
+        let metadata = metadata_with_start_clock(
+            TASK_ID,
+            "2026-07-24T10:00:05.000Z",
+            logical_base + Duration::from_secs(5),
+            Arc::clone(&start_calls),
+        );
+        let finish_calls_for_task = Arc::clone(&finish_calls);
+        let marker = std::env::temp_dir().join(format!(
+            "taskcage-start-timing-{}-{}.marker",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_file(&marker);
+        let marker_text = marker.to_string_lossy().into_owned();
+        let touch_bin = std::env::var("TASKCAGE_TIMING_MARKER_BIN")
+            .expect("timing 통합 시험용 marker 실행 파일 경로가 필요합니다");
+        let request_payload = linux_payload(
+            CLIENT_REQUEST_ID,
+            &touch_bin,
+            &[marker_text.as_str()],
+            5_000,
+        );
+        let submitting = tokio::spawn({
+            let coordinator = Arc::clone(&coordinator);
+            let request_payload = request_payload.clone();
+            async move {
+                coordinator
+                    .submit(
+                        request(PROTOCOL_VERSION, REQUEST_ID, request_payload),
+                        metadata,
+                        move || {
+                            finish_calls_for_task.fetch_add(1, Ordering::SeqCst);
+                            (
+                                "2026-07-24T10:00:08.000Z".to_owned(),
+                                logical_base + Duration::from_secs(8),
+                            )
+                        },
+                    )
+                    .await
+            }
+        });
+
+        tokio::task::spawn_blocking({
+            let reached = Arc::clone(&reached);
+            move || reached.wait()
+        })
+        .await
+        .unwrap();
+        assert_eq!(start_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(finish_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            !marker.exists(),
+            "exec gate commit 전 target이 실행됐습니다"
+        );
+        tokio::task::spawn_blocking(move || release.wait())
+            .await
+            .unwrap();
+
+        let first = submitting.await.unwrap().unwrap();
+        assert!(matches!(
+            first.observation,
+            SubmitObservation::Task(TaskPayload::Running {
+                ref submitted_at,
+                ref started_at,
+                ..
+            }) if submitted_at == "2026-07-24T10:00:00.000Z"
+                && started_at == "2026-07-24T10:00:05.000Z"
+        ));
+        assert_eq!(start_calls.load(Ordering::SeqCst), 1);
+
+        let finished = wait_for_finished(&coordinator, TASK_ID).await;
+        assert!(matches!(
+            &finished,
+            TaskPayload::Finished {
+                timing,
+                termination_reason: TerminationReason::Exited,
+                ..
+            } if timing.submitted_at == "2026-07-24T10:00:00.000Z"
+                && timing.started_at == "2026-07-24T10:00:05.000Z"
+                && timing.finished_at == "2026-07-24T10:00:08.000Z"
+                && timing.wall_time_ms == 3_000
+        ));
+        assert_eq!(start_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(finish_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            marker.exists(),
+            "FINISHED 전 target marker가 생성돼야 합니다"
+        );
+
+        let duplicate_start_calls = Arc::new(AtomicUsize::new(0));
+        let duplicate = coordinator
+            .submit(
+                request(PROTOCOL_VERSION, OTHER_REQUEST_ID, request_payload),
+                metadata_with_start_clock(
+                    OTHER_TASK_ID,
+                    "duplicate-start-must-not-be-used",
+                    logical_base,
+                    Arc::clone(&duplicate_start_calls),
+                ),
+                || panic!("멱등 재전송은 새로운 finished clock을 호출하면 안 됩니다"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate.task_id, TASK_ID);
+        assert_eq!(duplicate.observation, SubmitObservation::Task(finished));
+        assert_eq!(duplicate_start_calls.load(Ordering::SeqCst), 0);
+        fs::remove_file(&marker).unwrap();
+
+        let remaining_jobs = fs::read_dir(jobs_path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("job-"))
+            .count();
+        assert_eq!(remaining_jobs, 0, "작업 cgroup이 남아 있습니다");
     }
 
     #[cfg(target_os = "linux")]
@@ -1969,6 +2211,10 @@ mod tests {
         assert_eq!(timeout_process.exit_code, None);
         assert_eq!(timeout_process.signal.as_deref(), Some("SIGKILL"));
 
+        let exec_start = Instant::now();
+        let exec_start_calls = Arc::new(AtomicUsize::new(0));
+        let exec_finish_calls = Arc::new(AtomicUsize::new(0));
+        let exec_finish_calls_for_task = Arc::clone(&exec_finish_calls);
         let exec_failed = coordinator
             .submit(
                 request(
@@ -1981,13 +2227,31 @@ mod tests {
                         5_000,
                     ),
                 ),
-                metadata(EXEC_FAILURE_TASK_ID),
-                move || ("2026-07-24T10:00:05.000Z".to_owned(), Instant::now()),
+                metadata_with_start_clock(
+                    EXEC_FAILURE_TASK_ID,
+                    "2026-07-24T10:00:05.000Z",
+                    exec_start,
+                    Arc::clone(&exec_start_calls),
+                ),
+                move || {
+                    exec_finish_calls_for_task.fetch_add(1, Ordering::SeqCst);
+                    (
+                        "2026-07-24T10:00:05.012Z".to_owned(),
+                        exec_start + Duration::from_millis(12),
+                    )
+                },
             )
             .await
             .unwrap();
         let exec_process = match exec_failed.observation {
             SubmitObservation::Task(finished) => {
+                assert!(matches!(
+                    &finished,
+                    TaskPayload::Finished { timing, .. }
+                        if timing.started_at == "2026-07-24T10:00:05.000Z"
+                            && timing.finished_at == "2026-07-24T10:00:05.012Z"
+                            && timing.wall_time_ms == 12
+                ));
                 assert_finished_reason(finished, TerminationReason::ExecutionFailed)
             }
             SubmitObservation::Failed(failure) => {
@@ -1996,6 +2260,8 @@ mod tests {
         };
         assert_eq!(exec_process.exit_code, None);
         assert_eq!(exec_process.signal, None);
+        assert_eq!(exec_start_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(exec_finish_calls.load(Ordering::SeqCst), 1);
         assert!(!coordinator.runner.cleanup_is_uncertain());
 
         let remaining_jobs = fs::read_dir(jobs_path)
@@ -2036,6 +2302,7 @@ mod tests {
                 .as_nanos()
         ));
         let marker_text = marker.to_string_lossy().into_owned();
+        let start_calls = Arc::new(AtomicUsize::new(0));
         let reached = Arc::new(ThreadBarrier::new(2));
         let release = Arc::new(ThreadBarrier::new(2));
         fail_stop.set_before_start_commit_hook({
@@ -2049,6 +2316,7 @@ mod tests {
 
         let submitting = tokio::spawn({
             let coordinator = Arc::clone(&coordinator);
+            let start_calls_for_submit = Arc::clone(&start_calls);
             async move {
                 coordinator
                     .submit(
@@ -2062,7 +2330,12 @@ mod tests {
                                 60_000,
                             ),
                         ),
-                        metadata(TASK_ID),
+                        metadata_with_start_clock(
+                            TASK_ID,
+                            "must-not-be-created",
+                            Instant::now(),
+                            start_calls_for_submit,
+                        ),
                         || ("finished".to_owned(), Instant::now()),
                     )
                     .await
@@ -2108,6 +2381,7 @@ mod tests {
         assert_eq!(fail_stop.deadline(), Some(deadline));
         assert!(!fail_stop.start_is_committed(TASK_ID));
         assert_eq!(fail_stop.active_count(), 0);
+        assert_eq!(start_calls.load(Ordering::SeqCst), 0);
         assert_eq!(coordinator.snapshot(TASK_ID), Ok(None));
         assert_eq!(
             coordinator.snapshot_by_client_request_id(CLIENT_REQUEST_ID),

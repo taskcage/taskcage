@@ -15,7 +15,9 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 use serde::Serialize;
 use thiserror::Error;
@@ -331,16 +333,18 @@ impl SpawnedProcess {
         self.pid
     }
 
-    pub async fn wait_for(&self, timeout: Duration) -> Result<WaitOutcome, ExecutorError> {
-        let started_at = Instant::now();
+    pub(crate) async fn wait_until(
+        &self,
+        deadline: MonotonicDeadline,
+    ) -> Result<WaitOutcome, ExecutorError> {
         loop {
+            let Some(remaining) = deadline.remaining() else {
+                return Ok(WaitOutcome::TimedOut);
+            };
             if let Some(status) = wait_nohang(self.pid)? {
                 return Ok(WaitOutcome::Exited(status));
             }
-            if timeout_elapsed(started_at, timeout) {
-                return Ok(WaitOutcome::TimedOut);
-            }
-            sleep(Duration::from_millis(10)).await;
+            sleep(remaining.min(Duration::from_millis(10))).await;
         }
     }
 
@@ -514,10 +518,6 @@ impl Drop for OutputReaders {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
     }
-}
-
-fn timeout_elapsed(started_at: Instant, timeout: Duration) -> bool {
-    started_at.elapsed() >= timeout
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1086,12 +1086,10 @@ mod tests {
     }
 
     #[test]
-    fn huge_timeout_does_not_overflow_a_monotonic_deadline() {
-        let started_at = Instant::now();
+    fn expired_execution_deadline_has_no_remaining_budget() {
+        let now = Instant::now();
+        let deadline = MonotonicDeadline::expired_at(now);
 
-        assert!(!timeout_elapsed(
-            started_at,
-            Duration::from_millis(u64::MAX)
-        ));
+        assert_eq!(deadline.remaining_at(now), None);
     }
 }
