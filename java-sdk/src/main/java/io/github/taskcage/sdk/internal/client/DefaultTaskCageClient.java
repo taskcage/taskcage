@@ -92,7 +92,7 @@ public final class DefaultTaskCageClient implements TaskCageClient {
         }
         ObjectNode payload = mapper.createObjectNode();
         payload.put("taskId", taskId.toString());
-        return decodeTask(request("getTask", payload));
+        return decodeTask(request("getTask", payload), taskId);
     }
 
     @Override
@@ -161,13 +161,16 @@ public final class DefaultTaskCageClient implements TaskCageClient {
         }
     }
 
-    private TaskSnapshot decodeTask(JsonNode response) {
+    private TaskSnapshot decodeTask(JsonNode response, UUID expectedTaskId) {
         if (!"task".equals(response.path("type").asText())) {
             throw new TaskCageProtocolException("expected task response");
         }
         JsonNode payload = response.path("payload");
         try {
             UUID taskId = UUID.fromString(requiredText(payload, "taskId"));
+            if (!expectedTaskId.equals(taskId)) {
+                throw new IllegalArgumentException("taskId does not match the requested task");
+            }
             return switch (requiredText(payload, "state")) {
                 case "RUNNING" -> new RunningTaskSnapshot(
                         taskId,

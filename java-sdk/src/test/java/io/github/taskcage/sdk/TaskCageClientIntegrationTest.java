@@ -137,6 +137,14 @@ class TaskCageClientIntegrationTest {
     }
 
     @Test
+    void getTaskRejectsSnapshotForAnotherTask() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::runningTaskResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            assertThrows(TaskCageProtocolException.class, () -> client.getTask(UUID.randomUUID()));
+        }
+    }
+
+    @Test
     void daemonErrorsExposeCodeAndRetryability() throws Exception {
         try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskNotFoundResponse);
                 TaskCageClient client = TaskCageClient.connect(configFor(server))) {
