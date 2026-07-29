@@ -15,8 +15,11 @@ public interface TaskCageClient extends AutoCloseable {
     /** Returns the daemon capabilities after a request-response round trip. */
     TaskCageCapabilities capabilities();
 
-    /** Submits a constrained task and returns after the daemon has accepted it. */
-    Task submit(TaskSpec task);
+    /**
+     * Submits a constrained task. The daemon returns {@link Task} when it accepts the task or a
+     * {@link FinishedTaskSnapshot} when execution could not be started and cleanup has completed.
+     */
+    TaskSubmission submit(TaskSpec task);
 
     /** Returns the daemon's current immutable snapshot for a submitted task. */
     TaskSnapshot getTask(UUID taskId);

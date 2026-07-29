@@ -23,8 +23,8 @@ dependencies {
 ```text
 애플리케이션 코드
   └─ TaskCageClient
-      ├─ execute(TaskSpec)       // 제출 후 완료까지 대기하는 편의 API
-      ├─ submit(TaskSpec)        // Task 반환
+      ├─ submit(TaskSpec)        // TaskSubmission 반환
+      ├─ getTask(UUID)           // RUNNING/FINISHED snapshot 조회
       └─ capabilities()          // 데몬·cgroup 준비 상태 확인
           └─ internal
               ├─ UnixDomainSocketTransport
@@ -40,15 +40,15 @@ dependencies {
 
 ```java
 public interface TaskCageClient extends AutoCloseable {
-    ExecutionResult execute(TaskSpec task);
+    TaskSubmission submit(TaskSpec task);
 
-    Task submit(TaskSpec task);
+    TaskSnapshot getTask(UUID taskId);
 
     TaskCageCapabilities capabilities();
 }
 ```
 
-일반적인 동기 호출은 다음과 같다.
+현재 SDK는 비동기 submit/query 모델을 제공한다.
 
 ```java
 try (TaskCageClient client = TaskCageClient.connect(
@@ -56,53 +56,31 @@ try (TaskCageClient client = TaskCageClient.connect(
             .socketPath(Path.of("/run/taskcage/taskcage.sock"))
             .build())) {
 
-    ExecutionResult result = client.execute(
-        TaskSpec.builder()
-            .command(ExternalCommand.builder()
-                .program(Path.of("/usr/bin/pdftotext"))
-                .arguments("input.pdf", "output.txt")
-                .workingDirectory(Path.of("/srv/document-jobs/job-123"))
-                .build())
-            .budget(ResourceBudget.builder()
-                .cpu(CpuQuota.of(
-                    Duration.ofMillis(100),
-                    Duration.ofMillis(100)
-                ))
-                .memoryMaxBytes(512L * 1024 * 1024)
-                .processLimit(32)
-                .wallTimeLimit(Duration.ofMinutes(2))
-                .outputTailBytes(64 * 1024, 64 * 1024)
-                .build())
-            .build()
-    );
-
-    if (result.isSuccess()) {
-        // output.txt 사용
+    TaskSubmission submission = client.submit(taskSpec);
+    if (submission instanceof Task accepted) {
+        TaskSnapshot snapshot = client.getTask(accepted.taskId());
+        // RUNNING 또는 FINISHED snapshot 처리
+    } else if (submission instanceof FinishedTaskSnapshot finished) {
+        // exec 시작 실패 뒤 정리가 완료된 결과
+        ExecutionResult result = finished.result();
     }
 }
 ```
 
-긴 작업을 호출자가 직접 관리해야 한다면 비동기 API를 사용한다.
-
-```java
-Task task = client.submit(taskSpec);
-
-TaskSnapshot current = task.status();
-ExecutionResult result = task.await(Duration.ofMinutes(3));
-// 필요하면 task.cancel()
-```
+`cancelTask`와 완료까지 대기하는 편의 API는 이후 단계에서 추가한다.
 
 ## 공개 타입
 
 | 타입 | 책임 |
 |---|---|
 | `TaskCageClient` | 데몬 연결, 작업 제출, capability 조회 |
-| `TaskCageClientConfig` | UDS 경로, 연결 timeout, polling 간격 |
+| `TaskCageClientConfig` | UDS 경로, 연결·요청 timeout |
 | `TaskSpec` | `ExternalCommand`와 `ResourceBudget`을 묶는 불변 작업 요청 |
 | `ExternalCommand` | 실행 파일 절대 경로, 인자 배열, working directory, 환경 변수 |
 | `ResourceBudget` | CPU·메모리·PID·벽시계 시간·출력 tail 제한 |
 | `CpuQuota` | cgroup v2 `cpu.max`의 quota/period를 타입 안전하게 표현 |
-| `Task` | `taskId`, 상태 조회, 완료 대기, 취소 |
+| `TaskSubmission` | `Task` 수락 또는 즉시 `FinishedTaskSnapshot`의 submit 결과 |
+| `Task` | 수락된 작업의 `taskId`와 적용된 자원 예산 |
 | `TaskSnapshot` | 실행 중 또는 완료된 작업의 현재 상태 |
 | `ExecutionResult` | 종료 원인, exit code/signal, 사용량, stdout/stderr tail |
 | `TerminationReason` | `EXITED`, `TIMED_OUT`, `MEMORY_LIMIT_EXCEEDED` 등의 최종 원인 |
@@ -114,9 +92,9 @@ ExecutionResult result = task.await(Duration.ofMinutes(3));
 
 외부 명령의 종료는 SDK 통신 오류와 구분한다.
 
-- `TIMED_OUT`, `MEMORY_LIMIT_EXCEEDED`, `PROCESS_LIMIT_EXCEEDED`, `CANCELLED`, exit code 1은 `ExecutionResult`로 반환한다.
+- `TIMED_OUT`, `MEMORY_LIMIT_EXCEEDED`, `PROCESS_LIMIT_EXCEEDED`, `CANCELLED`, exit code 1은 완료된 `TaskSnapshot`의 `ExecutionResult`로 반환한다.
 - UDS 연결 실패, 잘못된 프레임, 지원하지 않는 프로토콜은 `TaskCageException` 계열 예외로 처리한다.
-- 실행 슬롯이 모두 사용 중인 `CAPACITY_EXHAUSTED`는 `TaskCageRejectedException`으로 표현한다.
+- `CAPACITY_EXHAUSTED`, `TASK_NOT_FOUND` 등 데몬 오류는 code와 retryable 속성을 가진 `TaskCageDaemonException`으로 표현한다.
 
 `ExecutionResult.isSuccess()`는 `terminationReason == EXITED`이고 exit code가 0일 때만 `true`다.
 
