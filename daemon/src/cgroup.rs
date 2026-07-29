@@ -36,6 +36,7 @@ use crate::preflight::VerifiedEnvironment;
 
 pub const DEFAULT_CGROUP_MOUNT: &str = "/sys/fs/cgroup";
 pub const SELF_CGROUP_FILE: &str = "/proc/self/cgroup";
+const MANAGER_CGROUP_NAME: &str = "manager";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StartupCgroupPlacement {
@@ -63,6 +64,10 @@ pub enum CgroupPathError {
         configured: PathBuf,
         actual: PathBuf,
     },
+    #[error(
+        "현재 cgroup {actual:?}은 기존 TaskCage manager일 수 있어 부모 위임 경로를 명시해야 합니다"
+    )]
+    ParentRootRequiredForManager { actual: PathBuf },
     #[error("manager 이동 결과가 다릅니다: 예상 {expected:?}, 실제 {actual:?}")]
     ManagerMembershipMismatch { expected: PathBuf, actual: PathBuf },
     #[error("작업 식별자 형식이 올바르지 않습니다: {0:?}")]
@@ -194,7 +199,7 @@ impl CgroupPaths {
 
     /// 설정으로 받은 경로가 있으면 그 경로를 사용하고, 없으면 현재 경로를 찾는다.
     pub fn resolve(root_override: Option<&Path>) -> Result<Self, CgroupPathError> {
-        let (paths, placement) = Self::resolve_startup(root_override)?;
+        let (paths, placement) = Self::resolve_with_policy(root_override, false)?;
         if placement == StartupCgroupPlacement::DelegatedRoot {
             Ok(paths)
         } else {
@@ -206,8 +211,16 @@ impl CgroupPaths {
     }
 
     /// 시작 복구에서만 설정 root 또는 그 바로 아래 manager membership을 구분한다.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn resolve_startup(
         root_override: Option<&Path>,
+    ) -> Result<(Self, StartupCgroupPlacement), CgroupPathError> {
+        Self::resolve_with_policy(root_override, true)
+    }
+
+    fn resolve_with_policy(
+        root_override: Option<&Path>,
+        require_parent_for_manager: bool,
     ) -> Result<(Self, StartupCgroupPlacement), CgroupPathError> {
         let mount_path = Path::new(DEFAULT_CGROUP_MOUNT);
         let mount = fs::canonicalize(mount_path)
@@ -225,17 +238,13 @@ impl CgroupPaths {
         if !root.starts_with(&mount) {
             return Err(CgroupPathError::RootOutsideMount { root, mount });
         }
-        let manager = root.join("manager");
-        let placement = if root == actual_root {
-            StartupCgroupPlacement::DelegatedRoot
-        } else if root_override.is_some() && manager == actual_root {
-            StartupCgroupPlacement::ExistingManager
-        } else {
-            return Err(CgroupPathError::ConfiguredRootMismatch {
-                configured: root,
-                actual: actual_root,
-            });
-        };
+        let manager = root.join(MANAGER_CGROUP_NAME);
+        let placement = classify_startup_placement(
+            root_override,
+            &root,
+            &actual_root,
+            require_parent_for_manager,
+        )?;
 
         Ok((
             Self {
@@ -308,6 +317,36 @@ impl CgroupPaths {
                 })?;
         Ok(Path::new("/").join(relative))
     }
+}
+
+fn classify_startup_placement(
+    root_override: Option<&Path>,
+    root: &Path,
+    actual_root: &Path,
+    require_parent_for_manager: bool,
+) -> Result<StartupCgroupPlacement, CgroupPathError> {
+    if root == actual_root {
+        // 기존 manager를 새 위임 root로 오인하면 형제 jobs의 잔여 실행을 건너뛸 수 있다.
+        if require_parent_for_manager
+            && actual_root
+                .file_name()
+                .is_some_and(|name| name == MANAGER_CGROUP_NAME)
+        {
+            return Err(CgroupPathError::ParentRootRequiredForManager {
+                actual: actual_root.to_path_buf(),
+            });
+        }
+        return Ok(StartupCgroupPlacement::DelegatedRoot);
+    }
+
+    if root_override.is_some() && root.join(MANAGER_CGROUP_NAME) == actual_root {
+        return Ok(StartupCgroupPlacement::ExistingManager);
+    }
+
+    Err(CgroupPathError::ConfiguredRootMismatch {
+        configured: root.to_path_buf(),
+        actual: actual_root.to_path_buf(),
+    })
 }
 
 pub fn read_unified_membership() -> Result<PathBuf, CgroupPathError> {
@@ -1033,6 +1072,63 @@ mod tests {
         assert!(parse_unified_membership("2:cpu:/legacy\n").is_err());
         assert!(parse_unified_membership("0::/a\n0::/b\n").is_err());
         assert!(parse_unified_membership("0::/a (deleted)\n").is_err());
+    }
+
+    #[test]
+    fn startup_placement_rejects_manager_without_its_parent_root() {
+        let manager = Path::new("/sys/fs/cgroup/delegated/manager");
+
+        let error = classify_startup_placement(None, manager, manager, true).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CgroupPathError::ParentRootRequiredForManager { actual }
+                if actual == manager
+        ));
+    }
+
+    #[test]
+    fn startup_placement_rejects_manager_configured_as_the_root() {
+        let manager = Path::new("/sys/fs/cgroup/delegated/manager");
+
+        let error = classify_startup_placement(Some(manager), manager, manager, true).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CgroupPathError::ParentRootRequiredForManager { actual }
+                if actual == manager
+        ));
+    }
+
+    #[test]
+    fn startup_placement_accepts_existing_manager_only_with_parent_root() {
+        let root = Path::new("/sys/fs/cgroup/delegated");
+        let manager = root.join(MANAGER_CGROUP_NAME);
+
+        assert_eq!(
+            classify_startup_placement(Some(root), root, &manager, true).unwrap(),
+            StartupCgroupPlacement::ExistingManager
+        );
+    }
+
+    #[test]
+    fn startup_placement_accepts_a_delegated_root() {
+        let root = Path::new("/sys/fs/cgroup/taskcaged.service");
+
+        assert_eq!(
+            classify_startup_placement(None, root, root, true).unwrap(),
+            StartupCgroupPlacement::DelegatedRoot
+        );
+    }
+
+    #[test]
+    fn normal_preflight_can_use_a_delegated_root_named_manager() {
+        let root = Path::new("/sys/fs/cgroup/supervisor/manager");
+
+        assert_eq!(
+            classify_startup_placement(Some(root), root, root, false).unwrap(),
+            StartupCgroupPlacement::DelegatedRoot
+        );
     }
 
     #[test]
