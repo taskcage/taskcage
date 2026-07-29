@@ -11,6 +11,9 @@ import io.github.taskcage.sdk.TaskCageClient;
 import io.github.taskcage.sdk.TaskCageClientConfig;
 import io.github.taskcage.sdk.TaskCageConnectionException;
 import io.github.taskcage.sdk.TaskCageProtocolException;
+import io.github.taskcage.sdk.Task;
+import io.github.taskcage.sdk.TaskSpec;
+import io.github.taskcage.sdk.ResourceBudget;
 import io.github.taskcage.sdk.internal.transport.UnixDomainSocketConnection;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -48,6 +51,29 @@ public final class DefaultTaskCageClient implements TaskCageClient {
     }
 
     @Override
+    public Task submit(TaskSpec task) {
+        ObjectNode payload = mapper.createObjectNode();
+        payload.put("clientRequestId", UUID.randomUUID().toString());
+        ObjectNode command = payload.putObject("command");
+        command.put("program", task.command().program().toString());
+        command.putPOJO("args", task.command().arguments());
+        command.put("workingDirectory", task.command().workingDirectory().toString());
+        command.set("environment", mapper.valueToTree(task.command().environment()));
+        ResourceBudget budget = task.budget();
+        ObjectNode limits = payload.putObject("limits");
+        ObjectNode cpuMax = limits.putObject("cpuMax");
+        cpuMax.put("quotaMicros", budget.cpuMax().quotaMicros());
+        cpuMax.put("periodMicros", budget.cpuMax().periodMicros());
+        limits.put("memoryMaxBytes", budget.memoryMaxBytes());
+        limits.put("pidsMax", budget.pidsMax());
+        limits.put("wallTimeLimitMs", budget.wallTimeLimit().toMillis());
+        ObjectNode output = payload.putObject("output");
+        output.put("stdoutTailMaxBytes", budget.stdoutTailMaxBytes());
+        output.put("stderrTailMaxBytes", budget.stderrTailMaxBytes());
+        return decodeAccepted(request("submitTask", payload), budget);
+    }
+
+    @Override
     public void close() {
         requestLock.lock();
         try {
@@ -62,6 +88,10 @@ public final class DefaultTaskCageClient implements TaskCageClient {
     }
 
     private JsonNode request(String type) {
+        return request(type, mapper.createObjectNode());
+    }
+
+    private JsonNode request(String type, ObjectNode payload) {
         requestLock.lock();
         try {
             if (closed) {
@@ -72,7 +102,7 @@ public final class DefaultTaskCageClient implements TaskCageClient {
             request.put("protocolVersion", PROTOCOL_VERSION);
             request.put("requestId", requestId);
             request.put("type", type);
-            request.set("payload", mapper.createObjectNode());
+            request.set("payload", payload);
 
             byte[] responseBytes = requireConnection().request(writeRequest(request), config.requestTimeout());
             JsonNode response = mapper.readTree(responseBytes);
@@ -86,6 +116,23 @@ public final class DefaultTaskCageClient implements TaskCageClient {
             throw new TaskCageConnectionException("TaskCage daemon connection failed", exception);
         } finally {
             requestLock.unlock();
+        }
+    }
+
+    private Task decodeAccepted(JsonNode response, ResourceBudget requestedBudget) {
+        if (!"taskAccepted".equals(response.path("type").asText())
+                || !"RUNNING".equals(response.path("payload").path("state").asText())) {
+            throw new TaskCageProtocolException("expected taskAccepted response");
+        }
+        JsonNode limits = response.path("payload").path("effectiveLimits");
+        try {
+            return new Task(UUID.fromString(requiredText(response.path("payload"), "taskId")), new ResourceBudget(
+                    new io.github.taskcage.sdk.CpuQuota(requiredPositiveLong(limits.path("cpuMax"), "quotaMicros"), requiredPositiveLong(limits.path("cpuMax"), "periodMicros")),
+                    requiredPositiveLong(limits, "memoryMaxBytes"), requiredPositiveLong(limits, "pidsMax"),
+                    java.time.Duration.ofMillis(requiredPositiveLong(limits, "wallTimeLimitMs")),
+                    requestedBudget.stdoutTailMaxBytes(), requestedBudget.stderrTailMaxBytes()));
+        } catch (IllegalArgumentException exception) {
+            throw new TaskCageProtocolException("invalid taskAccepted payload", exception);
         }
     }
 
@@ -155,6 +202,14 @@ public final class DefaultTaskCageClient implements TaskCageClient {
             throw new IllegalArgumentException(field + " must be a positive integer");
         }
         return value.intValue();
+    }
+
+    private static long requiredPositiveLong(JsonNode object, String field) {
+        JsonNode value = object.get(field);
+        if (value == null || !value.canConvertToLong() || value.longValue() <= 0) {
+            throw new IllegalArgumentException(field + " must be a positive integer");
+        }
+        return value.longValue();
     }
 
     private static boolean requiredBoolean(JsonNode object, String field) {
