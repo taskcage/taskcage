@@ -7,6 +7,7 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class TaskCageDaemonContractTest {
     @Test
@@ -31,6 +32,9 @@ class TaskCageDaemonContractTest {
             Task task = client.submit(spec);
             assertNotNull(task.taskId());
             assertNotNull(task.effectiveBudget());
+
+            TaskSnapshot snapshot = client.getTask(task.taskId());
+            assertEquals(task.taskId(), snapshot.taskId());
         }
     }
 }

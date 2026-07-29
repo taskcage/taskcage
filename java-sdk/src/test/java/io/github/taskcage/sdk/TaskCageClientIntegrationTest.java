@@ -7,6 +7,7 @@ import io.github.taskcage.sdk.support.FakeTaskCageServer;
 import java.time.Duration;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.UUID;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 
@@ -103,6 +104,50 @@ class TaskCageClientIntegrationTest {
         }
     }
 
+    @Test
+    void getTaskDecodesRunningSnapshot() throws Exception {
+        UUID taskId = UUID.fromString("b5309d98-f51e-45e1-9866-b1a080c1ba50");
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::runningTaskResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            TaskSnapshot snapshot = client.getTask(taskId);
+
+            RunningTaskSnapshot running = (RunningTaskSnapshot) snapshot;
+            assertEquals(TaskState.RUNNING, running.state());
+            assertEquals(taskId, running.taskId());
+            assertEquals("2026-07-20T09:00:00Z", running.startedAt().toString());
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals("getTask", server.requests().get(0).path("type").asText());
+            assertEquals(taskId.toString(), server.requests().get(0).path("payload").path("taskId").asText());
+        }
+    }
+
+    @Test
+    void getTaskDecodesFinishedSnapshotAndOutput() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::finishedTaskResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            FinishedTaskSnapshot finished = (FinishedTaskSnapshot) client.getTask(
+                    UUID.fromString("b5309d98-f51e-45e1-9866-b1a080c1ba50"));
+
+            assertEquals(TerminationReason.TIMED_OUT, finished.result().terminationReason());
+            assertEquals("SIGKILL", finished.result().process().signal());
+            assertEquals(120_000, finished.result().timing().wallTime().toMillis());
+            assertEquals(48_000, finished.result().usage().cpuTimeMicros());
+            assertEquals("", finished.result().output().stdoutTail());
+        }
+    }
+
+    @Test
+    void daemonErrorsExposeCodeAndRetryability() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskNotFoundResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            TaskCageDaemonException exception = assertThrows(TaskCageDaemonException.class,
+                    () -> client.getTask(UUID.randomUUID()));
+
+            assertEquals("TASK_NOT_FOUND", exception.code());
+            assertTrue(!exception.retryable());
+        }
+    }
+
     private static TaskCageClientConfig configFor(FakeTaskCageServer server) {
         return TaskCageClientConfig.builder()
                 .socketPath(server.socketPath())
@@ -140,6 +185,60 @@ class TaskCageClientIntegrationTest {
         limits.put("memoryMaxBytes", 536_870_912);
         limits.put("pidsMax", 32);
         limits.put("wallTimeLimitMs", 120_000);
+        return response;
+    }
+
+    private static ObjectNode runningTaskResponse(JsonNode request) {
+        ObjectNode response = taskResponse(request, "RUNNING");
+        ObjectNode payload = (ObjectNode) response.path("payload");
+        payload.put("submittedAt", "2026-07-20T09:00:00Z");
+        payload.put("startedAt", "2026-07-20T09:00:00Z");
+        return response;
+    }
+
+    private static ObjectNode finishedTaskResponse(JsonNode request) {
+        ObjectNode response = taskResponse(request, "FINISHED");
+        ObjectNode payload = (ObjectNode) response.path("payload");
+        payload.put("terminationReason", "TIMED_OUT");
+        ObjectNode process = payload.putObject("process");
+        process.putNull("exitCode");
+        process.put("signal", "SIGKILL");
+        ObjectNode timing = payload.putObject("timing");
+        timing.put("submittedAt", "2026-07-20T09:00:00Z");
+        timing.put("startedAt", "2026-07-20T09:00:00Z");
+        timing.put("finishedAt", "2026-07-20T09:02:00Z");
+        timing.put("wallTimeMs", 120_000);
+        ObjectNode usage = payload.putObject("usage");
+        usage.put("cpuTimeMicros", 48_000);
+        usage.put("memoryPeakBytes", 8_290_304);
+        ObjectNode output = payload.putObject("output");
+        output.put("stdoutTail", "");
+        output.put("stderrTail", "");
+        output.put("stdoutTruncated", false);
+        output.put("stderrTruncated", false);
+        return response;
+    }
+
+    private static ObjectNode taskNotFoundResponse(JsonNode request) {
+        ObjectNode response = JsonNodeFactory.instance.objectNode();
+        response.put("protocolVersion", 1);
+        response.put("requestId", request.path("requestId").asText());
+        response.put("type", "error");
+        ObjectNode payload = response.putObject("payload");
+        payload.put("code", "TASK_NOT_FOUND");
+        payload.put("message", "task was not found");
+        payload.put("retryable", false);
+        return response;
+    }
+
+    private static ObjectNode taskResponse(JsonNode request, String state) {
+        ObjectNode response = JsonNodeFactory.instance.objectNode();
+        response.put("protocolVersion", 1);
+        response.put("requestId", request.path("requestId").asText());
+        response.put("type", "task");
+        ObjectNode payload = response.putObject("payload");
+        payload.put("taskId", "b5309d98-f51e-45e1-9866-b1a080c1ba50");
+        payload.put("state", state);
         return response;
     }
 }
