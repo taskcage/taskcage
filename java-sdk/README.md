@@ -150,6 +150,26 @@ java-sdk/
 
 `internal` 패키지의 UDS·JSON·프로토콜 DTO는 공개 API로 노출하지 않는다. Rust 데몬의 프로토콜 구현이 바뀌어도 Java 사용자가 보는 `TaskSpec`과 `ExecutionResult`를 안정적으로 유지하기 위해서다.
 
+## 테스트 계층
+
+기본 로컬 테스트는 Rust daemon이나 Linux cgroup을 요구하지 않는다.
+
+```bash
+./gradlew test
+```
+
+`src/e2eTest/`에는 실행 중인 실제 Linux daemon을 호출하는 코어 API 계약 테스트만 둔다. 이 테스트는
+`TASKCAGE_SOCKET`을 명시하지 않으면 실행을 거절한다.
+
+```bash
+TASKCAGE_SOCKET=/home/ubuntu/.local/state/taskcage-dev/taskcaged.sock \
+  ./gradlew e2eTest
+```
+
+로컬 unit 테스트는 가짜 UDS daemon으로 빠르게 반복하고, `e2eTest`는 cgroup v2 위임이 준비된 Linux VM에서
+현재 제공되는 `submit` 계약을 검증한다. 이후 `capabilities`, `getTask`, `cancel`, 최종 결과 API가 SDK에 추가되면
+같은 테스트 계층에 실제 daemon 계약 테스트를 확장한다.
+
 ## MVP 구현 순서
 
 1. Gradle Java 17 라이브러리와 공개 value type을 만든다.
