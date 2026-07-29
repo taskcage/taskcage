@@ -88,12 +88,13 @@ class TaskCageClientIntegrationTest {
     void submitEncodesMandatoryLimitsAndDecodesAcceptedTask() throws Exception {
         try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskAcceptedResponse);
                 TaskCageClient client = TaskCageClient.connect(configFor(server))) {
-            Task task = client.submit(new TaskSpec(
+            TaskSubmission submission = client.submit(new TaskSpec(
                     new ExternalCommand(java.nio.file.Path.of("/usr/bin/true"), List.of(),
                             java.nio.file.Path.of("/srv/taskcage/jobs/42"), java.util.Map.of("LANG", "C.UTF-8")),
                     new ResourceBudget(new CpuQuota(100_000, 100_000), 536_870_912, 32,
                             Duration.ofMinutes(2), 1_024, 2_048)));
 
+            Task task = (Task) submission;
             assertEquals("b5309d98-f51e-45e1-9866-b1a080c1ba50", task.taskId().toString());
             assertEquals(1_024, task.effectiveBudget().stdoutTailMaxBytes());
             server.awaitRequests(Duration.ofSeconds(2));
@@ -101,6 +102,23 @@ class TaskCageClientIntegrationTest {
             assertEquals("submitTask", server.requests().get(0).path("type").asText());
             assertEquals("/usr/bin/true", payload.path("command").path("program").asText());
             assertEquals(536_870_912, payload.path("limits").path("memoryMaxBytes").asLong());
+        }
+    }
+
+    @Test
+    void submitDecodesFinishedSnapshotWhenExecutionCannotStart() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::executionFailedResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            TaskSubmission submission = client.submit(new TaskSpec(
+                    new ExternalCommand(java.nio.file.Path.of("/usr/bin/missing"), List.of(),
+                            java.nio.file.Path.of("/srv/taskcage/jobs/42"), java.util.Map.of()),
+                    new ResourceBudget(new CpuQuota(100_000, 100_000), 536_870_912, 32,
+                            Duration.ofMinutes(2), 1_024, 2_048)));
+
+            FinishedTaskSnapshot finished = (FinishedTaskSnapshot) submission;
+            assertEquals(TerminationReason.EXECUTION_FAILED, finished.result().terminationReason());
+            assertEquals(null, finished.result().process().exitCode());
+            assertEquals(null, finished.result().process().signal());
         }
     }
 
@@ -153,6 +171,22 @@ class TaskCageClientIntegrationTest {
 
             assertEquals("TASK_NOT_FOUND", exception.code());
             assertTrue(!exception.retryable());
+        }
+    }
+
+    @Test
+    void cancelTaskEncodesTaskIdAndDecodesCancellation() throws Exception {
+        UUID taskId = UUID.fromString("b5309d98-f51e-45e1-9866-b1a080c1ba50");
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskCancelledResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            TaskCancellation cancellation = client.cancelTask(taskId);
+
+            assertEquals(taskId, cancellation.taskId());
+            assertEquals(TaskState.FINISHED, cancellation.state());
+            assertEquals(TerminationReason.CANCELLED, cancellation.terminationReason());
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals("cancelTask", server.requests().get(0).path("type").asText());
+            assertEquals(taskId.toString(), server.requests().get(0).path("payload").path("taskId").asText());
         }
     }
 
@@ -227,6 +261,16 @@ class TaskCageClientIntegrationTest {
         return response;
     }
 
+    private static ObjectNode executionFailedResponse(JsonNode request) {
+        ObjectNode response = finishedTaskResponse(request);
+        ObjectNode payload = (ObjectNode) response.path("payload");
+        payload.put("terminationReason", "EXECUTION_FAILED");
+        ObjectNode process = (ObjectNode) payload.path("process");
+        process.putNull("exitCode");
+        process.putNull("signal");
+        return response;
+    }
+
     private static ObjectNode taskNotFoundResponse(JsonNode request) {
         ObjectNode response = JsonNodeFactory.instance.objectNode();
         response.put("protocolVersion", 1);
@@ -236,6 +280,18 @@ class TaskCageClientIntegrationTest {
         payload.put("code", "TASK_NOT_FOUND");
         payload.put("message", "task was not found");
         payload.put("retryable", false);
+        return response;
+    }
+
+    private static ObjectNode taskCancelledResponse(JsonNode request) {
+        ObjectNode response = JsonNodeFactory.instance.objectNode();
+        response.put("protocolVersion", 1);
+        response.put("requestId", request.path("requestId").asText());
+        response.put("type", "taskCancelled");
+        ObjectNode payload = response.putObject("payload");
+        payload.put("taskId", "b5309d98-f51e-45e1-9866-b1a080c1ba50");
+        payload.put("state", "FINISHED");
+        payload.put("terminationReason", "CANCELLED");
         return response;
     }
 

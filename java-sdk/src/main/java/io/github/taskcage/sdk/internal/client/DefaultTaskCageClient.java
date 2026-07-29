@@ -13,14 +13,17 @@ import io.github.taskcage.sdk.TaskCageConnectionException;
 import io.github.taskcage.sdk.TaskCageProtocolException;
 import io.github.taskcage.sdk.Task;
 import io.github.taskcage.sdk.TaskSpec;
+import io.github.taskcage.sdk.TaskSubmission;
 import io.github.taskcage.sdk.ResourceBudget;
 import io.github.taskcage.sdk.ExecutionResult;
 import io.github.taskcage.sdk.FinishedTaskSnapshot;
 import io.github.taskcage.sdk.ProcessResult;
 import io.github.taskcage.sdk.RunningTaskSnapshot;
 import io.github.taskcage.sdk.TaskCageDaemonException;
+import io.github.taskcage.sdk.TaskCancellation;
 import io.github.taskcage.sdk.TaskOutput;
 import io.github.taskcage.sdk.TaskSnapshot;
+import io.github.taskcage.sdk.TaskState;
 import io.github.taskcage.sdk.TaskTiming;
 import io.github.taskcage.sdk.TaskUsage;
 import io.github.taskcage.sdk.TerminationReason;
@@ -63,7 +66,7 @@ public final class DefaultTaskCageClient implements TaskCageClient {
     }
 
     @Override
-    public Task submit(TaskSpec task) {
+    public TaskSubmission submit(TaskSpec task) {
         ObjectNode payload = mapper.createObjectNode();
         payload.put("clientRequestId", UUID.randomUUID().toString());
         ObjectNode command = payload.putObject("command");
@@ -82,7 +85,7 @@ public final class DefaultTaskCageClient implements TaskCageClient {
         ObjectNode output = payload.putObject("output");
         output.put("stdoutTailMaxBytes", budget.stdoutTailMaxBytes());
         output.put("stderrTailMaxBytes", budget.stderrTailMaxBytes());
-        return decodeAccepted(request("submitTask", payload), budget);
+        return decodeSubmission(request("submitTask", payload), budget);
     }
 
     @Override
@@ -93,6 +96,16 @@ public final class DefaultTaskCageClient implements TaskCageClient {
         ObjectNode payload = mapper.createObjectNode();
         payload.put("taskId", taskId.toString());
         return decodeTask(request("getTask", payload), taskId);
+    }
+
+    @Override
+    public TaskCancellation cancelTask(UUID taskId) {
+        if (taskId == null) {
+            throw new NullPointerException("taskId");
+        }
+        ObjectNode payload = mapper.createObjectNode();
+        payload.put("taskId", taskId.toString());
+        return decodeCancellation(request("cancelTask", payload), taskId);
     }
 
     @Override
@@ -161,6 +174,20 @@ public final class DefaultTaskCageClient implements TaskCageClient {
         }
     }
 
+    private TaskSubmission decodeSubmission(JsonNode response, ResourceBudget requestedBudget) {
+        String responseType = response.path("type").asText();
+        if ("taskAccepted".equals(responseType)) {
+            return decodeAccepted(response, requestedBudget);
+        }
+        if ("task".equals(responseType)) {
+            TaskSnapshot snapshot = decodeTask(response, null);
+            if (snapshot instanceof FinishedTaskSnapshot finished) {
+                return finished;
+            }
+        }
+        throw new TaskCageProtocolException("expected taskAccepted or finished task response");
+    }
+
     private TaskSnapshot decodeTask(JsonNode response, UUID expectedTaskId) {
         if (!"task".equals(response.path("type").asText())) {
             throw new TaskCageProtocolException("expected task response");
@@ -168,7 +195,7 @@ public final class DefaultTaskCageClient implements TaskCageClient {
         JsonNode payload = response.path("payload");
         try {
             UUID taskId = UUID.fromString(requiredText(payload, "taskId"));
-            if (!expectedTaskId.equals(taskId)) {
+            if (expectedTaskId != null && !expectedTaskId.equals(taskId)) {
                 throw new IllegalArgumentException("taskId does not match the requested task");
             }
             return switch (requiredText(payload, "state")) {
@@ -181,6 +208,25 @@ public final class DefaultTaskCageClient implements TaskCageClient {
             };
         } catch (IllegalArgumentException exception) {
             throw new TaskCageProtocolException("invalid task payload", exception);
+        }
+    }
+
+    private TaskCancellation decodeCancellation(JsonNode response, UUID expectedTaskId) {
+        if (!"taskCancelled".equals(response.path("type").asText())) {
+            throw new TaskCageProtocolException("expected taskCancelled response");
+        }
+        JsonNode payload = response.path("payload");
+        try {
+            UUID taskId = UUID.fromString(requiredText(payload, "taskId"));
+            if (!expectedTaskId.equals(taskId)) {
+                throw new IllegalArgumentException("taskId does not match the requested task");
+            }
+            return new TaskCancellation(
+                    taskId,
+                    requiredEnum(payload, "state", TaskState.class),
+                    requiredEnum(payload, "terminationReason", TerminationReason.class));
+        } catch (IllegalArgumentException exception) {
+            throw new TaskCageProtocolException("invalid taskCancelled payload", exception);
         }
     }
 
