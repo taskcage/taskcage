@@ -64,4 +64,30 @@ class TaskCageDaemonContractTest {
             assertEquals(TerminationReason.EXECUTION_FAILED, finished.result().terminationReason());
         }
     }
+
+    @Test
+    void cancelsRunningTaskAfterCleanup() {
+        String socketPath = System.getenv("TASKCAGE_SOCKET");
+        TaskSpec spec = new TaskSpec(
+                new ExternalCommand(
+                        Path.of("/bin/sleep"),
+                        List.of("10"),
+                        Path.of("/tmp"),
+                        Map.of("LANG", "C.UTF-8")),
+                new ResourceBudget(
+                        new CpuQuota(100_000, 100_000),
+                        64L * 1024 * 1024,
+                        8,
+                        Duration.ofSeconds(20),
+                        1_024,
+                        1_024));
+
+        try (TaskCageClient client = TaskCageClient.connect(
+                TaskCageClientConfig.builder().socketPath(Path.of(socketPath)).build())) {
+            Task accepted = assertInstanceOf(Task.class, client.submit(spec));
+            TaskCancellation cancellation = client.cancelTask(accepted.taskId());
+            assertEquals(TaskState.FINISHED, cancellation.state());
+            assertEquals(TerminationReason.CANCELLED, cancellation.terminationReason());
+        }
+    }
 }

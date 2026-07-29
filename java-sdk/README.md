@@ -67,7 +67,8 @@ try (TaskCageClient client = TaskCageClient.connect(
 }
 ```
 
-`cancelTask`와 완료까지 대기하는 편의 API는 이후 단계에서 추가한다.
+`cancelTask(UUID)`는 daemon cleanup이 끝난 뒤 `TaskCancellation`을 반환한다. 전체 종료 결과가 필요하면
+`getTask(taskId)`를 다시 호출한다. 완료까지 대기하는 편의 API는 이후 단계에서 추가한다.
 
 ## 공개 타입
 
@@ -81,6 +82,7 @@ try (TaskCageClient client = TaskCageClient.connect(
 | `CpuQuota` | cgroup v2 `cpu.max`의 quota/period를 타입 안전하게 표현 |
 | `TaskSubmission` | `Task` 수락 또는 즉시 `FinishedTaskSnapshot`의 submit 결과 |
 | `Task` | 수락된 작업의 `taskId`와 적용된 자원 예산 |
+| `TaskCancellation` | 완료된 취소의 `taskId`, 상태와 종료 원인 |
 | `TaskSnapshot` | 실행 중 또는 완료된 작업의 현재 상태 |
 | `ExecutionResult` | 종료 원인, exit code/signal, 사용량, stdout/stderr tail |
 | `TerminationReason` | `EXITED`, `TIMED_OUT`, `MEMORY_LIMIT_EXCEEDED` 등의 최종 원인 |

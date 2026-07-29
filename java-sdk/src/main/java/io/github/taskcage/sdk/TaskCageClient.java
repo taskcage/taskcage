@@ -24,6 +24,9 @@ public interface TaskCageClient extends AutoCloseable {
     /** Returns the daemon's current immutable snapshot for a submitted task. */
     TaskSnapshot getTask(UUID taskId);
 
+    /** Cancels a running task and returns after daemon cleanup has completed. */
+    TaskCancellation cancelTask(UUID taskId);
+
     /** Closes client-owned transport resources; it never cancels daemon tasks. */
     @Override
     void close();

@@ -20,8 +20,10 @@ import io.github.taskcage.sdk.FinishedTaskSnapshot;
 import io.github.taskcage.sdk.ProcessResult;
 import io.github.taskcage.sdk.RunningTaskSnapshot;
 import io.github.taskcage.sdk.TaskCageDaemonException;
+import io.github.taskcage.sdk.TaskCancellation;
 import io.github.taskcage.sdk.TaskOutput;
 import io.github.taskcage.sdk.TaskSnapshot;
+import io.github.taskcage.sdk.TaskState;
 import io.github.taskcage.sdk.TaskTiming;
 import io.github.taskcage.sdk.TaskUsage;
 import io.github.taskcage.sdk.TerminationReason;
@@ -94,6 +96,16 @@ public final class DefaultTaskCageClient implements TaskCageClient {
         ObjectNode payload = mapper.createObjectNode();
         payload.put("taskId", taskId.toString());
         return decodeTask(request("getTask", payload), taskId);
+    }
+
+    @Override
+    public TaskCancellation cancelTask(UUID taskId) {
+        if (taskId == null) {
+            throw new NullPointerException("taskId");
+        }
+        ObjectNode payload = mapper.createObjectNode();
+        payload.put("taskId", taskId.toString());
+        return decodeCancellation(request("cancelTask", payload), taskId);
     }
 
     @Override
@@ -196,6 +208,25 @@ public final class DefaultTaskCageClient implements TaskCageClient {
             };
         } catch (IllegalArgumentException exception) {
             throw new TaskCageProtocolException("invalid task payload", exception);
+        }
+    }
+
+    private TaskCancellation decodeCancellation(JsonNode response, UUID expectedTaskId) {
+        if (!"taskCancelled".equals(response.path("type").asText())) {
+            throw new TaskCageProtocolException("expected taskCancelled response");
+        }
+        JsonNode payload = response.path("payload");
+        try {
+            UUID taskId = UUID.fromString(requiredText(payload, "taskId"));
+            if (!expectedTaskId.equals(taskId)) {
+                throw new IllegalArgumentException("taskId does not match the requested task");
+            }
+            return new TaskCancellation(
+                    taskId,
+                    requiredEnum(payload, "state", TaskState.class),
+                    requiredEnum(payload, "terminationReason", TerminationReason.class));
+        } catch (IllegalArgumentException exception) {
+            throw new TaskCageProtocolException("invalid taskCancelled payload", exception);
         }
     }
 

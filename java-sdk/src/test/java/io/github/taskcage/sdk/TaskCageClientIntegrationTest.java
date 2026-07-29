@@ -174,6 +174,22 @@ class TaskCageClientIntegrationTest {
         }
     }
 
+    @Test
+    void cancelTaskEncodesTaskIdAndDecodesCancellation() throws Exception {
+        UUID taskId = UUID.fromString("b5309d98-f51e-45e1-9866-b1a080c1ba50");
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskCancelledResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            TaskCancellation cancellation = client.cancelTask(taskId);
+
+            assertEquals(taskId, cancellation.taskId());
+            assertEquals(TaskState.FINISHED, cancellation.state());
+            assertEquals(TerminationReason.CANCELLED, cancellation.terminationReason());
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals("cancelTask", server.requests().get(0).path("type").asText());
+            assertEquals(taskId.toString(), server.requests().get(0).path("payload").path("taskId").asText());
+        }
+    }
+
     private static TaskCageClientConfig configFor(FakeTaskCageServer server) {
         return TaskCageClientConfig.builder()
                 .socketPath(server.socketPath())
@@ -264,6 +280,18 @@ class TaskCageClientIntegrationTest {
         payload.put("code", "TASK_NOT_FOUND");
         payload.put("message", "task was not found");
         payload.put("retryable", false);
+        return response;
+    }
+
+    private static ObjectNode taskCancelledResponse(JsonNode request) {
+        ObjectNode response = JsonNodeFactory.instance.objectNode();
+        response.put("protocolVersion", 1);
+        response.put("requestId", request.path("requestId").asText());
+        response.put("type", "taskCancelled");
+        ObjectNode payload = response.putObject("payload");
+        payload.put("taskId", "b5309d98-f51e-45e1-9866-b1a080c1ba50");
+        payload.put("state", "FINISHED");
+        payload.put("terminationReason", "CANCELLED");
         return response;
     }
 
