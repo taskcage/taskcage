@@ -14,8 +14,20 @@ import io.github.taskcage.sdk.TaskCageProtocolException;
 import io.github.taskcage.sdk.Task;
 import io.github.taskcage.sdk.TaskSpec;
 import io.github.taskcage.sdk.ResourceBudget;
+import io.github.taskcage.sdk.ExecutionResult;
+import io.github.taskcage.sdk.FinishedTaskSnapshot;
+import io.github.taskcage.sdk.ProcessResult;
+import io.github.taskcage.sdk.RunningTaskSnapshot;
+import io.github.taskcage.sdk.TaskCageDaemonException;
+import io.github.taskcage.sdk.TaskOutput;
+import io.github.taskcage.sdk.TaskSnapshot;
+import io.github.taskcage.sdk.TaskTiming;
+import io.github.taskcage.sdk.TaskUsage;
+import io.github.taskcage.sdk.TerminationReason;
 import io.github.taskcage.sdk.internal.transport.UnixDomainSocketConnection;
 import java.io.IOException;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -74,6 +86,16 @@ public final class DefaultTaskCageClient implements TaskCageClient {
     }
 
     @Override
+    public TaskSnapshot getTask(UUID taskId) {
+        if (taskId == null) {
+            throw new NullPointerException("taskId");
+        }
+        ObjectNode payload = mapper.createObjectNode();
+        payload.put("taskId", taskId.toString());
+        return decodeTask(request("getTask", payload), taskId);
+    }
+
+    @Override
     public void close() {
         requestLock.lock();
         try {
@@ -107,6 +129,9 @@ public final class DefaultTaskCageClient implements TaskCageClient {
             byte[] responseBytes = requireConnection().request(writeRequest(request), config.requestTimeout());
             JsonNode response = mapper.readTree(responseBytes);
             validateResponse(response, requestId);
+            if ("error".equals(response.path("type").asText())) {
+                throw decodeDaemonError(response);
+            }
             return response;
         } catch (JsonProcessingException exception) {
             closeConnection();
@@ -133,6 +158,64 @@ public final class DefaultTaskCageClient implements TaskCageClient {
                     requestedBudget.stdoutTailMaxBytes(), requestedBudget.stderrTailMaxBytes()));
         } catch (IllegalArgumentException exception) {
             throw new TaskCageProtocolException("invalid taskAccepted payload", exception);
+        }
+    }
+
+    private TaskSnapshot decodeTask(JsonNode response, UUID expectedTaskId) {
+        if (!"task".equals(response.path("type").asText())) {
+            throw new TaskCageProtocolException("expected task response");
+        }
+        JsonNode payload = response.path("payload");
+        try {
+            UUID taskId = UUID.fromString(requiredText(payload, "taskId"));
+            if (!expectedTaskId.equals(taskId)) {
+                throw new IllegalArgumentException("taskId does not match the requested task");
+            }
+            return switch (requiredText(payload, "state")) {
+                case "RUNNING" -> new RunningTaskSnapshot(
+                        taskId,
+                        requiredInstant(payload, "submittedAt"),
+                        requiredInstant(payload, "startedAt"));
+                case "FINISHED" -> new FinishedTaskSnapshot(taskId, decodeExecutionResult(payload));
+                default -> throw new IllegalArgumentException("state must be RUNNING or FINISHED");
+            };
+        } catch (IllegalArgumentException exception) {
+            throw new TaskCageProtocolException("invalid task payload", exception);
+        }
+    }
+
+    private ExecutionResult decodeExecutionResult(JsonNode payload) {
+        JsonNode process = requiredObject(payload, "process");
+        JsonNode timing = requiredObject(payload, "timing");
+        JsonNode usage = requiredObject(payload, "usage");
+        JsonNode output = requiredObject(payload, "output");
+        return new ExecutionResult(
+                requiredEnum(payload, "terminationReason", TerminationReason.class),
+                new ProcessResult(optionalInt(process, "exitCode"), optionalText(process, "signal")),
+                new TaskTiming(
+                        requiredInstant(timing, "submittedAt"),
+                        requiredInstant(timing, "startedAt"),
+                        requiredInstant(timing, "finishedAt"),
+                        Duration.ofMillis(requiredNonNegativeLong(timing, "wallTimeMs"))),
+                new TaskUsage(
+                        requiredNonNegativeLong(usage, "cpuTimeMicros"),
+                        requiredNonNegativeLong(usage, "memoryPeakBytes")),
+                new TaskOutput(
+                        requiredString(output, "stdoutTail"),
+                        requiredString(output, "stderrTail"),
+                        requiredBoolean(output, "stdoutTruncated"),
+                        requiredBoolean(output, "stderrTruncated")));
+    }
+
+    private TaskCageDaemonException decodeDaemonError(JsonNode response) {
+        JsonNode payload = response.path("payload");
+        try {
+            return new TaskCageDaemonException(
+                    requiredText(payload, "code"),
+                    requiredText(payload, "message"),
+                    requiredBoolean(payload, "retryable"));
+        } catch (IllegalArgumentException exception) {
+            throw new TaskCageProtocolException("invalid error payload", exception);
         }
     }
 
@@ -196,6 +279,14 @@ public final class DefaultTaskCageClient implements TaskCageClient {
         return value.textValue();
     }
 
+    private static String requiredString(JsonNode object, String field) {
+        JsonNode value = object.get(field);
+        if (value == null || !value.isTextual()) {
+            throw new IllegalArgumentException(field + " must be a string");
+        }
+        return value.textValue();
+    }
+
     private static int requiredPositiveInt(JsonNode object, String field) {
         JsonNode value = object.get(field);
         if (value == null || !value.canConvertToInt() || value.intValue() <= 0) {
@@ -210,6 +301,58 @@ public final class DefaultTaskCageClient implements TaskCageClient {
             throw new IllegalArgumentException(field + " must be a positive integer");
         }
         return value.longValue();
+    }
+
+    private static long requiredNonNegativeLong(JsonNode object, String field) {
+        JsonNode value = object.get(field);
+        if (value == null || !value.isIntegralNumber() || !value.canConvertToLong() || value.longValue() < 0) {
+            throw new IllegalArgumentException(field + " must be a non-negative integer");
+        }
+        return value.longValue();
+    }
+
+    private static int requiredInt(JsonNode object, String field) {
+        JsonNode value = object.get(field);
+        if (value == null || !value.isIntegralNumber() || !value.canConvertToInt()) {
+            throw new IllegalArgumentException(field + " must be an integer");
+        }
+        return value.intValue();
+    }
+
+    private static Integer optionalInt(JsonNode object, String field) {
+        JsonNode value = object.get(field);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        return requiredInt(object, field);
+    }
+
+    private static String optionalText(JsonNode object, String field) {
+        JsonNode value = object.get(field);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        return requiredText(object, field);
+    }
+
+    private static JsonNode requiredObject(JsonNode object, String field) {
+        JsonNode value = object.get(field);
+        if (value == null || !value.isObject()) {
+            throw new IllegalArgumentException(field + " must be an object");
+        }
+        return value;
+    }
+
+    private static Instant requiredInstant(JsonNode object, String field) {
+        return Instant.parse(requiredText(object, field));
+    }
+
+    private static <T extends Enum<T>> T requiredEnum(JsonNode object, String field, Class<T> type) {
+        try {
+            return Enum.valueOf(type, requiredText(object, field));
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException(field + " must be a supported " + type.getSimpleName(), exception);
+        }
     }
 
     private static boolean requiredBoolean(JsonNode object, String field) {
