@@ -123,6 +123,24 @@ class TaskCageDaemonContractTest {
         }
     }
 
+    @Test
+    void retainsBoundedOutputTailsAndTruncationFlags() throws Exception {
+        String fixture = System.getenv("TASKCAGE_OUTPUT_FLOOD");
+        TaskSpec spec = new TaskSpec(
+                new ExternalCommand(Path.of(fixture), List.of("both"), Path.of("/tmp"), Map.of("LANG", "C.UTF-8")),
+                new ResourceBudget(new CpuQuota(100_000, 100_000), 64L * 1024 * 1024, 8,
+                        Duration.ofSeconds(10), 64, 64));
+        try (TaskCageClient client = client()) {
+            Task accepted = assertInstanceOf(Task.class, client.submit(spec));
+            FinishedTaskSnapshot finished = awaitFinished(client, accepted.taskId());
+            assertEquals(TerminationReason.EXITED, finished.result().terminationReason());
+            assertEquals(true, finished.result().output().stdoutTruncated());
+            assertEquals(true, finished.result().output().stderrTruncated());
+            assertEquals(true, finished.result().output().stdoutTail().contains("STDOUT-END"));
+            assertEquals(true, finished.result().output().stderrTail().contains("STDERR-END"));
+        }
+    }
+
     private static TaskCageClient client() {
         return TaskCageClient.connect(TaskCageClientConfig.builder()
                 .socketPath(Path.of(System.getenv("TASKCAGE_SOCKET"))).build());
