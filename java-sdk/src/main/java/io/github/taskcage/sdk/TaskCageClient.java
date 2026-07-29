@@ -14,6 +14,9 @@ public interface TaskCageClient extends AutoCloseable {
     /** Returns the daemon capabilities after a request-response round trip. */
     TaskCageCapabilities capabilities();
 
+    /** Submits a constrained task and returns after the daemon has accepted it. */
+    Task submit(TaskSpec task);
+
     /** Closes client-owned transport resources; it never cancels daemon tasks. */
     @Override
     void close();

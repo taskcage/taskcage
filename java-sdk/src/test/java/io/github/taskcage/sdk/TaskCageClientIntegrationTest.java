@@ -83,6 +83,26 @@ class TaskCageClientIntegrationTest {
         }
     }
 
+    @Test
+    void submitEncodesMandatoryLimitsAndDecodesAcceptedTask() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskAcceptedResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            Task task = client.submit(new TaskSpec(
+                    new ExternalCommand(java.nio.file.Path.of("/usr/bin/true"), List.of(),
+                            java.nio.file.Path.of("/srv/taskcage/jobs/42"), java.util.Map.of("LANG", "C.UTF-8")),
+                    new ResourceBudget(new CpuQuota(100_000, 100_000), 536_870_912, 32,
+                            Duration.ofMinutes(2), 1_024, 2_048)));
+
+            assertEquals("b5309d98-f51e-45e1-9866-b1a080c1ba50", task.taskId().toString());
+            assertEquals(1_024, task.effectiveBudget().stdoutTailMaxBytes());
+            server.awaitRequests(Duration.ofSeconds(2));
+            JsonNode payload = server.requests().get(0).path("payload");
+            assertEquals("submitTask", server.requests().get(0).path("type").asText());
+            assertEquals("/usr/bin/true", payload.path("command").path("program").asText());
+            assertEquals(536_870_912, payload.path("limits").path("memoryMaxBytes").asLong());
+        }
+    }
+
     private static TaskCageClientConfig configFor(FakeTaskCageServer server) {
         return TaskCageClientConfig.builder()
                 .socketPath(server.socketPath())
@@ -102,6 +122,24 @@ class TaskCageClientIntegrationTest {
         payload.put("maxFrameBytes", 1_048_576);
         payload.put("maxConcurrentTasks", 4);
         payload.put("cgroupV2Ready", request.path("requestId").asText().length() > 0);
+        return response;
+    }
+
+    private static ObjectNode taskAcceptedResponse(JsonNode request) {
+        ObjectNode response = JsonNodeFactory.instance.objectNode();
+        response.put("protocolVersion", 1);
+        response.put("requestId", request.path("requestId").asText());
+        response.put("type", "taskAccepted");
+        ObjectNode payload = response.putObject("payload");
+        payload.put("taskId", "b5309d98-f51e-45e1-9866-b1a080c1ba50");
+        payload.put("state", "RUNNING");
+        ObjectNode limits = payload.putObject("effectiveLimits");
+        ObjectNode cpu = limits.putObject("cpuMax");
+        cpu.put("quotaMicros", 100_000);
+        cpu.put("periodMicros", 100_000);
+        limits.put("memoryMaxBytes", 536_870_912);
+        limits.put("pidsMax", 32);
+        limits.put("wallTimeLimitMs", 120_000);
         return response;
     }
 }
