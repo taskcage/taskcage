@@ -49,5 +49,11 @@ tasks.register<Test>("e2eTest") {
         require(!System.getenv("TASKCAGE_SOCKET").isNullOrBlank()) {
             "e2eTest requires TASKCAGE_SOCKET to point to a running TaskCage daemon"
         }
+        require(!System.getenv("TASKCAGE_GHOST_TREE").isNullOrBlank()) {
+            "e2eTest requires TASKCAGE_GHOST_TREE to point to the ghost-tree fixture"
+        }
+        require(!System.getenv("TASKCAGE_OUTPUT_FLOOD").isNullOrBlank()) {
+            "e2eTest requires TASKCAGE_OUTPUT_FLOOD to point to the output-flood fixture"
+        }
     }
 }
