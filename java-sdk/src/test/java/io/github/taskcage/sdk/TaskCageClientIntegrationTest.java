@@ -106,6 +106,21 @@ class TaskCageClientIntegrationTest {
     }
 
     @Test
+    void submitUsesCallerSuppliedIdempotencyKey() throws Exception {
+        UUID requestId = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskAcceptedResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            client.submit(requestId, new TaskSpec(
+                    new ExternalCommand(java.nio.file.Path.of("/usr/bin/true"), List.of(),
+                            java.nio.file.Path.of("/tmp"), java.util.Map.of()),
+                    new ResourceBudget(new CpuQuota(100_000, 100_000), 64L * 1024 * 1024, 8,
+                            Duration.ofSeconds(10), 1_024, 1_024)));
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals(requestId.toString(), server.requests().get(0).path("payload").path("clientRequestId").asText());
+        }
+    }
+
+    @Test
     void submitDecodesFinishedSnapshotWhenExecutionCannotStart() throws Exception {
         try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::executionFailedResponse);
                 TaskCageClient client = TaskCageClient.connect(configFor(server))) {

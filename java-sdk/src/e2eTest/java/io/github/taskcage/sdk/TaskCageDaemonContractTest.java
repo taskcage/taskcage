@@ -141,6 +141,17 @@ class TaskCageDaemonContractTest {
         }
     }
 
+    @Test
+    void reusesTaskForSameClientRequestId() {
+        java.util.UUID requestId = java.util.UUID.randomUUID();
+        try (TaskCageClient client = client()) {
+            TaskSpec spec = spec("/bin/sleep", List.of("1"), Duration.ofSeconds(5));
+            Task first = assertInstanceOf(Task.class, client.submit(requestId, spec));
+            Task second = assertInstanceOf(Task.class, client.submit(requestId, spec));
+            assertEquals(first.taskId(), second.taskId());
+        }
+    }
+
     private static TaskCageClient client() {
         return TaskCageClient.connect(TaskCageClientConfig.builder()
                 .socketPath(Path.of(System.getenv("TASKCAGE_SOCKET"))).build());

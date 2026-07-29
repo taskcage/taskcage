@@ -21,6 +21,9 @@ public interface TaskCageClient extends AutoCloseable {
      */
     TaskSubmission submit(TaskSpec task);
 
+    /** Submits with a caller-owned idempotency key that can be reused after a lost response. */
+    TaskSubmission submit(UUID clientRequestId, TaskSpec task);
+
     /** Returns the daemon's current immutable snapshot for a submitted task. */
     TaskSnapshot getTask(UUID taskId);
 

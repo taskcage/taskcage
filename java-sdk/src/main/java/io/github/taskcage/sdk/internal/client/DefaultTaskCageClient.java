@@ -67,8 +67,16 @@ public final class DefaultTaskCageClient implements TaskCageClient {
 
     @Override
     public TaskSubmission submit(TaskSpec task) {
+        return submit(UUID.randomUUID(), task);
+    }
+
+    @Override
+    public TaskSubmission submit(UUID clientRequestId, TaskSpec task) {
+        if (clientRequestId == null) {
+            throw new NullPointerException("clientRequestId");
+        }
         ObjectNode payload = mapper.createObjectNode();
-        payload.put("clientRequestId", UUID.randomUUID().toString());
+        payload.put("clientRequestId", clientRequestId.toString());
         ObjectNode command = payload.putObject("command");
         command.put("program", task.command().program().toString());
         command.putPOJO("args", task.command().arguments());
