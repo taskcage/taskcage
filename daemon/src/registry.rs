@@ -442,13 +442,16 @@ where
     }
 
     /// RUNNING 공개 전 실패는 예약과 두 인덱스를 같은 잠금 구간에서 되돌린다.
-    fn release_failed_owner(&self, owner: &SubmitExecutionOwner<C>) -> Result<(), RegistryError> {
+    fn release_failed_owner(
+        &self,
+        owner: &SubmitExecutionOwner<C>,
+    ) -> Result<Option<TaskPayload>, RegistryError> {
         let mut state = self.lock_state()?;
         state.purge_expired();
         state.verify_owner(owner)?;
-        if state.tasks.contains_key(&owner.task_id) {
-            // RUNNING 이후 실패는 정리 계약이 확정될 때까지 공개 상태를 지우지 않는다.
-            return Ok(());
+        if let Some(record) = state.tasks.get(&owner.task_id) {
+            // RUNNING 이후 실패는 저장된 상태와 멱등 재전송 결과를 함께 유지한다.
+            return Ok(Some(record.snapshot.clone()));
         }
 
         let removed_request = state.requests.remove(&owner.client_request_id);
@@ -458,7 +461,7 @@ where
             removed_client_request_id.as_deref(),
             Some(owner.client_request_id.as_str())
         );
-        Ok(())
+        Ok(None)
     }
 
     fn lock_state(&self) -> Result<MutexGuard<'_, RegistryState<C>>, RegistryError> {
@@ -666,11 +669,21 @@ where
         failure: SubmitFailure,
     ) -> Result<SubmitObservation, RegistryError> {
         match self.registry.release_failed_owner(&self) {
-            Ok(()) => {
+            Ok(None) => {
                 let observation = SubmitObservation::Failed(failure);
                 self.signal.publish(observation.clone());
                 self.resolved = true;
                 Ok(observation)
+            }
+            Ok(Some(_)) => {
+                let error = RegistryError::StateUnavailable;
+                self.signal
+                    .publish(SubmitObservation::Failed(SubmitFailure::new(
+                        ErrorCode::InternalError,
+                        error.to_string(),
+                    )));
+                self.resolved = true;
+                Err(error)
             }
             Err(error) => {
                 self.signal
@@ -685,9 +698,12 @@ where
     }
 
     fn fail_inner(&mut self, failure: SubmitFailure) -> SubmitObservation {
-        let observation = SubmitObservation::Failed(failure);
+        let failed = SubmitObservation::Failed(failure);
         // 잠금 자체를 사용할 수 없으면 waiter는 깨우되 Registry 오류는 이후 조회에서 보존한다.
-        let _ = self.registry.release_failed_owner(self);
+        let observation = match self.registry.release_failed_owner(self) {
+            Ok(Some(snapshot)) => SubmitObservation::Task(snapshot),
+            Ok(None) | Err(_) => failed,
+        };
         self.signal.publish(observation.clone());
         self.resolved = true;
         observation
@@ -1690,19 +1706,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failure_after_running_preserves_public_snapshot_and_shared_failure() {
+    async fn failure_after_running_preserves_public_snapshot_for_idempotent_retries() {
         let registry = TaskRegistry::new();
         let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
         let running = owner.publish_running(running(TASK_ID)).unwrap();
         let expected = SubmitFailure::new(ErrorCode::InternalError, "cleanup uncertain");
 
         assert_eq!(
-            owner.fail(expected.clone()),
-            SubmitObservation::Failed(expected.clone())
+            owner.fail(expected),
+            SubmitObservation::Task(running.clone())
         );
-        assert_eq!(registry.snapshot(TASK_ID), Ok(Some(running)));
+        assert_eq!(registry.snapshot(TASK_ID), Ok(Some(running.clone())));
 
         let waiter = existing(&registry, submit_payload(), OTHER_TASK_ID);
-        assert_eq!(waiter.wait().await, SubmitObservation::Failed(expected));
+        assert_eq!(waiter.wait().await, SubmitObservation::Task(running));
     }
 }

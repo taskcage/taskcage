@@ -691,6 +691,7 @@ async fn run_after_running<C, Fut>(
         match owner.publish_running_with_cancellation(running, effective_limits, cancellation) {
             Ok(running) => running,
             Err(error) => {
+                report_running_publication_failure(&fail_stop, owner.task_id());
                 let failure = SubmitFailure::new(ErrorCode::InternalError, error.to_string());
                 let observation = owner.fail(failure);
                 let _ = initial_sender.send(observation);
@@ -742,6 +743,7 @@ fn finish_after_running<C>(
         match owner.publish_running_with_cancellation(running, effective_limits, cancellation) {
             Ok(running) => running,
             Err(error) => {
+                report_running_publication_failure(&fail_stop, owner.task_id());
                 let failure = SubmitFailure::new(ErrorCode::InternalError, error.to_string());
                 let observation = owner.fail(failure);
                 let _ = initial_sender.send(observation);
@@ -837,6 +839,16 @@ fn report_running_failure(fail_stop: &FailStopCoordinator, task_id: &str) {
         "RUNNING 작업 완료",
         vec!["검증된 FINISHED 결과"],
         "RUNNING snapshot을 유지하고 daemon 종료를 시작함",
+    ));
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn report_running_publication_failure(fail_stop: &FailStopCoordinator, task_id: &str) {
+    fail_stop.activate(CleanupFailureReport::new(
+        task_id,
+        "RUNNING 저장",
+        vec!["공개 RUNNING snapshot"],
+        "exec 시작 뒤 작업 상태를 저장하지 못해 daemon 종료를 시작함",
     ));
 }
 
@@ -1641,6 +1653,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn running_storage_failure_activates_fail_stop_before_execution_finishes() {
+        let registry = TaskRegistry::new();
+        let registry_for_executor = registry.clone();
+        let capacity = task_capacity(1);
+        let release = Arc::new(Notify::new());
+        let release_executor = Arc::clone(&release);
+        let clock_calls = Arc::new(AtomicUsize::new(0));
+        let base = Instant::now();
+        let fail_stop = FailStopCoordinator::with_test_clock(
+            FailStopSettings::new(Duration::from_secs(5)).unwrap(),
+            {
+                let clock_calls = Arc::clone(&clock_calls);
+                Arc::new(move || {
+                    clock_calls.fetch_add(1, Ordering::SeqCst);
+                    base
+                })
+            },
+        );
+
+        let outcome = coordinate_validated_submit(
+            registry,
+            Arc::clone(&capacity),
+            Arc::clone(&fail_stop),
+            REQUEST_ID.to_owned(),
+            ValidatedSubmit::try_from_payload(payload()).unwrap(),
+            metadata(TASK_ID),
+            move |config, running_sender, _cancellation| async move {
+                registry_for_executor.poison_state_for_test();
+                running_sender.send(verified_running(&config)).unwrap();
+                release_executor.notified().await;
+                Ok(ExecutionCompletion::Test(finished(&config.task_id)))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome.observation,
+            SubmitObservation::Failed(SubmitFailure {
+                code: ErrorCode::InternalError,
+                ..
+            })
+        ));
+        assert!(fail_stop.is_fail_stopping());
+        assert_eq!(clock_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(capacity.retained_for_fail_stop(), 1);
+        assert!(capacity.try_acquire().is_none());
+        let report = fail_stop.first_report().unwrap();
+        assert_eq!(report.stage, "RUNNING 저장");
+        assert!(!format!("{report:?}").contains("/usr/bin/true"));
+        assert!(!format!("{report:?}").contains("LANG"));
+
+        release.notify_one();
+        tokio::task::yield_now().await;
+        assert_eq!(clock_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn full_registry_rejects_before_task_id_capacity_and_executor_side_effects() {
         let registry = TaskRegistry::initialize(TaskRegistrySettings::new(1).unwrap());
         let capacity = task_capacity(2);
@@ -2098,11 +2168,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fail_stop_keeps_existing_idempotency_and_conflict_without_new_execution() {
+    async fn cleanup_uncertainty_keeps_running_idempotency_without_new_execution() {
         let registry = TaskRegistry::new();
         let capacity = task_capacity(1);
         let fail_stop = fail_stop_runtime();
         let validated = ValidatedSubmit::try_from_payload(payload()).unwrap();
+        let fail_now = Arc::new(Notify::new());
+        let fail_owner = Arc::clone(&fail_now);
         let first = coordinate_validated_submit(
             registry.clone(),
             Arc::clone(&capacity),
@@ -2112,7 +2184,11 @@ mod tests {
             metadata(TASK_ID),
             move |config, running_sender, _cancellation| async move {
                 running_sender.send(verified_running(&config)).unwrap();
-                Ok(ExecutionCompletion::Test(finished(&config.task_id)))
+                fail_owner.notified().await;
+                Err(retained_failure(SubmitFailure::new(
+                    ErrorCode::InternalError,
+                    "cleanup uncertain",
+                )))
             },
         )
         .await
@@ -2121,14 +2197,15 @@ mod tests {
             first.observation,
             SubmitObservation::Task(TaskPayload::Running { .. })
         ));
-        tokio::task::yield_now().await;
 
-        fail_stop.activate(CleanupFailureReport::new(
-            TASK_ID,
-            "시험 정리",
-            vec!["작업 cgroup"],
-            "실패",
-        ));
+        fail_now.notify_one();
+        timeout(TokioDuration::from_secs(1), async {
+            while !fail_stop.is_fail_stopping() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("RUNNING 이후 정리 불확실성이 fail-stop을 시작해야 합니다");
         let new_task_ids = Arc::new(AtomicUsize::new(0));
         let new_start_times = Arc::new(AtomicUsize::new(0));
         let executor_starts = Arc::new(AtomicUsize::new(0));
@@ -2161,7 +2238,17 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(duplicate.task_id, TASK_ID);
-        assert!(matches!(duplicate.observation, SubmitObservation::Task(_)));
+        assert!(matches!(
+            duplicate.observation,
+            SubmitObservation::Task(TaskPayload::Running { ref task_id, .. })
+                if task_id == TASK_ID
+        ));
+        assert!(duplicate.effective_limits.is_some());
+        assert!(matches!(
+            registry.snapshot(TASK_ID).unwrap(),
+            Some(TaskPayload::Running { .. })
+        ));
+        assert_eq!(capacity.retained_for_fail_stop(), 1);
 
         let mut changed = payload();
         changed.command.args.push("different".to_owned());
@@ -3063,6 +3150,28 @@ mod tests {
             } else {
                 assert!(matches!(snapshot, TaskPayload::Running { .. }));
             }
+
+            let duplicate = coordinator
+                .submit(
+                    request(
+                        PROTOCOL_VERSION,
+                        OTHER_REQUEST_ID,
+                        linux_payload(CLIENT_REQUEST_ID, &program, &args, 60_000),
+                    ),
+                    cleanup_fault_metadata(NONZERO_TASK_ID),
+                    || ("finished".to_owned(), Instant::now()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(duplicate.task_id, TASK_ID);
+            assert_eq!(
+                duplicate.observation,
+                SubmitObservation::Task(snapshot.clone())
+            );
+            assert!(
+                !jobs_path.join(format!("job-{NONZERO_TASK_ID}")).exists(),
+                "멱등 재전송은 새 작업 cgroup을 만들면 안 됩니다"
+            );
 
             let rejected = coordinator
                 .submit(

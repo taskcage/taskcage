@@ -56,6 +56,7 @@ fn actual_restart_recovers_stale_socket_and_residual_execution() {
         .expect("runtime directory mode 설정");
     let socket_path = runtime.join("taskcaged.sock");
     let first_log = runtime.join("first-taskcaged.log");
+    let rejected_log = runtime.join("rejected-taskcaged.log");
     let second_log = runtime.join("second-taskcaged.log");
     let ready_path = runtime.join("ghost.ready");
 
@@ -63,6 +64,7 @@ fn actual_restart_recovers_stale_socket_and_residual_execution() {
         daemon_root.clone(),
         runtime.clone(),
         first_log.clone(),
+        rejected_log.clone(),
         second_log.clone(),
     );
     guard.first = Some(spawn_daemon(
@@ -143,6 +145,36 @@ fn actual_restart_recovers_stale_socket_and_residual_execution() {
         manager_path.is_dir(),
         "재시작 process가 안전하게 진입할 기존 manager cgroup이 필요합니다"
     );
+    guard.rejected = Some(spawn_daemon_without_root(
+        &daemon_bin,
+        &manager_path,
+        &socket_path,
+        &rejected_log,
+    ));
+    let rejected_status = wait_for_exit(
+        guard.rejected.as_mut().unwrap(),
+        Instant::now() + Duration::from_secs(3),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "부모 위임 root가 없는 재시작이 종료되지 않았습니다\n{}",
+            read_log(&rejected_log)
+        )
+    });
+    assert!(
+        !rejected_status.success(),
+        "부모 위임 root가 없는 재시작은 실패해야 합니다\n{}",
+        read_log(&rejected_log)
+    );
+    assert!(old_job_path.is_dir() && cgroup_populated(&old_job_path));
+    assert!(all_processes_alive(&old_descendant_pids));
+    assert!(!manager_path.join("manager").exists());
+    assert!(!manager_path.join("jobs").exists());
+    assert!(
+        std::os::unix::net::UnixStream::connect(&socket_path).is_err(),
+        "부모 위임 root가 없는 재시작은 UDS 요청을 받으면 안 됩니다"
+    );
+
     guard.second = Some(spawn_daemon(
         &daemon_bin,
         &daemon_root,
@@ -256,6 +288,31 @@ fn spawn_daemon(
     socket_path: &Path,
     log_path: &Path,
 ) -> Child {
+    spawn_daemon_with_root(
+        daemon_bin,
+        Some(daemon_root),
+        launch_cgroup,
+        socket_path,
+        log_path,
+    )
+}
+
+fn spawn_daemon_without_root(
+    daemon_bin: &Path,
+    launch_cgroup: &Path,
+    socket_path: &Path,
+    log_path: &Path,
+) -> Child {
+    spawn_daemon_with_root(daemon_bin, None, launch_cgroup, socket_path, log_path)
+}
+
+fn spawn_daemon_with_root(
+    daemon_bin: &Path,
+    daemon_root: Option<&Path>,
+    launch_cgroup: &Path,
+    socket_path: &Path,
+    log_path: &Path,
+) -> Child {
     let log = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -277,11 +334,15 @@ fn spawn_daemon(
         .arg(CLEANUP_TIMEOUT.as_millis().to_string())
         .arg("--fail-stop-timeout-ms")
         .arg(FAIL_STOP_TIMEOUT.as_millis().to_string())
-        .env("TASKCAGE_CGROUP_ROOT", daemon_root)
         .stdout(Stdio::from(
             log.try_clone().expect("daemon stdout log 복제"),
         ))
         .stderr(Stdio::from(log));
+    if let Some(daemon_root) = daemon_root {
+        command.env("TASKCAGE_CGROUP_ROOT", daemon_root);
+    } else {
+        command.env_remove("TASKCAGE_CGROUP_ROOT");
+    }
     move_child_before_exec(&mut command, launch_cgroup);
     command.spawn().unwrap_or_else(|error| {
         panic!(
@@ -658,10 +719,12 @@ fn read_log(path: &Path) -> String {
 
 struct RestartGuard {
     first: Option<Child>,
+    rejected: Option<Child>,
     second: Option<Child>,
     daemon_root: PathBuf,
     runtime: PathBuf,
     first_log: PathBuf,
+    rejected_log: PathBuf,
     second_log: PathBuf,
     cleaned: bool,
 }
@@ -671,14 +734,17 @@ impl RestartGuard {
         daemon_root: PathBuf,
         runtime: PathBuf,
         first_log: PathBuf,
+        rejected_log: PathBuf,
         second_log: PathBuf,
     ) -> Self {
         Self {
             first: None,
+            rejected: None,
             second: None,
             daemon_root,
             runtime,
             first_log,
+            rejected_log,
             second_log,
             cleaned: false,
         }
@@ -695,6 +761,7 @@ impl RestartGuard {
             }
         }
         stop_child(self.first.as_mut());
+        stop_child(self.rejected.as_mut());
         stop_child(self.second.as_mut());
         wait_for_cgroup_empty(&self.daemon_root, &mut errors);
         remove_cgroup_tree(&self.daemon_root, &mut errors);
@@ -704,6 +771,7 @@ impl RestartGuard {
             self.runtime.join("ghost.ready"),
             self.runtime.join(".taskcaged.lock"),
             self.first_log.clone(),
+            self.rejected_log.clone(),
             self.second_log.clone(),
         ] {
             remove_file_if_exists(&file, &mut errors);
@@ -718,6 +786,7 @@ impl Drop for RestartGuard {
     fn drop(&mut self) {
         if std::thread::panicking() {
             eprintln!("첫 taskcaged log:\n{}", read_log(&self.first_log));
+            eprintln!("거절된 taskcaged log:\n{}", read_log(&self.rejected_log));
             eprintln!("두 번째 taskcaged log:\n{}", read_log(&self.second_log));
         }
         let errors = self.cleanup();
