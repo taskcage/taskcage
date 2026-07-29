@@ -121,6 +121,11 @@ if (result.terminationReason() == TerminationReason.TIMEOUT) {
 
 - [MVP API 명세](docs/api-mvp.md): UDS 프로토콜, 요청·응답, 오류 코드와 공유 fixture 계약
 - [직접 cgroup v2 제어 결정](docs/decisions/0001-direct-cgroup-v2-without-systemd.md): systemd 없이 구현하는 이유와 운영 원칙
+- [정리 뒤 종료 결과 공개 결정](docs/decisions/0002-publish-terminal-results-after-cleanup.md): 작업 전체 정리가 확인된 뒤에만 `FINISHED`를 공개하는 원칙
+- [RUNNING 이후 정리 불확실 처리 결정](docs/decisions/0003-fail-stop-on-uncertain-cleanup-after-running.md): 제한된 복구 뒤 fail-stop 종료와 재시작 복구 원칙
+- [명시적 owner-only UDS 결정](docs/decisions/0004-explicit-owner-only-uds-socket.md): socket 절대 경로, `0600` 권한과 기존 경로 보호 원칙
+- [시작 복구 소유권과 stale socket 결정](docs/decisions/0005-own-startup-recovery-before-removing-stale-socket.md): 단일 daemon lock, 안전한 stale 판정과 시작 순서
+- [UDS 동시 연결 제한 결정](docs/decisions/0007-bound-concurrent-uds-connections.md): 명시적인 연결 상한과 초과 연결 종료 원칙
 
 ## 지원 범위
 
@@ -145,6 +150,25 @@ CLI, Python SDK, Docker·Kubernetes 지원은 초기 기능과 실제 사용 사
 2. Linux 통합 테스트: ghost process, memory hog, 안전한 fork 폭주 fixture를 반복 검증
 3. Java SDK: Gradle 기반 라이브러리, 타입 안전한 API·예외 모델·예제 애플리케이션, Maven Central 배포 준비
 4. 운영성 강화: 재시작 복구, 진단 명령, 구조화 로그, 메트릭과 대기열 정책
+
+서비스 실행에서는 socket 기본 경로를 가정하지 않고 절대 경로와 내부 실행 설정을 명시한다.
+
+```bash
+taskcaged serve \
+  --socket /run/taskcage/taskcaged.sock \
+  --max-concurrent-tasks 4 \
+  --max-concurrent-connections 32 \
+  --max-registry-tasks 1000 \
+  --cleanup-timeout-ms 5000 \
+  --fail-stop-timeout-ms 10000
+```
+
+위 경로와 숫자는 배포 예시이며 protocol 기본값이 아니다. 상위 디렉터리와 서비스 계정은 배포 설정이
+준비하고, daemon은 socket을 owner-only `0600`으로 만든다. `max-concurrent-connections`는 UDS 연결
+handler의 메모리와 file descriptor 사용을 제한하는 서비스 설정이며 작업 실행 한도인
+`max-concurrent-tasks`와 별개다. `max-registry-tasks`는 예약, 실행 중 작업과 최소 10분 보존하는 완료
+결과를 합친 메모리 Registry 작업 수를 제한한다. 이 값은 `max-concurrent-tasks` 이상이어야 하며,
+Protocol v1 capability field나 공개 기본값은 아니다.
 
 ## Java SDK 배포 계획
 

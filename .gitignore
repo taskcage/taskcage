@@ -1,0 +1,23 @@
+# 운영체제와 편집기
+.DS_Store
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# Rust 빌드 결과
+target/
+
+# TaskCage 로컬 실행 파일
+.taskcage/
+*.pid
+*.sock
+*.log
+
+# 로컬 환경 설정
+.env
+.env.*
+!.env.example
+
+# 개인 작업 문서
+docs/RUST-DAEMON-ROADMAP.md
