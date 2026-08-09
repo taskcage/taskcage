@@ -18,7 +18,14 @@ ExecStart=/usr/local/bin/taskcaged serve \
   --max-registry-tasks ${TASKCAGE_MAX_REGISTRY_TASKS} \
   --max-concurrent-connections ${TASKCAGE_MAX_CONCURRENT_CONNECTIONS} \
   --cleanup-timeout-ms ${TASKCAGE_CLEANUP_TIMEOUT_MS} \
-  --fail-stop-timeout-ms ${TASKCAGE_FAIL_STOP_TIMEOUT_MS}
+  --fail-stop-timeout-ms ${TASKCAGE_FAIL_STOP_TIMEOUT_MS} \
+  --max-task-cpu-quota-us ${TASKCAGE_MAX_TASK_CPU_QUOTA_US} \
+  --max-task-cpu-period-us ${TASKCAGE_MAX_TASK_CPU_PERIOD_US} \
+  --max-task-memory-bytes ${TASKCAGE_MAX_TASK_MEMORY_BYTES} \
+  --max-task-pids ${TASKCAGE_MAX_TASK_PIDS} \
+  --max-task-timeout-ms ${TASKCAGE_MAX_TASK_TIMEOUT_MS} \
+  --max-task-stdout-tail-bytes ${TASKCAGE_MAX_TASK_STDOUT_TAIL_BYTES} \
+  --max-task-stderr-tail-bytes ${TASKCAGE_MAX_TASK_STDERR_TAIL_BYTES}
 Delegate=yes
 KillMode=control-group
 KillSignal=SIGTERM

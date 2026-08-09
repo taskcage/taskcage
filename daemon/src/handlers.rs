@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use crate::capability::{CapabilityAdapter, CapabilityInitialization};
 use crate::capacity::TaskCapacitySettings;
+use crate::deployment_policy::DeploymentResourcePolicy;
 use crate::fail_stop::FailStopCoordinator;
 use crate::preflight::{PreflightError, VerifiedEnvironment};
 use crate::protocol::{
@@ -106,6 +107,7 @@ enum HandlerState<C> {
 #[derive(Debug)]
 pub(crate) struct ProtocolHandlers<C> {
     state: HandlerState<C>,
+    deployment_policy: DeploymentResourcePolicy,
     fail_stop: Arc<FailStopCoordinator>,
 }
 
@@ -113,6 +115,7 @@ impl<C> ProtocolHandlers<C> {
     fn initialize_with<E, F>(
         preflight: Result<VerifiedEnvironment, PreflightError>,
         capacity_settings: TaskCapacitySettings,
+        deployment_policy: DeploymentResourcePolicy,
         fail_stop: Arc<FailStopCoordinator>,
         build_core: F,
     ) -> Result<Self, E>
@@ -128,12 +131,14 @@ impl<C> ProtocolHandlers<C> {
                     capabilities: adapter,
                     core: build_core(environment, capacity_settings)?,
                 },
+                deployment_policy,
                 fail_stop,
             }),
             CapabilityInitialization::Unavailable { adapter } => Ok(Self {
                 state: HandlerState::Unavailable {
                     capabilities: adapter,
                 },
+                deployment_policy,
                 fail_stop,
             }),
         }
@@ -177,12 +182,14 @@ impl ProtocolHandlers<SubmitCoordinator> {
         preflight: Result<VerifiedEnvironment, PreflightError>,
         capacity_settings: TaskCapacitySettings,
         registry_settings: TaskRegistrySettings,
+        deployment_policy: DeploymentResourcePolicy,
         fail_stop: Arc<FailStopCoordinator>,
     ) -> crate::Result<Self> {
         let core_fail_stop = Arc::clone(&fail_stop);
         Self::initialize_with(
             preflight,
             capacity_settings,
+            deployment_policy,
             fail_stop,
             move |environment, settings| {
                 SubmitCoordinator::initialize(
@@ -248,6 +255,13 @@ where
             }
         };
         debug_assert_eq!(validated_request_id, request_id);
+        if let Err(error) = self.deployment_policy.validate(validated.budget()) {
+            return RequestHandling::Handled(error_response(
+                request_id,
+                ErrorCode::LimitExceedsPolicy,
+                error.to_string(),
+            ));
+        }
 
         let core = match &self.state {
             HandlerState::Ready { core, .. } => core,
@@ -571,10 +585,19 @@ mod tests {
     }
 
     fn ready_handlers(core: FakeCore, maximum: u32) -> ProtocolHandlers<FakeCore> {
+        ready_handlers_with_policy(core, maximum, DeploymentResourcePolicy::for_test())
+    }
+
+    fn ready_handlers_with_policy(
+        core: FakeCore,
+        maximum: u32,
+        deployment_policy: DeploymentResourcePolicy,
+    ) -> ProtocolHandlers<FakeCore> {
         let fail_stop = test_fail_stop();
         ProtocolHandlers::initialize_with(
             Ok(VerifiedEnvironment::for_test()),
             TaskCapacitySettings::new(maximum).unwrap(),
+            deployment_policy,
             fail_stop,
             |environment, _| {
                 assert_eq!(
@@ -601,6 +624,7 @@ mod tests {
                 path: "/delegated".into(),
             }),
             TaskCapacitySettings::new(2).unwrap(),
+            DeploymentResourcePolicy::for_test(),
             fail_stop,
             |_environment, _| -> Result<FakeCore, Infallible> {
                 panic!("preflight 실패에서는 실행 코어를 만들면 안 됩니다")
@@ -1290,6 +1314,46 @@ mod tests {
         assert_eq!(context_calls.load(Ordering::SeqCst), 0);
     }
 
+    #[tokio::test]
+    async fn deployment_policy_rejects_before_context_and_core_side_effects() {
+        let policy = DeploymentResourcePolicy::try_new(
+            ResourceLimits {
+                cpu_max: CpuMax {
+                    quota_micros: 1,
+                    period_micros: 1,
+                },
+                memory_max_bytes: 1,
+                pids_max: 1,
+                wall_time_limit_ms: 1,
+            },
+            OutputLimits {
+                stdout_tail_max_bytes: 1,
+                stderr_tail_max_bytes: 1,
+            },
+        )
+        .unwrap();
+        let handlers = ready_handlers_with_policy(FakeCore::default(), 1, policy);
+        let mut payload = submit_payload();
+        payload.limits.memory_max_bytes = 2;
+        let context_calls = AtomicUsize::new(0);
+
+        let response = handled(
+            handlers
+                .handle_submit(submit_request(REQUEST_ID, payload), || {
+                    context_calls.fetch_add(1, Ordering::SeqCst);
+                    context()
+                })
+                .await,
+        );
+
+        assert_error(response, ErrorCode::LimitExceedsPolicy, false);
+        assert_eq!(context_calls.load(Ordering::SeqCst), 0);
+        let HandlerState::Ready { core, .. } = &handlers.state else {
+            panic!("policy 시험에는 준비된 core가 필요합니다");
+        };
+        assert_eq!(core.submit_calls.load(Ordering::SeqCst), 0);
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn actual_handlers_connect_submit_and_get_task_to_the_runner() {
@@ -1304,6 +1368,7 @@ mod tests {
             Ok(environment),
             TaskCapacitySettings::new(1).unwrap(),
             TaskRegistrySettings::new(16).unwrap(),
+            DeploymentResourcePolicy::for_test(),
             test_fail_stop(),
         )
         .unwrap();
@@ -1464,6 +1529,7 @@ mod tests {
         let handlers = ProtocolHandlers::initialize_with(
             Ok(environment),
             TaskCapacitySettings::new(1).unwrap(),
+            DeploymentResourcePolicy::for_test(),
             Arc::clone(&fail_stop),
             move |environment, settings| {
                 SubmitCoordinator::initialize_with_cgroup_create_faults(
@@ -1692,6 +1758,7 @@ mod tests {
             Ok(environment),
             TaskCapacitySettings::new(1).unwrap(),
             TaskRegistrySettings::new(16).unwrap(),
+            DeploymentResourcePolicy::for_test(),
             test_fail_stop(),
         )
         .unwrap();

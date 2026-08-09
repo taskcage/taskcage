@@ -201,6 +201,18 @@ timeout과 취소가 경합하면 먼저 관찰한 원인을 유지한다. 메�
 - CPU quota/period, 메모리, PID, 벽시계 제한은 모두 필수인 양의 정수다.
 - stdout/stderr tail 상한은 각각 1~65,536 bytes이며 합계는 131,072 bytes 이하다.
 
+배포 자원 정책:
+
+- daemon은 시작할 때 Task 하나에 허용하는 CPU·메모리·PID·벽시계 시간·출력 tail 최대값을 모두
+  명시적으로 받아 검증한다. Protocol v1이나 `getCapabilities`는 이 값을 협상하거나 공개하지 않는다.
+- 구조적으로 유효한 요청이 배포 최대값을 넘으면 Task record, 실행 capacity, task cgroup 또는 target
+  process를 만들기 전에 `LIMIT_EXCEEDS_POLICY`, `retryable: false`로 거절한다.
+- CPU는 quota 숫자만 비교하지 않고 `quotaMicros / periodMicros` 비율을 정수 교차 곱으로 정확히 비교한다.
+- Java SDK의 `ResourceBudget.safeDefaults()`는 호출 편의를 위한 유한 요청값이다. daemon 정책의 기본값이나
+  협상 결과가 아니며 더 낮은 정책의 배포에서는 거절될 수 있다.
+- Ubuntu 설치 자산의 명시적 최대값은 CPU `200000/100000`, memory `2147483648`, PID `128`, 벽시계
+  `900000ms`, stdout/stderr 각각 `65536 bytes`다. 이는 Protocol v1 wire 기본값이 아니다.
+
 수락 응답:
 
 ```json
@@ -232,6 +244,8 @@ timeout과 취소가 경합하면 먼저 관찰한 원인을 유지한다. 메�
 - 이 보장은 메모리 Registry가 유지되는 같은 데몬 프로세스 안에서만 유효하다.
 
 실행 슬롯 또는 Registry 여유가 없으면 side effect 없이 `CAPACITY_EXHAUSTED`를 반환한다. Protocol v1에는 대기열이 없다.
+정책 검증은 이 capacity admission보다 먼저 수행되므로 정책을 넘은 요청은 capacity 상태와 무관하게
+`LIMIT_EXCEEDS_POLICY`로 판정된다.
 
 ### `getTask`
 

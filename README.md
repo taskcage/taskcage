@@ -91,7 +91,14 @@ target/debug/taskcaged serve \
   --max-registry-tasks 1000 \
   --max-concurrent-connections 32 \
   --cleanup-timeout-ms 5000 \
-  --fail-stop-timeout-ms 10000
+  --fail-stop-timeout-ms 10000 \
+  --max-task-cpu-quota-us 200000 \
+  --max-task-cpu-period-us 100000 \
+  --max-task-memory-bytes 2147483648 \
+  --max-task-pids 128 \
+  --max-task-timeout-ms 900000 \
+  --max-task-stdout-tail-bytes 65536 \
+  --max-task-stderr-tail-bytes 65536
 ```
 
 상위 디렉터리와 서비스 계정은 배포 환경이 준비한다. 데몬은 소켓을 owner-only `0600`으로 생성한다. 위 값은 예시이며 프로토콜 기본값이 아니다.
@@ -118,7 +125,8 @@ cd java-sdk
 ./gradlew build
 ```
 
-현재 공개 API는 제출, 조회, 취소를 제공한다. 모든 자원 예산과 실행 파일·작업 디렉터리의 절대 경로를 명시해야 한다.
+현재 공개 API는 제출, 조회, 취소를 제공한다. 실행 파일과 작업 디렉터리는 절대 경로여야 한다.
+`TaskSpec(command)`는 유한한 SDK 안전 기본 자원 예산을 사용하며, 필요하면 기존 명시적 생성자로 override한다.
 
 ```java
 TaskSpec spec = new TaskSpec(
@@ -126,14 +134,7 @@ TaskSpec spec = new TaskSpec(
         Path.of("/usr/bin/pdftotext"),
         List.of("input.pdf", "output.txt"),
         Path.of("/srv/taskcage/jobs/42"),
-        Map.of("LANG", "C.UTF-8")),
-    new ResourceBudget(
-        new CpuQuota(100_000, 100_000),
-        512L * 1024 * 1024,
-        32,
-        Duration.ofMinutes(2),
-        65_536,
-        65_536));
+        Map.of("LANG", "C.UTF-8")));
 
 try (TaskCageClient client = TaskCageClient.connect(
         TaskCageClientConfig.builder()
@@ -150,6 +151,10 @@ try (TaskCageClient client = TaskCageClient.connect(
     }
 }
 ```
+
+SDK 안전 기본값은 CPU 1개, memory 512 MiB, PID 32, 벽시계 2분, stdout/stderr tail 각각 65,536
+bytes다. 이는 daemon capability 협상이 아니며 배포 최대값을 넘으면 `LIMIT_EXCEEDS_POLICY`로 거절된다.
+더 큰 값이 필요하면 `new TaskSpec(command, new ResourceBudget(...))`로 명시한다.
 
 SDK의 상세 사용법은 [Java SDK README](java-sdk/README.md)를 참고한다.
 

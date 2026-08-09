@@ -4,8 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import io.github.taskcage.sdk.support.FakeTaskCageServer;
-import java.time.Duration;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 import java.util.function.Function;
@@ -86,11 +87,12 @@ class TaskCageClientIntegrationTest {
 
     @Test
     void submitEncodesMandatoryLimitsAndDecodesAcceptedTask() throws Exception {
+        Path program = absoluteTestPath("true");
         try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskAcceptedResponse);
                 TaskCageClient client = TaskCageClient.connect(configFor(server))) {
             TaskSubmission submission = client.submit(new TaskSpec(
-                    new ExternalCommand(java.nio.file.Path.of("/usr/bin/true"), List.of(),
-                            java.nio.file.Path.of("/srv/taskcage/jobs/42"), java.util.Map.of("LANG", "C.UTF-8")),
+                    new ExternalCommand(program, List.of(), absoluteTestPath("jobs/42"),
+                            java.util.Map.of("LANG", "C.UTF-8")),
                     new ResourceBudget(new CpuQuota(100_000, 100_000), 536_870_912, 32,
                             Duration.ofMinutes(2), 1_024, 2_048)));
 
@@ -100,7 +102,7 @@ class TaskCageClientIntegrationTest {
             server.awaitRequests(Duration.ofSeconds(2));
             JsonNode payload = server.requests().get(0).path("payload");
             assertEquals("submitTask", server.requests().get(0).path("type").asText());
-            assertEquals("/usr/bin/true", payload.path("command").path("program").asText());
+            assertEquals(program.toString(), payload.path("command").path("program").asText());
             assertEquals(536_870_912, payload.path("limits").path("memoryMaxBytes").asLong());
         }
     }
@@ -111,8 +113,8 @@ class TaskCageClientIntegrationTest {
         try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskAcceptedResponse);
                 TaskCageClient client = TaskCageClient.connect(configFor(server))) {
             client.submit(requestId, new TaskSpec(
-                    new ExternalCommand(java.nio.file.Path.of("/usr/bin/true"), List.of(),
-                            java.nio.file.Path.of("/tmp"), java.util.Map.of()),
+                    new ExternalCommand(absoluteTestPath("true"), List.of(),
+                            absoluteTestPath("tmp"), java.util.Map.of()),
                     new ResourceBudget(new CpuQuota(100_000, 100_000), 64L * 1024 * 1024, 8,
                             Duration.ofSeconds(10), 1_024, 1_024)));
             server.awaitRequests(Duration.ofSeconds(2));
@@ -125,8 +127,8 @@ class TaskCageClientIntegrationTest {
         try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::executionFailedResponse);
                 TaskCageClient client = TaskCageClient.connect(configFor(server))) {
             TaskSubmission submission = client.submit(new TaskSpec(
-                    new ExternalCommand(java.nio.file.Path.of("/usr/bin/missing"), List.of(),
-                            java.nio.file.Path.of("/srv/taskcage/jobs/42"), java.util.Map.of()),
+                    new ExternalCommand(absoluteTestPath("missing"), List.of(),
+                            absoluteTestPath("jobs/42"), java.util.Map.of()),
                     new ResourceBudget(new CpuQuota(100_000, 100_000), 536_870_912, 32,
                             Duration.ofMinutes(2), 1_024, 2_048)));
 
@@ -190,6 +192,22 @@ class TaskCageClientIntegrationTest {
     }
 
     @Test
+    void deploymentPolicyErrorsExposeCodeAndNonRetryability() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(
+                        TaskCageClientIntegrationTest::limitExceedsPolicyResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            ExternalCommand command = new ExternalCommand(
+                    absoluteTestPath("true"), List.of(), absoluteTestPath("tmp"), java.util.Map.of());
+
+            TaskCageDaemonException exception = assertThrows(
+                    TaskCageDaemonException.class, () -> client.submit(new TaskSpec(command)));
+
+            assertEquals("LIMIT_EXCEEDS_POLICY", exception.code());
+            assertTrue(!exception.retryable());
+        }
+    }
+
+    @Test
     void cancelTaskEncodesTaskIdAndDecodesCancellation() throws Exception {
         UUID taskId = UUID.fromString("b5309d98-f51e-45e1-9866-b1a080c1ba50");
         try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskCancelledResponse);
@@ -211,6 +229,10 @@ class TaskCageClientIntegrationTest {
                 .connectTimeout(Duration.ofSeconds(1))
                 .requestTimeout(Duration.ofSeconds(1))
                 .build();
+    }
+
+    private static Path absoluteTestPath(String name) {
+        return Path.of("").toAbsolutePath().resolve(name);
     }
 
     private static ObjectNode capabilitiesResponse(JsonNode request) {
@@ -287,14 +309,24 @@ class TaskCageClientIntegrationTest {
     }
 
     private static ObjectNode taskNotFoundResponse(JsonNode request) {
+        return errorResponse(request, "TASK_NOT_FOUND", "task was not found", false);
+    }
+
+    private static ObjectNode limitExceedsPolicyResponse(JsonNode request) {
+        return errorResponse(
+                request, "LIMIT_EXCEEDS_POLICY", "task budget exceeds the deployment maximum", false);
+    }
+
+    private static ObjectNode errorResponse(
+            JsonNode request, String code, String message, boolean retryable) {
         ObjectNode response = JsonNodeFactory.instance.objectNode();
         response.put("protocolVersion", 1);
         response.put("requestId", request.path("requestId").asText());
         response.put("type", "error");
         ObjectNode payload = response.putObject("payload");
-        payload.put("code", "TASK_NOT_FOUND");
-        payload.put("message", "task was not found");
-        payload.put("retryable", false);
+        payload.put("code", code);
+        payload.put("message", message);
+        payload.put("retryable", retryable);
         return response;
     }
 
