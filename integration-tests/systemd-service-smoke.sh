@@ -76,11 +76,11 @@ sudo -n systemctl stop taskcaged.service
 sudo -n packaging/ubuntu/uninstall-taskcaged.sh
 [[ ! -e /usr/local/bin/taskcaged ]]
 [[ ! -e /etc/systemd/system/taskcaged.service ]]
-[[ -f /etc/taskcage/taskcaged.env ]]
+sudo -n test -f /etc/taskcage/taskcaged.env
 id taskcage >/dev/null
 
 sudo -n packaging/ubuntu/uninstall-taskcaged.sh --purge-config
-[[ ! -e /etc/taskcage/taskcaged.env ]]
+sudo -n test ! -e /etc/taskcage/taskcaged.env
 
 trap - EXIT
 cleanup
