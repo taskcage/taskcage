@@ -42,8 +42,6 @@ MVP는 단일 Linux 호스트에서 Java 17+ SDK와 `taskcaged`가 통신하는 
   socket을 제거할 수 있다. 연결 성공, 권한 오류, timeout 또는 불확실한 결과에서는 삭제하지 않는다.
 - 정상 종료에서는 자신이 성공적으로 bind한 동일 device·inode의 socket만 제거한다. lock 파일은
   삭제하지 않고 file descriptor를 닫아 lock만 해제한다.
-- 자세한 연결 admission과 슬롯 회수 규칙은
-  [ADR 0007](decisions/0007-bound-concurrent-uds-connections.md)을 따른다.
 
 ### 프레임
 
@@ -258,8 +256,7 @@ read-back 불일치 전에 만든 임시 cgroup과 Registry·idempotency·capaci
 뒤 원상 복구한다. 정리를 확인할 수 없으면 일반 `INTERNAL_ERROR` 응답으로 끝내지 않고 기존
 process-wide fail-stop 계약으로 전환한다. `LIMIT_EXCEEDS_POLICY`는 cgroup을 만들기 전에 요청 제한이
 명시적인 daemon 배포 정책을 벗어났다고 판정한 경우에만 사용한다. 지원하지 않는 cgroup 환경을 시작
-전에 발견하는 `ENVIRONMENT_UNAVAILABLE` 계약은 바뀌지 않는다. 자세한 선택 근거는
-[ADR 0006](decisions/0006-use-internal-error-for-cgroup-read-back-mismatch.md)을 따른다.
+전에 발견하는 `ENVIRONMENT_UNAVAILABLE` 계약은 바뀌지 않는다.
 
 ```json
 {
@@ -283,8 +280,7 @@ daemon은 예약, `RUNNING`, 최소 보존 기간 안의 `FINISHED`와 정리 �
 서로 다른 새 `clientRequestId`는 task ID, Registry 항목, 실행 슬롯, cgroup과 process를 만들기 전에
 `CAPACITY_EXHAUSTED`, `retryable: true`와 `task registry retention capacity is exhausted` message로
 거절한다. 같은 ID·같은 본문은 Registry가 가득 차도 기존 작업을 반환하고, 같은 ID·다른 본문은
-`IDEMPOTENCY_CONFLICT`를 유지한다. SDK는 분기를 message가 아니라 error code로 수행한다. 자세한
-근거는 [ADR 0008](decisions/0008-bound-in-memory-task-registry.md)을 따른다.
+`IDEMPOTENCY_CONFLICT`를 유지한다. SDK는 분기를 message가 아니라 error code로 수행한다.
 
 ### `getTask`
 
@@ -450,8 +446,7 @@ daemon은 예약, `RUNNING`, 최소 보존 기간 안의 `FINISHED`와 정리 �
 
 이 동작은 기존 `RUNNING`, `FINISHED`, `ENVIRONMENT_UNAVAILABLE`, `DAEMON_UNAVAILABLE`,
 `TASK_NOT_FOUND`와 `IDEMPOTENCY_CONFLICT`만 사용한다. protocol v1에 cleanup field, 상태, 응답
-타입 또는 오류 코드를 추가하지 않는다. 파일 판정과 lock의 상세 절차는
-[ADR 0005](decisions/0005-own-startup-recovery-before-removing-stale-socket.md)를 따른다.
+타입 또는 오류 코드를 추가하지 않는다.
 
 ## 오류 코드
 

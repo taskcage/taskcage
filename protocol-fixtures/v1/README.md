@@ -11,8 +11,7 @@
 cgroup 제한값을 쓴 뒤 read-back 값이 요청과 다르면 기존 `error` 응답의 `INTERNAL_ERROR`와
 `retryable: false`를 사용한다. 이 실패에서는 target, `taskAccepted`와 공개 `taskId`가 만들어지지
 않으며, 정리를 증명할 수 없으면 기존 fail-stop 계약으로 전환한다. `LIMIT_EXCEEDS_POLICY`는 cgroup을
-만들기 전의 명시적인 배포 정책 검증 실패에만 사용한다. 자세한 결정은
-[ADR 0006](../../docs/decisions/0006-use-internal-error-for-cgroup-read-back-mismatch.md)을 따른다.
+만들기 전의 명시적인 배포 정책 검증 실패에만 사용한다.
 
 이 결정은 기존 wire 형식과 오류 코드 집합을 바꾸지 않으므로 새 JSON fixture를 추가하지 않는다.
 현재 JSON corpus와 Java SDK 입력은 그대로다. 향후 read-back 전용 JSON fixture를 추가하려면 Rust와
