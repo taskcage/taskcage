@@ -2,7 +2,7 @@
 Description=TaskCage external process runtime
 Documentation=https://github.com/taskcage/taskcage/blob/main/docs/install-ubuntu.md
 After=local-fs.target
-ConditionPathIsExecutable=/usr/local/bin/taskcaged
+ConditionFileIsExecutable=/usr/local/bin/taskcaged
 
 [Service]
 Type=simple
