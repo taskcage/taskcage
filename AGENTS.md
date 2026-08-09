@@ -4,16 +4,16 @@ TaskCage는 Linux에서 무거운 외부 프로그램을 작업 단위로 실행
 
 ## 먼저 읽을 문서
 
-- [README.md](README.md): 프로젝트 목표, 지원 범위, 핵심 아키텍처와 API 방향
-- [CONTRIBUTING.md](CONTRIBUTING.md): 브랜치, 커밋, PR, 리뷰 규칙 (파일이 추가된 뒤 적용)
+- [README.md](README.md): 프로젝트 목표, 현재 PoC 범위와 사용법
+- [CONTRIBUTING.md](CONTRIBUTING.md): 브랜치, 커밋, PR, 리뷰 규칙
 
-## 예상 구조
+## 저장소 구조
 
 - `daemon/`: cgroup v2와 Linux 프로세스를 관리하는 Rust 데몬
 - `java-sdk/`: Java 애플리케이션에서 데몬을 호출하는 SDK
 - `integration-tests/`: 실제 Linux cgroup v2 환경을 검증하는 통합 테스트
 - `test-fixtures/`: CPU·메모리·프로세스 제한과 정리를 검증할 대상 프로그램
-- `docs/`: API 명세와 설계 문서
+- `docs/`: Rust 데몬과 SDK가 공유하는 공개 API 명세
 
 ## 변경 원칙
 
