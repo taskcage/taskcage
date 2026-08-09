@@ -46,3 +46,14 @@ bash integration-tests/cgroup-runner-smoke.sh
 | fail-stop | 정리 불확실 시 신규 실행 차단, 활성 작업 전체 정리, 제한된 deadline과 비정상 종료 |
 
 Java SDK와 실제 데몬의 공개 API 계약은 `java-sdk`의 `e2eTest`에서 별도로 검증한다. Protocol v1의 JSON 형태는 [`protocol-fixtures/v1`](../protocol-fixtures/v1/README.md)이 고정한다.
+
+## Ubuntu systemd service smoke test
+
+```bash
+bash integration-tests/systemd-service-smoke.sh
+```
+
+`systemd-service-smoke.sh`는 기존 TaskCage 설치가 없는 전용 Ubuntu 24.04 host에서만 실행한다. prebuilt
+binary 설치, 전용 account, `Delegate=yes`, owner-only UDS, manager membership, 설정 보존, stop과 uninstall을
+실제 systemd로 검증한다. 기존 unit, binary, user 또는 group이 있으면 이를 변경하지 않고 종료 코드 77로
+건너뛴다. CI에서는 종료 코드 77도 성공으로 처리하지 않는다.
