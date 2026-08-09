@@ -4,6 +4,9 @@ TaskCage는 신뢰된 외부 프로세스를 작업 단위로 실행하고, Linu
 
 > **상태:** `0.x` PoC. Rust 데몬과 Java SDK의 핵심 계약을 구현하고 검증하는 단계이며, 아직 Maven Central 배포나 운영 호환성을 보장하지 않는다.
 
+제품의 장기 방향과 표준 용어는 [제품 철학과 용어](docs/product-philosophy.md)에서 정의한다. 이 README는
+현재 구현하고 검증한 PoC 범위를 설명한다.
+
 ## 해결하려는 문제
 
 PDF·OCR·이미지·영상 변환, 브라우저 자동화, 컴파일 같은 외부 프로그램은 호출은 간단하지만 독립된 자원과 프로세스 트리를 가진다.
@@ -14,6 +17,11 @@ PDF·OCR·이미지·영상 변환, 브라우저 자동화, 컴파일 같은 외
 - exit code만으로는 timeout, OOM, PID 제한 같은 종료 원인을 구분하기 어렵다.
 
 TaskCage는 외부 프로세스를 단일 PID가 아니라 제한과 결과를 가진 **Task**로 다룬다.
+
+> Task는 특정 실행 계약을 입력과 자원 정책으로 수행하는 일회성 작업이며, cgroup v2 실행 경계·프로세스 트리·상태·결과를 포함한다.
+
+공개 계약에서 Task 하나는 task cgroup root 하나를 소유한다. 내부 하위 cgroup은 별도 공개 실행 단위가
+아니며 daemon 구현 세부사항이다.
 
 ## 현재 PoC
 
@@ -152,15 +160,23 @@ bash integration-tests/cgroup-runner-smoke.sh
 
 ## 문서
 
+- [제품 철학과 용어](docs/product-philosophy.md)
 - [Protocol v1 API 명세](docs/api-mvp.md)
 - [Java SDK](java-sdk/README.md)
 - [Linux 통합 시험](integration-tests/README.md)
 - [Protocol fixture](protocol-fixtures/v1/README.md)
 - [기여 가이드](CONTRIBUTING.md)
 
-## PoC 이후 후보
+## 제품 MVP 방향
 
-PoC는 안정성 검증을 우선한다. 사용성이 검증되면 동기 실행·대기 같은 편의 API를, 재현성 요구가 검증되면 버전 관리되는 실행 계약과 패키지를 검토한다. 원격 연결, 다른 언어 SDK, Profile·Bundle·Hub는 현재 구현 계약이 아니다.
+현재 구현 계약은 Local UDS 기반 PoC다. 제품 MVP의 Core SDK는 같은 Task 계약을 Local UDS와 인증된
+Remote transport에서 제공하는 것을 목표로 한다. Remote topology·wire·인증·권한·Artifact 전달·
+backpressure·응답 유실 의미는 선행 ADR과 API 계약을 승인한 뒤 구현한다.
+
+재현 가능한 실행은 버전 관리되는 Execution Profile과 digest로 고정한 Runtime Package를 사용한다.
+Bundle은 Package binary가 아니라 Profile, Runtime Package ref + digest, 플랫폼·정책·무결성 정보를
+담으며, 여러 Bundle이 같은 Package digest를 공유할 수 있다. 중앙 Hub server는 MVP 구성요소가 아니며
+임의 URL에서 임의 binary를 받아 실행하는 기능도 제공하지 않는다.
 
 ## 기여
 

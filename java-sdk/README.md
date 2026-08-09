@@ -4,6 +4,10 @@ TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`�
 
 > **상태:** `0.1.0-SNAPSHOT` PoC. 아직 Maven Central에 배포되지 않았으며 Spring Boot에 의존하지 않는다.
 
+현재 SDK는 Local UDS transport와 Raw Command 모델을 구현한다. Execution Profile과 인증된 Remote
+transport를 포함한 제품 방향은 [제품 철학과 용어](../docs/product-philosophy.md)에서 정의하며 아직 구현된
+SDK 기능이 아니다.
+
 ## 빌드
 
 ```bash
