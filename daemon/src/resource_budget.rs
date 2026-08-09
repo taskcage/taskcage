@@ -97,6 +97,11 @@ impl ResourceBudget {
         self.wall_timeout
     }
 
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn wall_time_limit_ms(&self) -> u64 {
+        self.wall_time_limit_ms.get()
+    }
+
     pub fn stdout_tail_max_bytes(&self) -> usize {
         self.stdout_tail_max_bytes.get()
     }

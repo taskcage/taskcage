@@ -71,6 +71,22 @@ fn actual_serve_process_bounds_registry_without_execution_side_effects() {
         .arg("1000")
         .arg("--fail-stop-timeout-ms")
         .arg("5000")
+        .args([
+            "--max-task-cpu-quota-us",
+            "200000",
+            "--max-task-cpu-period-us",
+            "100000",
+            "--max-task-memory-bytes",
+            "2147483648",
+            "--max-task-pids",
+            "128",
+            "--max-task-timeout-ms",
+            "900000",
+            "--max-task-stdout-tail-bytes",
+            "65536",
+            "--max-task-stderr-tail-bytes",
+            "65536",
+        ])
         .env_remove("TASKCAGE_CGROUP_ROOT")
         .stdout(Stdio::from(
             log.try_clone().expect("daemon stdout log 복제"),

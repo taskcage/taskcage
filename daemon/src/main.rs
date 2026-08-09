@@ -9,7 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use taskcaged::cgroup::{CgroupLimits, CpuLimit};
 use taskcaged::output::CaptureLimits;
-use taskcaged::{DaemonConfig, Error, RunOnceConfig};
+use taskcaged::protocol::{CpuMax, OutputLimits, ResourceLimits};
+use taskcaged::{DaemonConfig, DeploymentResourceMaximum, Error, RunOnceConfig};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_CLEANUP_MILLIS: u64 = 5_000;
@@ -154,6 +155,13 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
     let mut max_concurrent_connections = None;
     let mut cleanup_timeout_ms = None;
     let mut fail_stop_timeout_ms = None;
+    let mut max_task_cpu_quota_micros = None;
+    let mut max_task_cpu_period_micros = None;
+    let mut max_task_memory_bytes = None;
+    let mut max_task_pids = None;
+    let mut max_task_timeout_ms = None;
+    let mut max_task_stdout_tail_bytes = None;
+    let mut max_task_stderr_tail_bytes = None;
     let mut index = 0;
     while index < args.len() {
         let name = args[index].to_str().ok_or_else(|| {
@@ -179,12 +187,40 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             "--fail-stop-timeout-ms" if fail_stop_timeout_ms.is_none() => {
                 fail_stop_timeout_ms = Some(parse_number(name, value)?);
             }
+            "--max-task-cpu-quota-us" if max_task_cpu_quota_micros.is_none() => {
+                max_task_cpu_quota_micros = Some(parse_number(name, value)?);
+            }
+            "--max-task-cpu-period-us" if max_task_cpu_period_micros.is_none() => {
+                max_task_cpu_period_micros = Some(parse_number(name, value)?);
+            }
+            "--max-task-memory-bytes" if max_task_memory_bytes.is_none() => {
+                max_task_memory_bytes = Some(parse_number(name, value)?);
+            }
+            "--max-task-pids" if max_task_pids.is_none() => {
+                max_task_pids = Some(parse_number(name, value)?);
+            }
+            "--max-task-timeout-ms" if max_task_timeout_ms.is_none() => {
+                max_task_timeout_ms = Some(parse_number(name, value)?);
+            }
+            "--max-task-stdout-tail-bytes" if max_task_stdout_tail_bytes.is_none() => {
+                max_task_stdout_tail_bytes = Some(parse_number(name, value)?);
+            }
+            "--max-task-stderr-tail-bytes" if max_task_stderr_tail_bytes.is_none() => {
+                max_task_stderr_tail_bytes = Some(parse_number(name, value)?);
+            }
             "--socket"
             | "--max-concurrent-tasks"
             | "--max-registry-tasks"
             | "--max-concurrent-connections"
             | "--cleanup-timeout-ms"
-            | "--fail-stop-timeout-ms" => {
+            | "--fail-stop-timeout-ms"
+            | "--max-task-cpu-quota-us"
+            | "--max-task-cpu-period-us"
+            | "--max-task-memory-bytes"
+            | "--max-task-pids"
+            | "--max-task-timeout-ms"
+            | "--max-task-stdout-tail-bytes"
+            | "--max-task-stderr-tail-bytes" => {
                 return Err(Error::InvalidArgument(format!(
                     "serve 옵션이 중복되었습니다: {name}"
                 )));
@@ -208,6 +244,33 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             "fail-stop-timeout-ms",
             fail_stop_timeout_ms,
         )?),
+        DeploymentResourceMaximum::new(
+            ResourceLimits {
+                cpu_max: CpuMax {
+                    quota_micros: required_option(
+                        "max-task-cpu-quota-us",
+                        max_task_cpu_quota_micros,
+                    )?,
+                    period_micros: required_option(
+                        "max-task-cpu-period-us",
+                        max_task_cpu_period_micros,
+                    )?,
+                },
+                memory_max_bytes: required_option("max-task-memory-bytes", max_task_memory_bytes)?,
+                pids_max: required_option("max-task-pids", max_task_pids)?,
+                wall_time_limit_ms: required_option("max-task-timeout-ms", max_task_timeout_ms)?,
+            },
+            OutputLimits {
+                stdout_tail_max_bytes: required_option(
+                    "max-task-stdout-tail-bytes",
+                    max_task_stdout_tail_bytes,
+                )?,
+                stderr_tail_max_bytes: required_option(
+                    "max-task-stderr-tail-bytes",
+                    max_task_stderr_tail_bytes,
+                )?,
+            },
+        ),
     )
 }
 
@@ -397,6 +460,30 @@ fn generate_job_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_deployment_policy(mut args: Vec<OsString>) -> Vec<OsString> {
+        args.extend([
+            OsString::from("--max-task-cpu-quota-us"),
+            OsString::from("200000"),
+            OsString::from("--max-task-cpu-period-us"),
+            OsString::from("100000"),
+            OsString::from("--max-task-memory-bytes"),
+            OsString::from("2147483648"),
+            OsString::from("--max-task-pids"),
+            OsString::from("128"),
+            OsString::from("--max-task-timeout-ms"),
+            OsString::from("900000"),
+            OsString::from("--max-task-stdout-tail-bytes"),
+            OsString::from("65536"),
+            OsString::from("--max-task-stderr-tail-bytes"),
+            OsString::from("65536"),
+        ]);
+        args
+    }
+
+    fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
+        super::parse_serve(with_deployment_policy(args))
+    }
 
     #[test]
     fn serve_requires_an_explicit_absolute_socket_and_internal_limits() {
@@ -672,6 +759,41 @@ mod tests {
                 .to_string()
                 .contains("serve 옵션이 중복되었습니다: --max-registry-tasks")
         );
+    }
+
+    #[test]
+    fn serve_requires_a_valid_explicit_deployment_policy() {
+        let base = vec![
+            OsString::from("--socket"),
+            std::env::temp_dir().join("taskcaged.sock").into_os_string(),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("1"),
+            OsString::from("--max-registry-tasks"),
+            OsString::from("1"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("1"),
+            OsString::from("--cleanup-timeout-ms"),
+            OsString::from("1"),
+            OsString::from("--fail-stop-timeout-ms"),
+            OsString::from("1"),
+        ];
+        let missing = super::parse_serve(base.clone()).unwrap_err();
+        assert!(
+            missing
+                .to_string()
+                .contains("max-task-cpu-quota-us 옵션은 필수")
+        );
+
+        let mut invalid = with_deployment_policy(base);
+        let value_index = invalid
+            .iter()
+            .position(|value| value == "--max-task-memory-bytes")
+            .unwrap()
+            + 1;
+        invalid[value_index] = OsString::from("0");
+        let error = super::parse_serve(invalid).unwrap_err();
+        assert!(error.to_string().contains("deployment resource policy"));
+        assert!(error.to_string().contains("0보다 커야"));
     }
 
     #[test]

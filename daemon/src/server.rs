@@ -1739,6 +1739,7 @@ mod tests {
                 Ok(environment),
                 TaskCapacitySettings::new(1).unwrap(),
                 TaskRegistrySettings::new(16).unwrap(),
+                crate::deployment_policy::DeploymentResourcePolicy::for_test(),
                 FailStopCoordinator::new(
                     crate::fail_stop::FailStopSettings::new(Duration::from_secs(5)).unwrap(),
                 ),

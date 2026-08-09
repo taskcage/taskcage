@@ -11,8 +11,9 @@ use taskcaged::protocol::{
 use taskcaged::resource_budget::ResourceBudget;
 
 const REQUEST_FIXTURES: [&str; 1] = ["submit-task-valid.json"];
-const RESPONSE_FIXTURES: [&str; 6] = [
+const RESPONSE_FIXTURES: [&str; 7] = [
     "error-capacity-exhausted.json",
+    "error-limit-exceeds-policy.json",
     "task-accepted.json",
     "task-result-execution-failed.json",
     "task-result-output-truncated.json",
@@ -194,5 +195,16 @@ fn capacity_fixture_preserves_retryable_error() {
         response,
         Response::Error { payload, .. }
             if payload.code == ErrorCode::CapacityExhausted && payload.retryable
+    ));
+}
+
+#[test]
+fn policy_fixture_preserves_non_retryable_error() {
+    let response: Response =
+        decode_json(&fixture_bytes("error-limit-exceeds-policy.json")).unwrap();
+    assert!(matches!(
+        response,
+        Response::Error { payload, .. }
+            if payload.code == ErrorCode::LimitExceedsPolicy && !payload.retryable
     ));
 }

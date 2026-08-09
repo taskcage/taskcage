@@ -75,6 +75,69 @@ for controller in cpu memory pids; do
   grep -qw "${controller}" "${delegated_root}/cgroup.subtree_control"
 done
 
+count_task_cgroups() {
+  if sudo -n test -d "${delegated_root}/jobs"; then
+    sudo -n find "${delegated_root}/jobs" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d '[:space:]'
+  else
+    echo 0
+  fi
+}
+
+task_cgroups_before="$(count_task_cgroups)"
+policy_response="$(sudo -n -u taskcage python3 - <<'PY'
+import json
+import socket
+import struct
+
+
+def read_exact(connection, length):
+    chunks = []
+    remaining = length
+    while remaining:
+        chunk = connection.recv(remaining)
+        if not chunk:
+            raise RuntimeError("daemon closed the socket before the response completed")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+request = {
+    "protocolVersion": 1,
+    "requestId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "type": "submitTask",
+    "payload": {
+        "clientRequestId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        "command": {
+            "program": "/usr/bin/true",
+            "args": [],
+            "workingDirectory": "/tmp",
+            "environment": {},
+        },
+        "limits": {
+            "cpuMax": {"quotaMicros": 100000, "periodMicros": 100000},
+            "memoryMaxBytes": 2147483649,
+            "pidsMax": 32,
+            "wallTimeLimitMs": 120000,
+        },
+        "output": {
+            "stdoutTailMaxBytes": 65536,
+            "stderrTailMaxBytes": 65536,
+        },
+    },
+}
+body = json.dumps(request, separators=(",", ":")).encode("utf-8")
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    connection.connect("/run/taskcage/taskcaged.sock")
+    connection.sendall(struct.pack(">I", len(body)) + body)
+    response_length = struct.unpack(">I", read_exact(connection, 4))[0]
+    print(read_exact(connection, response_length).decode("utf-8"))
+PY
+)"
+grep -q '"code":"LIMIT_EXCEEDS_POLICY"' <<<"${policy_response}"
+grep -q '"retryable":false' <<<"${policy_response}"
+[[ "$(count_task_cgroups)" == "${task_cgroups_before}" ]]
+
 echo '# operator-preserved-marker' | sudo -n tee -a /etc/taskcage/taskcaged.env >/dev/null
 sudo -n packaging/ubuntu/install-taskcaged.sh --binary target/debug/taskcaged
 sudo -n grep -q '^# operator-preserved-marker$' /etc/taskcage/taskcaged.env
@@ -95,4 +158,4 @@ sudo -n test ! -e /etc/taskcage/taskcaged.env
 
 trap - EXIT
 cleanup
-echo "PASS: Ubuntu systemd service 설치, readiness, 구조화 log, 위임, 재설치, 종료와 제거를 확인했습니다"
+echo "PASS: Ubuntu systemd service 설치, readiness, 구조화 log, 위임, 배포 정책, 재설치, 종료와 제거를 확인했습니다"

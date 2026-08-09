@@ -14,6 +14,7 @@ pub mod cgroup;
 mod cleanup_fault;
 pub mod codec;
 mod deadline;
+mod deployment_policy;
 #[cfg(target_os = "linux")]
 mod executor;
 mod fail_stop;
@@ -71,7 +72,7 @@ use fail_stop::FailStopSettings;
 use handlers::ProtocolHandlers;
 use output::CaptureLimits;
 use preflight::{CapabilityProbe, CapabilityReport, PreflightError, SystemProbe};
-use protocol::TaskOutput;
+use protocol::{OutputLimits, ResourceLimits, TaskOutput};
 #[cfg(target_os = "linux")]
 use runner::{ExecutionConfig, execute};
 use serde::Serialize;
@@ -153,6 +154,20 @@ pub struct DaemonConfig {
     max_concurrent_connections: NonZeroUsize,
     cleanup_timeout: Duration,
     fail_stop_timeout: Duration,
+    deployment_policy: deployment_policy::DeploymentResourcePolicy,
+}
+
+#[derive(Debug, Clone)]
+/// 배포가 Task 하나에 허용하는 자원 예산 최대값이다.
+pub struct DeploymentResourceMaximum {
+    limits: ResourceLimits,
+    output: OutputLimits,
+}
+
+impl DeploymentResourceMaximum {
+    pub fn new(limits: ResourceLimits, output: OutputLimits) -> Self {
+        Self { limits, output }
+    }
 }
 
 impl DaemonConfig {
@@ -163,6 +178,7 @@ impl DaemonConfig {
         max_concurrent_connections: usize,
         cleanup_timeout: Duration,
         fail_stop_timeout: Duration,
+        maximum_task_resources: DeploymentResourceMaximum,
     ) -> Result<Self> {
         if !socket_path.is_absolute() {
             return Err(Error::InvalidArgument(
@@ -200,6 +216,15 @@ impl DaemonConfig {
         }
         FailStopSettings::new(fail_stop_timeout)
             .map_err(|error| Error::InvalidArgument(error.to_string()))?;
+        let deployment_policy = deployment_policy::DeploymentResourcePolicy::try_new(
+            maximum_task_resources.limits,
+            maximum_task_resources.output,
+        )
+        .map_err(|error| {
+            Error::InvalidArgument(format!(
+                "deployment resource policy가 잘못되었습니다: {error}"
+            ))
+        })?;
         Ok(Self {
             socket_path,
             max_concurrent_tasks,
@@ -207,6 +232,7 @@ impl DaemonConfig {
             max_concurrent_connections,
             cleanup_timeout,
             fail_stop_timeout,
+            deployment_policy,
         })
     }
 }
@@ -273,6 +299,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         Ok(environment),
         capacity_settings,
         registry_settings,
+        config.deployment_policy,
         fail_stop,
     )?);
     tracing::info!(event = "daemon_started", "TaskCage daemon started");

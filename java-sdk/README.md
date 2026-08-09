@@ -38,8 +38,9 @@ Java application
 - `RUNNING`/`FINISHED` snapshot과 종료 결과 변환
 - 연결·프로토콜·데몬 오류 구분
 - 가짜 UDS daemon 단위 테스트와 실제 Linux daemon E2E 테스트
+- `ResourceBudget.safeDefaults()`와 `TaskSpec(command)`의 유한한 요청 기본값
 
-현재 호출자는 모든 자원 예산을 명시하고 `getTask()`를 직접 polling해야 한다. Maven Central 배포,
+현재 호출자는 필요할 때 자원 예산을 override하고 `getTask()`를 직접 polling해야 한다. Maven Central 배포,
 완료 대기와 동기 실행 편의 API, 독립 FFmpeg 예제는 아직 구현되지 않았다.
 
 ## v0.1 Public Alpha 범위
@@ -206,7 +207,7 @@ try (TaskCageClient client = TaskCageClient.connect(config)) {
 
 ## 작업 제출
 
-외부 명령은 shell 문자열이 아니라 실행 파일과 인자 배열로 전달한다. `program`과 `workingDirectory`는 절대 경로여야 하며, 환경 변수는 명시한 값만 전달한다.
+외부 명령은 shell 문자열이 아니라 실행 파일과 인자 배열로 전달한다. `program`과 `workingDirectory`는 절대 경로여야 하며, 환경 변수는 명시한 값만 전달한다. `TaskSpec(command)`는 SDK 안전 기본값을 사용한다.
 
 ```java
 TaskSpec spec = new TaskSpec(
@@ -214,14 +215,7 @@ TaskSpec spec = new TaskSpec(
         Path.of("/usr/bin/pdftotext"),
         List.of("input.pdf", "output.txt"),
         Path.of("/srv/taskcage/jobs/42"),
-        Map.of("LANG", "C.UTF-8")),
-    new ResourceBudget(
-        new CpuQuota(100_000, 100_000),
-        512L * 1024 * 1024,
-        32,
-        Duration.ofMinutes(2),
-        65_536,
-        65_536));
+        Map.of("LANG", "C.UTF-8")));
 
 try (TaskCageClient client = TaskCageClient.connect(config)) {
     TaskSubmission submission = client.submit(spec);
@@ -233,6 +227,11 @@ try (TaskCageClient client = TaskCageClient.connect(config)) {
     }
 }
 ```
+
+안전 기본값은 CPU `100000/100000`, memory 512 MiB, PID 32, 벽시계 2분, stdout/stderr tail 각각
+65,536 bytes다. 이 값은 SDK가 보내는 요청값이며 daemon과 협상한 capability가 아니다. 배포 정책이 더
+낮으면 `LIMIT_EXCEEDS_POLICY`로 거절된다. override는 `new TaskSpec(command, new ResourceBudget(...))`로
+명시하며 배포 최대값을 넘을 수 없다.
 
 `submit(spec)`은 SDK가 멱등 키를 생성한다. 응답 유실 뒤 동일한 제출을 복구해야 하는 호출자는 UUID를 직접 보관하고 재사용할 수 있다.
 

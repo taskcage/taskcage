@@ -70,11 +70,25 @@ installer를 `--start`로 다시 실행하면 실행 중인 service를 restart�
 | `TASKCAGE_MAX_CONCURRENT_CONNECTIONS` | `32` | 동시에 열린 UDS 연결 상한 |
 | `TASKCAGE_CLEANUP_TIMEOUT_MS` | `5000` | 개별 cleanup 시간 예산 |
 | `TASKCAGE_FAIL_STOP_TIMEOUT_MS` | `10000` | fail-stop 전체 시간 예산 |
+| `TASKCAGE_MAX_TASK_CPU_QUOTA_US` | `200000` | Task 하나의 CPU quota 최대값 |
+| `TASKCAGE_MAX_TASK_CPU_PERIOD_US` | `100000` | CPU 최대 비율의 period |
+| `TASKCAGE_MAX_TASK_MEMORY_BYTES` | `2147483648` | Task 하나의 memory 최대값 (2 GiB) |
+| `TASKCAGE_MAX_TASK_PIDS` | `128` | Task 하나의 PID 최대값 |
+| `TASKCAGE_MAX_TASK_TIMEOUT_MS` | `900000` | Task 하나의 벽시계 시간 최대값 (15분) |
+| `TASKCAGE_MAX_TASK_STDOUT_TAIL_BYTES` | `65536` | stdout tail 최대값 |
+| `TASKCAGE_MAX_TASK_STDERR_TAIL_BYTES` | `65536` | stderr tail 최대값 |
 | `TASKCAGE_LOG_FORMAT` | `json` | `json` 또는 개발용 `compact` log 형식 |
 | `RUST_LOG` | `taskcaged=info` | daemon log filter |
 
-이 값들은 daemon process와 Registry의 운영 상한이며 Task별 CPU·memory·PID 기본 정책이 아니다. 변경한
-cleanup과 fail-stop 예산의 합이 unit의 `TimeoutStopSec=30s`에 가까워지면 stop 정책도 함께 검토한다.
+`TASKCAGE_MAX_TASK_*` 값은 Task 하나가 요청할 수 있는 배포 최대값이다. Java SDK의
+`ResourceBudget.safeDefaults()`는 CPU `100000/100000`, memory 512 MiB, PID 32, 2분, 출력 tail 각각
+65,536 bytes를 요청하는 편의값이며 daemon과 협상하지 않는다. 운영자가 최대값을 이보다 낮추면 SDK
+기본값도 `LIMIT_EXCEEDS_POLICY`로 거절된다. CPU는 quota/period 비율로 비교한다.
+
+이 정책은 실행 중 동적으로 reload하지 않는다. 설정을 바꾼 뒤 service를 restart해야 하며 기존 RUNNING
+Task의 제한은 바뀌지 않는다. 이 최대값은 Task별 admission만 담당하고 전체 host resource pool, 공정성이나
+overcommit을 관리하지 않는다. cleanup과 fail-stop 예산의 합이 unit의 `TimeoutStopSec=30s`에 가까워지면
+stop 정책도 함께 검토한다.
 
 ```bash
 sudoedit /etc/taskcage/taskcaged.env

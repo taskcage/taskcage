@@ -74,6 +74,22 @@ fn actual_serve_process_exits_nonzero_after_fail_stop_deadline() {
         .arg(CLEANUP_TIMEOUT.as_millis().to_string())
         .arg("--fail-stop-timeout-ms")
         .arg(FAIL_STOP_TIMEOUT.as_millis().to_string())
+        .args([
+            "--max-task-cpu-quota-us",
+            "200000",
+            "--max-task-cpu-period-us",
+            "100000",
+            "--max-task-memory-bytes",
+            "2147483648",
+            "--max-task-pids",
+            "128",
+            "--max-task-timeout-ms",
+            "900000",
+            "--max-task-stdout-tail-bytes",
+            "65536",
+            "--max-task-stderr-tail-bytes",
+            "65536",
+        ])
         .env_remove("TASKCAGE_CGROUP_ROOT")
         .stdout(Stdio::from(
             log.try_clone().expect("daemon stdout log 복제"),
@@ -296,6 +312,22 @@ fn actual_shutdown_drain_switches_to_fail_stop_and_exits_nonzero() {
         .arg(CLEANUP_TIMEOUT.as_millis().to_string())
         .arg("--fail-stop-timeout-ms")
         .arg(FAIL_STOP_TIMEOUT.as_millis().to_string())
+        .args([
+            "--max-task-cpu-quota-us",
+            "200000",
+            "--max-task-cpu-period-us",
+            "100000",
+            "--max-task-memory-bytes",
+            "2147483648",
+            "--max-task-pids",
+            "128",
+            "--max-task-timeout-ms",
+            "900000",
+            "--max-task-stdout-tail-bytes",
+            "65536",
+            "--max-task-stderr-tail-bytes",
+            "65536",
+        ])
         .env_remove("TASKCAGE_CGROUP_ROOT")
         .stdout(Stdio::from(
             log.try_clone().expect("daemon stdout log 복제"),
