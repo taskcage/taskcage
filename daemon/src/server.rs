@@ -15,6 +15,7 @@ use thiserror::Error;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinSet;
 
+use crate::audit;
 use crate::codec::{FrameError, decode_json, read_frame_or_eof, write_json_frame};
 use crate::deadline::MonotonicDeadline;
 use crate::fail_stop::FailStopCoordinator;
@@ -227,7 +228,10 @@ where
     )
     .await;
     if result.is_ok() {
-        tracing::info!("정상 shutdown drain을 시작합니다");
+        tracing::info!(
+            event = "shutdown_drain_started",
+            "정상 shutdown drain을 시작합니다"
+        );
     }
     let idle_handlers = Arc::clone(&handlers);
     finish_protocol_serve(
@@ -539,12 +543,16 @@ async fn handle_connection(
                 let Some(request_id) = request_id_from_value(&value) else {
                     return Err(ConnectionError::InvalidRequest);
                 };
+                audit::log_invalid_request(&request_id);
                 let response = invalid_request_response(request_id);
                 write_json_frame(&mut stream, &response).await?;
                 continue;
             }
         };
+        let operation = audit::request_operation(&request);
+        audit::log_request(&request);
         let response = dispatch(request).await;
+        audit::log_response(operation, &response);
         write_json_frame(&mut stream, &response).await?;
     }
 }

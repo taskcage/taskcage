@@ -96,6 +96,19 @@ target/debug/taskcaged serve \
 
 상위 디렉터리와 서비스 계정은 배포 환경이 준비한다. 데몬은 소켓을 owner-only `0600`으로 생성한다. 위 값은 예시이며 프로토콜 기본값이 아니다.
 
+`check-environment`는 현재 process의 cgroup 실행 조건을 검사한다. 실행 중인 daemon 자체의 준비 상태는
+socket owner와 같은 UID에서 live status로 확인한다. 기본 timeout은 2초다.
+
+```bash
+sudo -u taskcage target/debug/taskcaged status \
+  --socket /run/taskcage/taskcaged.sock \
+  --timeout-ms 2000
+```
+
+준비된 경우 `status=READY`와 Protocol v1 capabilities를 한 줄 JSON으로 반환한다. 연결 실패, timeout 또는
+cgroup fail-stop으로 `UNREADY`인 경우 종료 코드는 `0`이 아니다. Ubuntu service는 구조화 JSON log를
+사용하며, 기본 log에는 raw argv·환경 변수 값·작업 디렉터리·출력 tail을 남기지 않는다.
+
 ## Java SDK 사용
 
 SDK는 아직 Maven Central에 배포되지 않았다. 현재는 `java-sdk/`에서 직접 빌드해 사용한다.

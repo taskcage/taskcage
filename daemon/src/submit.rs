@@ -836,7 +836,9 @@ fn complete_finished_execution(
     // FINISHED 저장 뒤 실행 소유권과 슬롯을 정리하고 마지막에 호출자를 깨운다.
     active.complete();
     finish_capacity(capacity_permit, fail_stop);
-    publication.publish_completion()
+    let finished = publication.publish_completion();
+    crate::audit::log_task_finished(&finished);
+    finished
 }
 
 #[cfg(any(target_os = "linux", test))]

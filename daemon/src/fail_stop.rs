@@ -176,6 +176,7 @@ impl FailStopCoordinator {
         drop(state);
         self.activated.notify_waiters();
         tracing::error!(
+            event = "fail_stop_activated",
             task_id = %logged_report.task_id,
             stage = logged_report.stage,
             uncleaned = ?logged_report.uncleaned,

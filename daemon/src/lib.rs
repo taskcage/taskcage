@@ -1,5 +1,7 @@
 //! TaskCage Rust 데몬의 사전 검사와 작업 실행 생명주기를 제공한다.
 
+#[cfg(any(target_os = "linux", test))]
+mod audit;
 #[cfg_attr(
     not(any(target_os = "linux", test)),
     allow(dead_code, reason = "protocol task 취소는 Linux에서만 제공됩니다")
@@ -34,6 +36,8 @@ mod server;
 mod startup;
 #[cfg(target_os = "linux")]
 mod startup_cgroup;
+#[cfg(target_os = "linux")]
+pub mod status;
 #[cfg_attr(
     not(target_os = "linux"),
     allow(dead_code, reason = "protocol task 실행은 Linux에서만 제공됩니다")
@@ -108,6 +112,12 @@ pub enum Error {
     TaskLifecycle(String),
     #[error("UDS 서버가 실패했습니다: {0}")]
     Server(String),
+    #[cfg(target_os = "linux")]
+    #[error(transparent)]
+    Status(#[from] status::StatusError),
+    #[cfg(target_os = "linux")]
+    #[error("실행 중인 daemon이 cgroup v2 준비 상태가 아닙니다")]
+    DaemonUnready,
     #[cfg(target_os = "linux")]
     #[error("daemon 시작 복구가 실패했습니다: {0}")]
     Startup(String),
@@ -229,6 +239,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         || match recover_from_environment(config.cleanup_timeout) {
             Ok(report) => {
                 tracing::info!(
+                    event = "startup_recovery_completed",
                     removed_jobs = report.removed_jobs,
                     "잔여 TaskCage 작업 cgroup 복구를 완료했습니다"
                 );
@@ -236,9 +247,8 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             }
             Err(error) => {
                 tracing::error!(
+                    event = "startup_recovery_failed",
                     stage = error.stage(),
-                    remaining_path = %error.remaining_path().display(),
-                    error = %error,
                     "잔여 TaskCage 작업 cgroup 복구에 실패했습니다"
                 );
                 Err(Error::Startup(error.to_string()))
@@ -255,8 +265,8 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
             .map_err(|error| Error::InvalidArgument(error.to_string()))?,
     );
     tracing::info!(
-        root = %environment.report().delegated_root.display(),
-        manager = %environment.report().manager_cgroup.display(),
+        event = "preflight_completed",
+        cgroup_v2_ready = true,
         "cgroup 사전 검사를 통과했습니다"
     );
     let handlers = Arc::new(ProtocolHandlers::initialize(
@@ -265,7 +275,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         registry_settings,
         fail_stop,
     )?);
-    tracing::info!(socket = %config.socket_path.display(), "TaskCage daemon started");
+    tracing::info!(event = "daemon_started", "TaskCage daemon started");
     let result = server::serve_protocol_until(
         startup,
         config.cleanup_timeout,
@@ -279,9 +289,17 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         other => Error::Server(other.to_string()),
     });
     if result.is_ok() {
-        tracing::info!(socket = %config.socket_path.display(), "TaskCage daemon stopped");
+        tracing::info!(
+            event = "daemon_stopped",
+            outcome = "CLEAN",
+            "TaskCage daemon stopped"
+        );
     } else {
-        tracing::error!(socket = %config.socket_path.display(), "TaskCage daemon stopped with an error");
+        tracing::error!(
+            event = "daemon_stopped",
+            outcome = "ERROR",
+            "TaskCage daemon stopped with an error"
+        );
     }
     result
 }
@@ -326,7 +344,11 @@ pub async fn run_once(config: RunOnceConfig) -> Result<RunOnceReport> {
     };
     let environment = probe.check()?;
     let manager = CgroupManager::initialize(environment)?;
-    tracing::info!(root = %manager.root().display(), "검증된 cgroup 작업 영역을 준비했습니다");
+    tracing::info!(
+        event = "run_once_preflight_completed",
+        cgroup_v2_ready = true,
+        "검증된 cgroup 작업 영역을 준비했습니다"
+    );
 
     let (cancellation, _unused_cancel_handle) = cancellation_channel();
     let cleaned = execute(
