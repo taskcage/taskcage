@@ -104,8 +104,9 @@ TaskCage Core SDK
 ```
 
 현재 병합된 기준선은 Local UDS와 Protocol v1이다. Remote는 제품 MVP 아키텍처 계약에 포함되지만 아직
-구현된 transport가 아니다. daemon의 직접 network listener와 별도 Gateway 중 어느 topology를 사용할지,
-TCP/TLS/mTLS 또는 다른 wire를 어떻게 구성할지는 후속 ADR에서 결정한다.
+구현된 transport가 아니다. [ADR 0009](decisions/0009-direct-remote-tls-listener.md)는 TLS 1.3과 필수 mTLS를
+사용하는 daemon 직접 listener를 Remote MVP topology로 제안한다. ADR이 `Accepted`가 되기 전에는 구현
+결정으로 간주하지 않으며 Remote wire와 API 계약은 별도 후속 작업으로 승인한다.
 
 Remote 구현 전에 최소한 다음 계약을 함께 승인해야 한다.
 
