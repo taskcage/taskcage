@@ -1664,6 +1664,56 @@ mod tests {
         .expect("작업이 FINISHED가 돼야 합니다")
     }
 
+    async fn submit_cancellable_task(stream: &mut UnixStream, client_request_id: &str) -> String {
+        let response = exchange(
+            stream,
+            &Request::SubmitTask {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: new_task_id(),
+                payload: linux_payload(client_request_id, "/bin/sleep", vec!["30".to_owned()]),
+            },
+        )
+        .await;
+        match response {
+            Response::TaskAccepted {
+                payload:
+                    crate::protocol::TaskAcceptedPayload {
+                        task_id,
+                        state: TaskState::Running,
+                        ..
+                    },
+                ..
+            } => task_id,
+            other => panic!("취소 대체 작업이 RUNNING이어야 합니다: {other:?}"),
+        }
+    }
+
+    async fn cancel_running_task(stream: &mut UnixStream, task_id: &str) {
+        let response = exchange(
+            stream,
+            &Request::CancelTask {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: new_task_id(),
+                payload: TaskIdPayload {
+                    task_id: task_id.to_owned(),
+                },
+            },
+        )
+        .await;
+        match response {
+            Response::TaskCancelled {
+                payload:
+                    crate::protocol::TaskCancelledPayload {
+                        task_id: cancelled_task_id,
+                        state: TaskState::Finished,
+                        termination_reason: TerminationReason::Cancelled,
+                    },
+                ..
+            } if cancelled_task_id == task_id => {}
+            other => panic!("취소 응답이 요청한 Task의 CANCELLED 결과여야 합니다: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn actual_uds_server_runs_disconnect_poll_and_cancel_through_cgroups() {
         if std::env::var_os("TASKCAGE_RUN_LINUX_UDS_INTEGRATION").is_none() {
@@ -1679,7 +1729,7 @@ mod tests {
         let handlers = Arc::new(
             ProtocolHandlers::initialize(
                 Ok(environment),
-                TaskCapacitySettings::new(2).unwrap(),
+                TaskCapacitySettings::new(1).unwrap(),
                 TaskRegistrySettings::new(16).unwrap(),
                 FailStopCoordinator::new(
                     crate::fail_stop::FailStopSettings::new(Duration::from_secs(5)).unwrap(),
@@ -1710,12 +1760,39 @@ mod tests {
             Response::Capabilities {
                 payload: CapabilitiesPayload {
                     cgroup_v2_ready: true,
-                    max_concurrent_tasks: 2,
+                    max_concurrent_tasks: 1,
                     ..
                 },
                 ..
             }
         ));
+
+        const CANCEL_REUSE_REPETITIONS: usize = 8;
+        let mut cancel_task_id =
+            submit_cancellable_task(&mut first, "44444444-4444-4444-4444-444444444444").await;
+        let mut cancelled_task_ids = Vec::with_capacity(CANCEL_REUSE_REPETITIONS + 1);
+
+        for _ in 0..CANCEL_REUSE_REPETITIONS {
+            cancel_running_task(&mut first, &cancel_task_id).await;
+            // cancel 응답과 다음 submit 사이에 poll이나 대기를 두지 않아 슬롯 반환 순서를 검증한다.
+            let replacement_client_request_id = new_task_id();
+            let replacement_task_id =
+                submit_cancellable_task(&mut first, &replacement_client_request_id).await;
+            cancelled_task_ids.push(cancel_task_id);
+            cancel_task_id = replacement_task_id;
+        }
+        cancel_running_task(&mut first, &cancel_task_id).await;
+        cancelled_task_ids.push(cancel_task_id);
+
+        for task_id in cancelled_task_ids {
+            assert!(matches!(
+                poll_finished(&mut first, &task_id).await,
+                TaskPayload::Finished {
+                    termination_reason: TerminationReason::Cancelled,
+                    ..
+                }
+            ));
+        }
 
         let disconnect_submit = exchange(
             &mut first,
@@ -1746,51 +1823,6 @@ mod tests {
                     exit_code: Some(0),
                     ..
                 },
-                ..
-            }
-        ));
-
-        let cancel_submit = exchange(
-            &mut polling,
-            &Request::SubmitTask {
-                protocol_version: PROTOCOL_VERSION,
-                request_id: new_task_id(),
-                payload: linux_payload(
-                    "44444444-4444-4444-4444-444444444444",
-                    "/bin/sleep",
-                    vec!["30".to_owned()],
-                ),
-            },
-        )
-        .await;
-        let cancel_task_id = match cancel_submit {
-            Response::TaskAccepted {
-                payload:
-                    crate::protocol::TaskAcceptedPayload {
-                        task_id,
-                        state: TaskState::Running,
-                        ..
-                    },
-                ..
-            } => task_id,
-            other => panic!("cancel 시험 작업이 RUNNING이어야 합니다: {other:?}"),
-        };
-        let cancelled = exchange(
-            &mut polling,
-            &Request::CancelTask {
-                protocol_version: PROTOCOL_VERSION,
-                request_id: new_task_id(),
-                payload: TaskIdPayload {
-                    task_id: cancel_task_id.clone(),
-                },
-            },
-        )
-        .await;
-        assert!(matches!(cancelled, Response::TaskCancelled { .. }));
-        assert!(matches!(
-            poll_finished(&mut polling, &cancel_task_id).await,
-            TaskPayload::Finished {
-                termination_reason: TerminationReason::Cancelled,
                 ..
             }
         ));
