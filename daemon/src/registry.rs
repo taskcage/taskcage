@@ -393,7 +393,7 @@ where
         &self,
         owner: &SubmitExecutionOwner<C>,
         snapshot: TaskPayload,
-    ) -> Result<TaskPayload, RegistryError> {
+    ) -> Result<FinishedTaskPublication, RegistryError> {
         let actual_task_id = match &snapshot {
             TaskPayload::Finished { task_id, .. } => task_id,
             TaskPayload::Running { .. } => return Err(RegistryError::FinishedSnapshotRequired),
@@ -432,13 +432,11 @@ where
             finished_monotonic,
         });
         drop(state);
-        if let Some(cancellation) = cancellation {
-            cancellation.complete(snapshot.clone());
-        }
-        owner
-            .signal
-            .publish(SubmitObservation::Task(snapshot.clone()));
-        Ok(snapshot)
+        Ok(FinishedTaskPublication {
+            snapshot,
+            cancellation,
+            submit_signal: Arc::clone(&owner.signal),
+        })
     }
 
     /// RUNNING 공개 전 실패는 예약과 두 인덱스를 같은 잠금 구간에서 되돌린다.
@@ -573,6 +571,26 @@ impl SubmitSignal {
     }
 }
 
+/// FINISHED 저장과 호출자 통지를 분리해 실행 슬롯을 먼저 반환할 수 있게 한다.
+#[derive(Debug)]
+#[must_use = "FINISHED 저장 뒤 실행 슬롯을 처리하고 완료 통지를 공개해야 합니다"]
+pub(crate) struct FinishedTaskPublication {
+    snapshot: TaskPayload,
+    cancellation: Option<RunningCancellation>,
+    submit_signal: Arc<SubmitSignal>,
+}
+
+impl FinishedTaskPublication {
+    pub(crate) fn publish_completion(self) -> TaskPayload {
+        if let Some(cancellation) = self.cancellation {
+            cancellation.complete(self.snapshot.clone());
+        }
+        self.submit_signal
+            .publish(SubmitObservation::Task(self.snapshot.clone()));
+        self.snapshot
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum SubmitReservation<C>
 where
@@ -631,7 +649,7 @@ where
     pub(crate) fn finish(
         mut self,
         completed: crate::runner::CompletedTask,
-    ) -> Result<TaskPayload, RegistryError> {
+    ) -> Result<FinishedTaskPublication, RegistryError> {
         self.finish_inner(completed.into_payload())
     }
 
@@ -641,13 +659,25 @@ where
         snapshot: TaskPayload,
     ) -> Result<TaskPayload, RegistryError> {
         self.finish_inner(snapshot)
+            .map(FinishedTaskPublication::publish_completion)
     }
 
-    fn finish_inner(&mut self, snapshot: TaskPayload) -> Result<TaskPayload, RegistryError> {
+    #[cfg(test)]
+    pub(crate) fn prepare_finish_for_test(
+        mut self,
+        snapshot: TaskPayload,
+    ) -> Result<FinishedTaskPublication, RegistryError> {
+        self.finish_inner(snapshot)
+    }
+
+    fn finish_inner(
+        &mut self,
+        snapshot: TaskPayload,
+    ) -> Result<FinishedTaskPublication, RegistryError> {
         match self.registry.finish_snapshot(self, snapshot) {
-            Ok(snapshot) => {
+            Ok(publication) => {
                 self.resolved = true;
-                Ok(snapshot)
+                Ok(publication)
             }
             Err(error) => {
                 self.fail_inner(SubmitFailure::new(
@@ -1148,7 +1178,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn running_cancel_waiters_finish_only_after_cancelled_snapshot_is_stored() {
+    async fn finished_storage_does_not_wake_cancel_waiters_before_publication() {
         let (registry, _) = registry();
         let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
         let (runtime, cancellation) = cancellation_channel();
@@ -1175,7 +1205,15 @@ mod tests {
                 .is_err()
         );
         let expected = cancelled(TASK_ID);
-        owner.finish_for_test(expected.clone()).unwrap();
+        let publication = owner.prepare_finish_for_test(expected.clone()).unwrap();
+
+        assert_eq!(registry.snapshot(TASK_ID), Ok(Some(expected.clone())));
+        assert!(
+            timeout(TokioDuration::from_millis(10), &mut first_wait)
+                .await
+                .is_err()
+        );
+        publication.publish_completion();
 
         assert_eq!(first_wait.await, expected);
         assert_eq!(second.wait().await, expected);
