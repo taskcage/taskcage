@@ -1,84 +1,48 @@
 # Linux 통합 시험
 
-이 폴더의 시험은 실제 Linux cgroup v2와 `Delegate=yes`가 설정된 systemd 서비스 또는
-scope가 필요하다. 일반 디렉터리에 제어 파일 이름만 만들어 둔 시험은 Linux 동작의
-근거로 사용하지 않는다.
+이 디렉터리는 실제 Linux cgroup v2에서 TaskCage의 안전 보장을 검증한다. 제어 파일 이름만 흉내 낸 일반 디렉터리는 Linux 동작의 근거로 사용하지 않는다.
 
-## 사전 검사와 실패 시 실행 차단
+## 환경
 
-`preflight-fail-closed.sh`는 다음 내용을 확인한다.
+- Linux cgroup v2
+- `cpu`, `memory`, `pids` controller
+- `cgroup.kill`과 cgroup 제어 파일 쓰기 권한
+- 데몬이 사용할 cgroup subtree 위임
+- `clone3(CLONE_INTO_CGROUP)` 지원
 
-1. 실제 cgroup v2 위임 경로를 찾는다.
-2. `cpu`, `memory`, `pids` 제어기와 필수 사건·통계 파일을 확인한다.
-3. 데몬을 `manager`로 옮긴 뒤 `/proc/self/cgroup`에서 이동 결과를 다시 확인한다.
-4. 사용자 프로그램을 실행하지 않는 내부 `clone3` 검사로 원자적 cgroup 진입을 확인한다.
-5. 일반 디렉터리를 위임 경로로 주면 아무 파일도 만들지 않고 실패하는지 확인한다.
-6. controller 누락, 쓰기 권한 부족, 원자 진입 미지원은 가짜 검사 결과를 사용해
-   외부 target 호출이 0건인지 확인한다.
+테스트 환경은 systemd service 또는 scope의 `Delegate=yes`를 사용해 위임을 준비할 수 있다. 이는 테스트 환경 구성 방법이며, `taskcaged` 자체가 systemd나 DBus에 의존한다는 뜻은 아니다.
 
-4번의 내부 검사 프로세스는 사용자 target이 아니다. `clone3` 반환 직후 메모리 할당,
-잠금, 비동기 실행기와 로그를 사용하지 않고 `_exit`만 호출한다. 이 과정으로 짧게 생기는
-내부 자식 프로세스는 부모가 즉시 종료 상태를 회수한다.
+공유·운영 서버가 아니라 전용 VM에서 실행한다. 필요한 환경이나 권한이 없으면 스크립트는 종료 코드 77로 건너뛸 수 있지만, GitHub Actions의 Ubuntu 24.04 작업에서는 skip 없이 통과해야 한다.
 
-실행 방법:
+## 사전 검사
 
 ```bash
 bash integration-tests/preflight-fail-closed.sh
 ```
 
-Linux, systemd, cgroup v2 또는 일회성 위임 서비스를 만들 권한이 없으면 종료 코드 77로
-건너뛴다. GitHub Actions의 Ubuntu 24.04 작업에서는 건너뛰지 않고 통과해야 한다.
+`preflight-fail-closed.sh`는 다음 계약을 검증한다.
 
-## 작업별 제한과 원자적 실행
+- 실제 cgroup v2 위임 경로와 필수 controller·파일을 확인한다.
+- 데몬의 manager cgroup 이동과 `/proc/self/cgroup` 결과를 확인한다.
+- 외부 target 없이 원자적 cgroup 진입 가능 여부를 검사한다.
+- 잘못된 경로, controller·권한 부족, 원자 진입 미지원에서는 외부 target을 실행하지 않는다.
 
-`cgroup-runner-smoke.sh`는 실제 위임 서비스 안에서 다음 내용을 확인한다.
-
-1. 메모리, 프로세스 수와 CPU 상한을 작업 cgroup에 쓰고 다시 읽는다.
-2. target을 `clone3(CLONE_INTO_CGROUP)`로 생성 순간부터 작업 cgroup 안에 둔다.
-3. 정상 종료와 0이 아닌 종료 상태를 결과에 남긴다.
-4. 대표 프로세스가 먼저 끝난 뒤 남은 자식과 손자를 `cgroup.kill`로 정리한다.
-5. 벽시계 제한을 넘긴 작업을 전체 종료한다.
-6. 없는 실행 파일과 작업 디렉터리 오류가 제한 없는 실행으로 이어지지 않는다.
-7. `populated 0` 확인 뒤에만 통계와 정리 완료 결과를 반환한다.
-8. stdout과 stderr 폭주를 동시에 drain하고 각 stream의 마지막 바이트와 truncation을
-   독립적으로 반환한다.
-9. 대표 프로세스 종료 뒤 후손이 출력 FD를 들고 있어도 cgroup 전체 정리 뒤 reader가
-   종료된다.
-10. 단일 submit 조정 경로가 실제 Runner를 통해 정상 종료, 0이 아닌 종료, timeout과 exec
-    시작 실패를 protocol lifecycle 결과로 만든다.
-11. Runner가 cgroup과 출력 reader 정리를 끝낸 뒤 만든 완료 결과만 Registry의 FINISHED
-    전이에 사용할 수 있고, 작업 cgroup이 남지 않는다.
-12. 검증부터 멱등 예약과 실제 Runner까지 같은 경로를 통과하며, 같은 submit payload를 다시
-    보내도 새 Runner 없이 같은 taskId의 RUNNING과 FINISHED를 공유한다.
-13. 실행 슬롯이 하나일 때 다른 새 submit은 즉시 `CAPACITY_EXHAUSTED`로 거절되고 Registry와
-    작업 cgroup을 남기지 않으며, 기존 멱등 요청은 같은 작업을 공유한다.
-14. typed protocol handler가 capability, 정상 submit, `getTask`와 exec 시작 실패를 기존 실행
-    코어에 연결하며 정리 뒤 작업 cgroup을 남기지 않는다.
-15. 동시에 들어온 `cancelTask`가 한 번의 whole-cgroup 종료를 공유하고, child·grandchild와 출력
-    reader 정리 뒤 `CANCELLED`를 저장하며 timeout이 먼저 기록된 경우 `TIMED_OUT`을 유지한다.
-16. owner-only Unix domain socket에서 네 요청을 frame으로 처리하고, 연결 중단 뒤에도 작업을 계속
-    실행하며 submit/getTask polling과 cancel 뒤 작업 cgroup과 socket을 남기지 않는다.
-17. 정리 불확실성 주입 뒤 신규 실행을 차단하고 동시에 실행 중인 모든 작업을 whole-cgroup으로
-    정리하며, 안전한 결과만 `DAEMON_ERROR`로 저장하고 작업 cgroup을 남기지 않는다.
-18. daemon 생존 기간 lock이 동시 시작을 막고, 비정상 종료로 lock이 해제된 뒤 검증된 stale socket만
-    제거하며 preflight와 실행 코어 준비 전에는 listener를 열지 않는다.
-19. cgroup membership 확인 뒤 fail-stop이 먼저 완료되면 exec gate와 `RUNNING`을 열지 않고 pending
-    child와 작업 cgroup을 정리하며 Registry 예약을 되돌리고 실행 슬롯을 fail-stop 종료까지 보존한다.
-    exec commit이 먼저 완료된 작업은 활성 whole-cgroup 정리 대상에 계속 포함한다.
-20. 정상 shutdown이 listener를 먼저 닫은 뒤 cleanup 불확실성이 발생해도 기존 fail-stop deadline으로
-    전환해 실제 daemon process가 0이 아닌 코드로 종료하고 lock과 잔여 process를 남기지 않는다.
-21. 요청 수신 뒤 cgroup과 pending child 준비가 지연되어도 시작 clock은 exec gate commit 뒤 한 번만
-    호출되며, `RUNNING.startedAt`과 `FINISHED.timing.startedAt`이 같고 준비 시간은 `wallTimeMs`에
-    포함되지 않는다.
-22. 실제 `taskcaged serve` process가 명시한 UDS 연결 수까지만 partial frame handler를 유지하고,
-    초과 연결을 요청 처리 없이 닫으며 반복 연결 뒤에도 file descriptor가 증가하지 않고 슬롯을
-    재사용한다.
-23. 실제 `taskcaged serve` process가 예약·RUNNING·FINISHED를 합친 Registry 작업 수를 명시한 상한에
-    묶고, 보존 중 상한을 넘는 새 요청을 `CAPACITY_EXHAUSTED`로 거절하면서 task ID, cgroup과 target
-    실행 side effect를 만들지 않으며 기존 조회·멱등 응답과 충돌 판정을 유지한다.
-
-실행 방법:
+## 실행·정리 smoke test
 
 ```bash
 bash integration-tests/cgroup-runner-smoke.sh
 ```
+
+`cgroup-runner-smoke.sh`는 다음 영역을 실제 커널 동작으로 검증한다.
+
+| 영역 | 검증 내용 |
+|---|---|
+| 제한과 시작 | CPU·메모리·PID 제한 write/read-back, `clone3(CLONE_INTO_CGROUP)` 원자 시작, exec gate 이후 시간 측정 |
+| 결과 | 정상·비정상 종료, exec 실패, timeout, cgroup 사용량과 종료 원인 |
+| 정리 | 대표 프로세스 종료 뒤 남은 자식·손자 전체 종료, `populated 0`, cgroup·출력 reader 정리 |
+| 출력 | stdout/stderr 동시 drain, 독립된 tail 상한과 truncation, 후손이 보유한 출력 FD 회수 |
+| 프로토콜 | submit/get/cancel, 멱등 요청, 실행·Registry·UDS 연결 capacity, 연결 중단 뒤 작업 지속 |
+| 복구 | 단일 데몬 시작 소유권, 검증된 stale socket·잔여 cgroup 복구, 준비 전 listener 차단 |
+| fail-stop | 정리 불확실 시 신규 실행 차단, 활성 작업 전체 정리, 제한된 deadline과 비정상 종료 |
+
+Java SDK와 실제 데몬의 공개 API 계약은 `java-sdk`의 `e2eTest`에서 별도로 검증한다. Protocol v1의 JSON 형태는 [`protocol-fixtures/v1`](../protocol-fixtures/v1/README.md)이 고정한다.
