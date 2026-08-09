@@ -297,7 +297,9 @@ timeout과 취소가 경합하면 먼저 관찰한 원인을 유지한다. 메�
 }
 ```
 
-`taskCancelled`은 취소 접수가 아니라 작업 cgroup 전체 정리가 끝났다는 확인이다. 이미 완료된 작업은 `TASK_ALREADY_FINISHED`를 반환한다.
+`taskCancelled`은 취소 접수가 아니라 작업 cgroup 전체 정리, `cgroup.events`의 `populated 0`,
+`FINISHED` 저장과 정상 재사용 가능한 실행 슬롯 반환이 끝났다는 확인이다. process-wide fail-stop이
+슬롯을 보존한 경우에는 새 작업을 받지 않는다. 이미 완료된 작업은 `TASK_ALREADY_FINISHED`를 반환한다.
 
 ## 보관과 장애 계약
 
