@@ -8,6 +8,176 @@ TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`�
 transport를 포함한 제품 방향은 [제품 철학과 용어](../docs/product-philosophy.md)에서 정의하며 아직 구현된
 SDK 기능이 아니다.
 
+## 역할과 v0.1 목표
+
+이 모듈은 특정 외부 도구를 위한 Binding이 아니라 **TaskCage Java Core SDK**다. Java 객체와
+Protocol v1 사이를 변환하고, `taskcaged` 연결과 Task 생명주기를 공통 API로 제공한다.
+
+```text
+Java application
+    │
+    ├─ 향후 FFmpeg·Chromium Profile Binding
+    │             │
+    └──── TaskCage Java Core SDK
+                  │ UDS / Protocol v1
+                  ▼
+              taskcaged
+```
+
+`v0.1.0-alpha`의 목표는 처음 사용하는 Java 개발자가 10분 안에 SDK를 설치하고, 같은 Linux
+호스트의 `taskcaged`를 통해 FFmpeg 작업 하나를 안전하게 실행하는 것이다. Profile·Bundle·Hub보다
+현재 검증된 Raw Command 실행, 자원 제한과 프로세스 트리 정리를 쉽게 사용하는 경험을 우선한다.
+
+## 현재 구현 기반
+
+현재 Core SDK에는 다음 저수준 기능이 구현되어 있다.
+
+- UDS 연결과 length-prefixed JSON Protocol v1 처리
+- `capabilities()`, `submit()`, `getTask()`, `cancelTask()`
+- 호출자 지정 UUID를 이용한 데몬 생존 기간 내 멱등 제출
+- `RUNNING`/`FINISHED` snapshot과 종료 결과 변환
+- 연결·프로토콜·데몬 오류 구분
+- 가짜 UDS daemon 단위 테스트와 실제 Linux daemon E2E 테스트
+
+현재 호출자는 모든 자원 예산을 명시하고 `getTask()`를 직접 polling해야 한다. Maven Central 배포,
+완료 대기와 동기 실행 편의 API, 독립 FFmpeg 예제는 아직 구현되지 않았다.
+
+## v0.1 Public Alpha 범위
+
+### 편의 API
+
+기존 저수준 API는 유지하고 그 위에 다음 사용 경험을 제공한다.
+
+```java
+try (TaskCageClient client = TaskCageClient.connect(config)) {
+    TaskResult result = client.run(
+        Command.of("/usr/bin/ffmpeg", "-i", input.toString(), output.toString())
+    );
+}
+```
+
+비동기 호출은 Task handle로 상태 확인, 완료 대기와 취소를 묶는다.
+
+```java
+TaskHandle task = client.submit(command);
+
+TaskSnapshot snapshot = task.get();
+TaskResult result = task.await();
+// 또는 task.cancel()
+```
+
+목표 동작은 다음과 같다.
+
+- `run()`은 제출부터 `FINISHED`까지 기다린 뒤 최종 결과를 반환한다.
+- `await()`는 SDK 내부 polling으로 완료를 기다리며 polling 간격과 전체 대기 시간을 설정할 수 있다.
+- 대기 중 thread interruption은 보존하고 명확한 SDK 예외 또는 interruption 계약으로 전달한다.
+- `TaskHandle.cancel()`은 기존 `cancelTask()`를 사용하며 daemon의 whole-cgroup cleanup 완료 뒤 반환한다.
+- client `close()`는 기존과 같이 SDK 자원만 정리하고 제출된 Task를 자동 취소하지 않는다.
+
+### 안전한 기본 자원 정책
+
+Protocol v1은 CPU·메모리·PID·벽시계 시간과 출력 tail 제한을 모두 필수로 요구한다. v0.1에서는
+프로토콜을 바꾸지 않고 Core SDK가 문서화된 유한 기본값을 채워 전송하며, daemon이 기존 정책에 따라
+최종 검증한다. 사용자는 필요한 항목만 작업별로 override할 수 있어야 한다.
+
+```java
+TaskResult result = client.run(
+    command,
+    ResourcePolicy.builder()
+        .timeout(Duration.ofMinutes(5))
+        .memoryMaxBytes(1024L * 1024 * 1024)
+        .build()
+);
+```
+
+SDK 기본값은 무제한 값을 사용하지 않는다. 실제 수치는 구현 전에 FFmpeg 예제와 daemon 정책을 기준으로
+확정하고, 공개 API 문서와 테스트에 함께 고정한다. daemon 기본 정책과 부분 필드 생략은 향후 protocol
+변경 후보이며 v0.1 범위가 아니다.
+
+### 결과와 오류
+
+동기·비동기 편의 API는 동일한 최종 결과 타입을 사용한다.
+
+```text
+TaskResult
+├─ taskId
+├─ terminationReason
+├─ exitCode / signal
+├─ timing / resourceUsage
+└─ stdout / stderr tail과 truncation 여부
+```
+
+외부 프로그램의 0이 아닌 종료, timeout, OOM, PID 제한과 취소는 정상적으로 완료된 Task 결과다. UDS
+연결 실패, protocol 위반과 daemon 오류는 기존 `TaskCageException` 계열로 구분한다. 편의 API가
+외부 프로그램의 실패를 일반 SDK 통신 예외로 바꾸지 않는다.
+
+### 배포와 버전
+
+v0.x 동안 daemon과 Java Core SDK는 같은 release train과 버전을 사용한다. 실제 wire 호환성은 제품
+버전과 별개인 Protocol 버전으로 판단한다.
+
+```text
+GitHub release: v0.1.0-alpha.1
+taskcaged:      0.1.0-alpha.1
+Java Core SDK:  0.1.0-alpha.1
+Protocol:       1
+```
+
+Maven Central에는 다음 좌표로 main, sources와 javadoc artifact를 서명해 배포하는 것을 목표로 한다.
+
+```kotlin
+dependencies {
+    implementation("io.github.taskcage:taskcage-java-sdk:0.1.0-alpha.1")
+}
+```
+
+### FFmpeg 예제
+
+`examples/ffmpeg-java/`에 Core SDK의 Raw Command API만 사용하는 독립 예제를 제공한다. 별도 FFmpeg
+Profile Binding을 만들지 않으며, 설치부터 변환 결과 확인까지 10분 안에 재현할 수 있어야 한다.
+
+예제는 최소한 다음을 보여준다.
+
+- `/usr/bin/ffmpeg`와 argv 배열을 이용한 변환
+- 안전한 기본 정책과 작업별 timeout override
+- 성공·실패·timeout 결과 처리
+- stdout/stderr tail과 자원 사용량 확인
+- timeout 뒤 잔여 자식 프로세스가 없다는 Linux E2E 검증 경로
+
+## 구현 순서
+
+각 단계는 독립적으로 리뷰 가능한 PR과 커밋으로 나눈다.
+
+1. **공개 API 확정:** 현재 `ExternalCommand`, `ResourceBudget`, `ExecutionResult`와 목표 API의
+   `Command`, `ResourcePolicy`, `TaskResult` 관계를 확정하고 Alpha 이전 불필요한 중복 타입을 피한다.
+2. **Task 편의 API:** `TaskHandle`, `get`, `await`, `cancel`과 polling·deadline·interruption 계약을
+   구현하고 가짜 daemon 단위 테스트를 추가한다.
+3. **동기 실행과 기본 정책:** `run()`과 유한 기본 자원 정책, 부분 override를 구현하고 실제 daemon
+   E2E로 정상 종료·timeout·취소·출력 결과를 검증한다.
+4. **배포 준비:** Maven Central publishing, 서명, POM metadata, sources/javadoc artifact와
+   `0.1.0-alpha.1` 버전을 구성한다.
+5. **첫 사용자 경로:** 독립 FFmpeg 예제와 설치·daemon 연결·실행·문제 해결 문서를 완성한다.
+
+## v0.1 완료 기준
+
+- Java 17에서 단위 테스트와 실제 Ubuntu 24.04 daemon E2E가 통과한다.
+- 제한 없는 기본 실행 경로가 없다.
+- `run`, `await`, `cancel`이 같은 종료·정리 계약을 유지한다.
+- Maven Central에서 SDK를 설치할 수 있다.
+- 새 사용자가 문서만 보고 10분 안에 FFmpeg 변환을 실행할 수 있다.
+- Alpha 버전과 Protocol v1 호환 범위가 문서에 명시된다.
+
+## v0.1 범위 밖
+
+- Execution Profile과 범용 `ProfileRequest`
+- FFmpeg·Chromium Profile Binding
+- TaskCage Bundle과 Runtime Package cache
+- TaskCage Hub 연동
+- Remote TCP/TLS와 Artifact upload/download
+- Spring Boot starter와 다른 언어 SDK
+
+이 기능들은 Raw Command 기반 v0.1 사용 경험을 외부 사용자가 검증한 뒤 v0.2 후보로 다룬다.
+
 ## 빌드
 
 ```bash
