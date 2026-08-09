@@ -247,7 +247,7 @@ unit_sequence=$((unit_sequence + 1))
   --exact \
   --nocapture
 
-# 실제 UDS frame이 capability, submit, getTask와 cancel을 같은 실행 코어에 연결한다.
+# 실제 UDS에서 단일 실행 슬롯을 cancel 응답 직후 다음 submit이 반복 재사용한다.
 unit_sequence=$((unit_sequence + 1))
 "${taskcage_systemd[@]}" \
   --quiet \
