@@ -1,0 +1,31 @@
+[Unit]
+Description=TaskCage external process runtime
+Documentation=https://github.com/taskcage/taskcage/blob/main/docs/install-ubuntu.md
+After=local-fs.target
+ConditionFileIsExecutable=/usr/local/bin/taskcaged
+
+[Service]
+Type=simple
+User=taskcage
+Group=taskcage
+RuntimeDirectory=taskcage
+RuntimeDirectoryMode=0700
+Environment=RUST_LOG=taskcaged=info
+EnvironmentFile=/etc/taskcage/taskcaged.env
+ExecStart=/usr/local/bin/taskcaged serve \
+  --socket ${TASKCAGE_SOCKET} \
+  --max-concurrent-tasks ${TASKCAGE_MAX_CONCURRENT_TASKS} \
+  --max-registry-tasks ${TASKCAGE_MAX_REGISTRY_TASKS} \
+  --max-concurrent-connections ${TASKCAGE_MAX_CONCURRENT_CONNECTIONS} \
+  --cleanup-timeout-ms ${TASKCAGE_CLEANUP_TIMEOUT_MS} \
+  --fail-stop-timeout-ms ${TASKCAGE_FAIL_STOP_TIMEOUT_MS}
+Delegate=yes
+KillMode=control-group
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=30s
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

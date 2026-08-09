@@ -75,6 +75,8 @@ TaskCage는 신뢰할 수 없는 코드를 격리하는 보안 sandbox가 아니
 
 실제 cgroup v2 위임이 준비된 Linux 환경에서 먼저 사전 조건을 검사한다.
 
+Ubuntu 24.04의 반복 가능한 service 설치는 [Ubuntu daemon 설치](docs/install-ubuntu.md)를 따른다.
+
 ```bash
 cargo build --workspace
 cargo run -p taskcaged -- check-environment
@@ -163,6 +165,7 @@ bash integration-tests/cgroup-runner-smoke.sh
 - [제품 철학과 용어](docs/product-philosophy.md)
 - [Protocol v1 API 명세](docs/api-mvp.md)
 - [Java SDK](java-sdk/README.md)
+- [Ubuntu daemon 설치](docs/install-ubuntu.md)
 - [Linux 통합 시험](integration-tests/README.md)
 - [Protocol fixture](protocol-fixtures/v1/README.md)
 - [기여 가이드](CONTRIBUTING.md)
