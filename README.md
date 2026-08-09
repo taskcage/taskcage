@@ -2,7 +2,7 @@
 
 TaskCage는 신뢰된 외부 프로세스를 작업 단위로 실행하고, Linux cgroup v2로 자원과 수명주기를 관리하는 경량 런타임이다.
 
-> **상태:** `0.x` PoC. Rust 데몬과 Java SDK의 핵심 계약을 구현하고 검증하는 단계이며, 아직 Maven Central 배포나 운영 호환성을 보장하지 않는다.
+> **상태:** `0.x` PoC. 다음 목표는 설치 가능한 Local Public Alpha이며, 아직 Maven Central 배포나 운영 호환성을 보장하지 않는다.
 
 제품의 장기 방향과 표준 용어는 [제품 철학과 용어](docs/product-philosophy.md)에서 정의한다. 이 README는
 현재 구현하고 검증한 PoC 범위를 설명한다.
@@ -167,16 +167,22 @@ bash integration-tests/cgroup-runner-smoke.sh
 - [Protocol fixture](protocol-fixtures/v1/README.md)
 - [기여 가이드](CONTRIBUTING.md)
 
-## 제품 MVP 방향
+## 단계별 제품 방향
 
-현재 구현 계약은 Local UDS 기반 PoC다. 제품 MVP의 Core SDK는 같은 Task 계약을 Local UDS와 인증된
-Remote transport에서 제공하는 것을 목표로 한다. Remote topology·wire·인증·권한·Artifact 전달·
-backpressure·응답 유실 의미는 선행 ADR과 API 계약을 승인한 뒤 구현한다.
+다음 목표는 Local UDS와 Raw Command를 실제 Ubuntu 호스트에 설치해 반복 사용할 수 있는 Local Public
+Alpha다. 서비스 계정과 systemd cgroup 위임, readiness와 구조화된 log, 배포 정책과 기본 자원 계약,
+하나의 대표 workload, release artifact와 Java 배포 경로를 먼저 검증한다.
 
+Execution Profile과 Artifact 계약은 Public Alpha를 최소 3명의 외부 사용자가 사용하고,
+Profile·Package·Artifact로 일반화할 반복 요구가 2개 이상 확인되면 Local Product Alpha에서 도입한다.
 재현 가능한 실행은 버전 관리되는 Execution Profile과 digest로 고정한 Runtime Package를 사용한다.
 Bundle은 Package binary가 아니라 Profile, Runtime Package ref + digest, 플랫폼·정책·무결성 정보를
-담으며, 여러 Bundle이 같은 Package digest를 공유할 수 있다. 중앙 Hub server는 MVP 구성요소가 아니며
-임의 URL에서 임의 binary를 받아 실행하는 기능도 제공하지 않는다.
+담으며, 여러 Bundle이 같은 Package digest를 공유할 수 있다.
+
+Remote는 Local Public Alpha나 Local Product Alpha의 선행 조건이 아니다. Local 계약과 실제 원격 수요가
+검증된 뒤 topology·wire·인증·권한·Artifact 전달·backpressure·응답 유실 의미를 ADR과 API 계약으로
+결정한다. 중앙 Hub server도 이 단계들의 구성요소가 아니며, 임의 URL에서 임의 binary를 받아 실행하는
+기능을 제공하지 않는다.
 
 ## 기여
 
