@@ -13,12 +13,11 @@ use taskcaged::{DaemonConfig, Error, RunOnceConfig};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_CLEANUP_MILLIS: u64 = 5_000;
+const DEFAULT_STATUS_TIMEOUT_MILLIS: u64 = 2_000;
 
 #[tokio::main]
 async fn main() -> taskcaged::Result<()> {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("taskcaged=info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    configure_logging()?;
 
     let mut args = env::args_os().skip(1);
     match args.next().as_deref() {
@@ -39,6 +38,24 @@ async fn main() -> taskcaged::Result<()> {
             println!("{}", serde_json::to_string(&report)?);
             Ok(())
         }
+        Some(command) if command == OsStr::new("status") => {
+            let config = parse_status(args.collect())?;
+            #[cfg(target_os = "linux")]
+            {
+                let report = taskcaged::status::check(&config.socket_path, config.timeout).await?;
+                println!("{}", serde_json::to_string(&report)?);
+                if report.is_ready() {
+                    Ok(())
+                } else {
+                    Err(Error::DaemonUnready)
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = config;
+                Err(Error::UnsupportedPlatform)
+            }
+        }
         Some(command) if command == OsStr::new("run-once") => {
             let config = parse_run_once(args.collect())?;
             let report = taskcaged::run_once(config).await?;
@@ -46,9 +63,88 @@ async fn main() -> taskcaged::Result<()> {
             Ok(())
         }
         Some(other) => Err(Error::InvalidArgument(format!(
-            "알 수 없는 명령입니다: {other:?}; serve, check-environment 또는 run-once를 사용하세요"
+            "알 수 없는 명령입니다: {other:?}; serve, check-environment, status 또는 run-once를 사용하세요"
         ))),
     }
+}
+
+fn configure_logging() -> taskcaged::Result<()> {
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("taskcaged=info"));
+    let format = env::var("TASKCAGE_LOG_FORMAT").unwrap_or_else(|_| "compact".to_owned());
+    let result = match format.as_str() {
+        "compact" => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .compact()
+            .try_init(),
+        "json" => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .json()
+            .flatten_event(true)
+            .with_current_span(false)
+            .with_span_list(false)
+            .try_init(),
+        _ => {
+            return Err(Error::InvalidArgument(
+                "TASKCAGE_LOG_FORMAT은 compact 또는 json이어야 합니다".to_owned(),
+            ));
+        }
+    };
+    result.map_err(|error| Error::InvalidArgument(format!("log 초기화에 실패했습니다: {error}")))
+}
+
+#[derive(Debug)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct StatusConfig {
+    socket_path: PathBuf,
+    timeout: Duration,
+}
+
+fn parse_status(args: Vec<OsString>) -> taskcaged::Result<StatusConfig> {
+    let mut socket_path = None;
+    let mut timeout_ms = None;
+    let mut index = 0;
+    while index < args.len() {
+        let name = args[index].to_str().ok_or_else(|| {
+            Error::InvalidArgument("status 옵션 이름은 UTF-8이어야 합니다".to_owned())
+        })?;
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| Error::InvalidArgument(format!("{name} 옵션 값이 없습니다")))?;
+        match name {
+            "--socket" if socket_path.is_none() => socket_path = Some(PathBuf::from(value)),
+            "--timeout-ms" if timeout_ms.is_none() => {
+                timeout_ms = Some(parse_number(name, value)?);
+            }
+            "--socket" | "--timeout-ms" => {
+                return Err(Error::InvalidArgument(format!(
+                    "status 옵션이 중복되었습니다: {name}"
+                )));
+            }
+            _ => {
+                return Err(Error::InvalidArgument(format!(
+                    "알 수 없는 status 옵션입니다: {name}"
+                )));
+            }
+        }
+        index += 2;
+    }
+    let socket_path = required_option("socket", socket_path)?;
+    if !socket_path.is_absolute() {
+        return Err(Error::InvalidArgument(
+            "status socket 경로는 절대 경로여야 합니다".to_owned(),
+        ));
+    }
+    let timeout_ms = timeout_ms.unwrap_or(DEFAULT_STATUS_TIMEOUT_MILLIS);
+    if timeout_ms == 0 {
+        return Err(Error::InvalidArgument(
+            "status timeout-ms 값은 0보다 커야 합니다".to_owned(),
+        ));
+    }
+    Ok(StatusConfig {
+        socket_path,
+        timeout: Duration::from_millis(timeout_ms),
+    })
 }
 
 fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
@@ -731,5 +827,46 @@ mod tests {
         let error = parse_run_once(vec![OsString::from("--"), OsString::from("echo")]).unwrap_err();
 
         assert!(error.to_string().contains("절대 경로"));
+    }
+
+    #[test]
+    fn status_requires_absolute_socket_and_uses_bounded_default_timeout() {
+        let socket = std::env::temp_dir().join("taskcaged.sock");
+        let config = parse_status(vec![
+            OsString::from("--socket"),
+            socket.clone().into_os_string(),
+        ])
+        .unwrap();
+        assert_eq!(config.socket_path, socket);
+        assert_eq!(config.timeout, Duration::from_millis(2_000));
+
+        let error = parse_status(vec![
+            OsString::from("--socket"),
+            OsString::from("relative.sock"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("절대 경로"));
+    }
+
+    #[test]
+    fn status_rejects_zero_timeout_and_duplicate_options() {
+        let socket = std::env::temp_dir().join("taskcaged.sock");
+        let error = parse_status(vec![
+            OsString::from("--socket"),
+            socket.clone().into_os_string(),
+            OsString::from("--timeout-ms"),
+            OsString::from("0"),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("0보다 커야"));
+
+        let error = parse_status(vec![
+            OsString::from("--socket"),
+            socket.clone().into_os_string(),
+            OsString::from("--socket"),
+            socket.into_os_string(),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("중복"));
     }
 }

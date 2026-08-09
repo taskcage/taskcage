@@ -690,7 +690,13 @@ where
             let kill_already_sent = match job.kill_all() {
                 Ok(()) => true,
                 Err(error) => {
-                    tracing::warn!(cause = %error, "종료 상태 회수와 경쟁한 cgroup cancel을 정리 경로에서 재시도합니다");
+                    tracing::warn!(
+                        event = "task_cleanup_retry",
+                        task_id = job_id,
+                        stage = "cancel_after_exit",
+                        cause = %error,
+                        "종료 상태 회수와 경쟁한 cgroup cancel을 정리 경로에서 재시도합니다"
+                    );
                     false
                 }
             };
@@ -1150,7 +1156,14 @@ async fn cleanup_running_job(
 
     match (kill_result, reap_result, finish_result, output_result) {
         (Ok(()), Ok(exit), Ok((stats, _, _)), Ok(output)) => {
-            tracing::warn!(stage, cause = %cause, "내부 오류 뒤 안전한 정리를 완료했습니다");
+            tracing::warn!(
+                event = "task_cleanup_completed",
+                task_id = job_id,
+                stage,
+                cleanup_complete = true,
+                cause = %cause,
+                "내부 오류 뒤 안전한 정리를 완료했습니다"
+            );
             Ok(CleanedRun {
                 job_id,
                 pid,
@@ -1210,6 +1223,7 @@ async fn finish_job_with_retry(
     match job.finish_until(retry_deadline).await {
         Ok(stats) => {
             tracing::error!(
+                event = "fail_stop_cleanup_recovered",
                 task_id = job_id,
                 stage,
                 retry = "성공",

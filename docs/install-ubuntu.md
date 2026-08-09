@@ -70,6 +70,7 @@ installer를 `--start`로 다시 실행하면 실행 중인 service를 restart�
 | `TASKCAGE_MAX_CONCURRENT_CONNECTIONS` | `32` | 동시에 열린 UDS 연결 상한 |
 | `TASKCAGE_CLEANUP_TIMEOUT_MS` | `5000` | 개별 cleanup 시간 예산 |
 | `TASKCAGE_FAIL_STOP_TIMEOUT_MS` | `10000` | fail-stop 전체 시간 예산 |
+| `TASKCAGE_LOG_FORMAT` | `json` | `json` 또는 개발용 `compact` log 형식 |
 | `RUST_LOG` | `taskcaged=info` | daemon log filter |
 
 이 값들은 daemon process와 Registry의 운영 상한이며 Task별 CPU·memory·PID 기본 정책이 아니다. 변경한
@@ -92,7 +93,32 @@ sudo journalctl -u taskcaged.service --since today
 ```
 
 기대하는 socket 값은 `600 taskcage taskcage`다. 현재 socket 존재와 `systemctl is-active`는 process
-liveness 증거일 뿐 별도의 live readiness API를 대신하지 않는다.
+liveness만 증명한다. 실제 daemon 준비 상태는 같은 service UID로 Protocol v1 `getCapabilities`를 호출하는
+`status` 명령으로 확인한다.
+
+```bash
+sudo -u taskcage /usr/local/bin/taskcaged status \
+  --socket /run/taskcage/taskcaged.sock \
+  --timeout-ms 2000
+```
+
+준비된 daemon은 한 줄 JSON과 종료 코드 `0`을 반환한다.
+
+```json
+{"status":"READY","daemonVersion":"0.1.0","protocolVersions":[1],"maxFrameBytes":1048576,"maxConcurrentTasks":4,"cgroupV2Ready":true}
+```
+
+연결 실패, timeout, 잘못된 응답 또는 `cgroupV2Ready=false`는 종료 코드가 `0`이 아니다. `status`는 실행
+중인 daemon을 확인하고, `check-environment`는 현재 명령 process가 속한 별도 cgroup 위임 환경만 검사한다.
+
+service 기본 log는 journal에 JSON으로 기록된다. `event`, `request_id`, `operation`, `task_id`, admission
+결과와 종료 원인·cleanup 증거를 기준으로 검색할 수 있다. 기본 log에는 실행 argv, 환경 변수 값,
+작업 디렉터리 또는 stdout/stderr tail을 기록하지 않는다.
+
+```bash
+sudo journalctl -u taskcaged.service -o cat --since today | \
+  grep '"event":"task_finished"'
+```
 
 독립된 delegated preflight만 다시 실행하려면 service와 다른 transient unit을 사용한다.
 

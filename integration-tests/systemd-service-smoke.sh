@@ -55,6 +55,17 @@ sudo -n systemctl is-active --quiet taskcaged.service
 [[ "$(systemctl show taskcaged.service --property=Delegate --value)" == "yes" ]]
 [[ "$(sudo -n stat -c '%a %U %G' /run/taskcage/taskcaged.sock)" == "600 taskcage taskcage" ]]
 
+status_json="$(sudo -n -u taskcage /usr/local/bin/taskcaged status \
+  --socket /run/taskcage/taskcaged.sock \
+  --timeout-ms 2000)"
+grep -q '"status":"READY"' <<<"${status_json}"
+grep -q '"cgroupV2Ready":true' <<<"${status_json}"
+
+journal_json="$(sudo -n journalctl -u taskcaged.service --no-pager -o cat)"
+grep -q '"event":"daemon_started"' <<<"${journal_json}"
+grep -q '"event":"status_reported"' <<<"${journal_json}"
+grep -q '"operation":"getCapabilities"' <<<"${journal_json}"
+
 main_pid="$(systemctl show taskcaged.service --property=MainPID --value)"
 [[ "${main_pid}" =~ ^[1-9][0-9]*$ ]]
 manager_membership="$(cut -d: -f3 "/proc/${main_pid}/cgroup")"
@@ -84,4 +95,4 @@ sudo -n test ! -e /etc/taskcage/taskcaged.env
 
 trap - EXIT
 cleanup
-echo "PASS: Ubuntu systemd service 설치, 위임, 재설치, 종료와 제거를 확인했습니다"
+echo "PASS: Ubuntu systemd service 설치, readiness, 구조화 log, 위임, 재설치, 종료와 제거를 확인했습니다"
