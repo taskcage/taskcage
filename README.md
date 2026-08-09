@@ -117,15 +117,9 @@ if (result.terminationReason() == TerminationReason.TIMEOUT) {
 
 공개 API의 최종 타입명과 enum은 Rust 데몬·Java SDK가 공유하는 프로토콜 fixture와 함께 확정합니다.
 
-## 설계 문서
+## 관련 문서
 
 - [MVP API 명세](docs/api-mvp.md): UDS 프로토콜, 요청·응답, 오류 코드와 공유 fixture 계약
-- [직접 cgroup v2 제어 결정](docs/decisions/0001-direct-cgroup-v2-without-systemd.md): systemd 없이 구현하는 이유와 운영 원칙
-- [정리 뒤 종료 결과 공개 결정](docs/decisions/0002-publish-terminal-results-after-cleanup.md): 작업 전체 정리가 확인된 뒤에만 `FINISHED`를 공개하는 원칙
-- [RUNNING 이후 정리 불확실 처리 결정](docs/decisions/0003-fail-stop-on-uncertain-cleanup-after-running.md): 제한된 복구 뒤 fail-stop 종료와 재시작 복구 원칙
-- [명시적 owner-only UDS 결정](docs/decisions/0004-explicit-owner-only-uds-socket.md): socket 절대 경로, `0600` 권한과 기존 경로 보호 원칙
-- [시작 복구 소유권과 stale socket 결정](docs/decisions/0005-own-startup-recovery-before-removing-stale-socket.md): 단일 daemon lock, 안전한 stale 판정과 시작 순서
-- [UDS 동시 연결 제한 결정](docs/decisions/0007-bound-concurrent-uds-connections.md): 명시적인 연결 상한과 초과 연결 종료 원칙
 
 ## 지원 범위
 

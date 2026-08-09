@@ -6,7 +6,6 @@ TaskCage는 Linux에서 무거운 외부 프로그램을 작업 단위로 실행
 
 - [README.md](README.md): 프로젝트 목표, 지원 범위, 핵심 아키텍처와 API 방향
 - [CONTRIBUTING.md](CONTRIBUTING.md): 브랜치, 커밋, PR, 리뷰 규칙 (파일이 추가된 뒤 적용)
-- `docs/decisions/`: 큰 기술적 선택의 근거와 결과
 
 ## 예상 구조
 
@@ -14,7 +13,7 @@ TaskCage는 Linux에서 무거운 외부 프로그램을 작업 단위로 실행
 - `java-sdk/`: Java 애플리케이션에서 데몬을 호출하는 SDK
 - `integration-tests/`: 실제 Linux cgroup v2 환경을 검증하는 통합 테스트
 - `test-fixtures/`: CPU·메모리·프로세스 제한과 정리를 검증할 대상 프로그램
-- `docs/`: 설계 문서와 의사결정 기록
+- `docs/`: API 명세와 설계 문서
 
 ## 변경 원칙
 
@@ -23,7 +22,6 @@ TaskCage는 Linux에서 무거운 외부 프로그램을 작업 단위로 실행
 - 시간 초과·취소·오류 시 개별 PID만 종료하지 말고 작업 cgroup 전체를 정리한다.
 - 종료 원인은 단일 exit code로 추측하지 않고 cgroup 이벤트와 프로세스 상태를 함께 확인한다.
 - Rust 데몬과 Java SDK 사이의 프로토콜 변경은 양쪽 구현과 호환성 테스트를 함께 갱신한다.
-- 구조, 공개 API, 자원 제한 정책에 영향을 주는 변경은 `docs/decisions/` 기록 필요성을 확인한다.
 
 ## 검증
 
