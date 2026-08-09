@@ -1,8 +1,12 @@
-# TaskCage Protocol v1 API 명세
+# TaskCage Local Protocol v1 API 명세
 
 ## 목적과 범위
 
-이 문서는 Java SDK와 Rust 데몬 사이의 공개 wire 계약을 정의한다. Protocol v1은 같은 Linux 호스트에서 Unix domain socket(UDS)을 통해 신뢰된 외부 명령을 제한된 Task로 실행한다.
+이 문서는 Java SDK와 Rust 데몬 사이의 현재 Local wire 계약을 정의한다. Protocol v1은 같은 Linux
+호스트에서 Unix domain socket(UDS)을 통해 신뢰된 외부 명령을 제한된 Task로 실행한다. 제품 수준의
+방향과 표준 용어는 [제품 철학과 용어](product-philosophy.md)를 따른다.
+
+> Task는 특정 실행 계약을 입력과 자원 정책으로 수행하는 일회성 작업이며, cgroup v2 실행 경계·프로세스 트리·상태·결과를 포함한다.
 
 현재 범위:
 
@@ -12,7 +16,23 @@
 - 작업 cgroup 전체 정리와 최종 결과
 - 데몬 생존 기간 내 멱등 제출
 
-원격 전송, 작업 대기열, 스트리밍, 영속 Registry, 재시작 뒤 작업 재개, Profile·Bundle·Hub는 Protocol v1 범위가 아니다.
+원격 전송, 작업 대기열, 스트리밍, 영속 Registry, 재시작 뒤 작업 재개와 Profile·Bundle 실행은 이 Local
+Protocol v1의 범위가 아니다.
+
+### 제품 MVP의 Remote 경계
+
+제품 MVP 아키텍처는 Local UDS와 인증된 Remote transport를 포함한다. 다만 현재 Protocol v1 framing을
+network에 그대로 노출하지 않으며, Remote 구현 전에 다음 계약을 함께 승인해야 한다.
+
+- caller authentication과 Task·Profile·Artifact·Raw Command별 authorization
+- 전송 암호화, server identity, credential rotation과 revocation
+- Remote Artifact의 크기·무결성·전달·정리 책임
+- 요청·응답·출력 backpressure와 연결 상한
+- 연결 단절과 응답 유실 시 Task 상태, idempotency와 재시도 의미
+- Raw Command의 기본 거부 여부와 명시적 허용 범위
+
+daemon의 직접 listener와 별도 Gateway 중 어느 topology를 사용할지, TCP/TLS/mTLS 또는 다른 wire를
+사용할지는 후속 ADR에서 결정한다. 중앙 Hub server는 제품 MVP의 필수 구성요소가 아니다.
 
 ## 실행 불변 조건
 
