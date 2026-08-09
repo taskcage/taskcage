@@ -19,10 +19,12 @@
 원격 전송, 작업 대기열, 스트리밍, 영속 Registry, 재시작 뒤 작업 재개와 Profile·Bundle 실행은 이 Local
 Protocol v1의 범위가 아니다.
 
-### 제품 MVP의 Remote 경계
+### 후속 Remote 경계
 
-제품 MVP 아키텍처는 Local UDS와 인증된 Remote transport를 포함한다. 다만 현재 Protocol v1 framing을
-network에 그대로 노출하지 않으며, Remote 구현 전에 다음 계약을 함께 승인해야 한다.
+현재 Protocol v1과 다음 Local Public Alpha는 Local UDS를 사용한다. Remote는 Local Public Alpha나
+Local Product Alpha의 선행 조건이 아니며, Local Product Alpha의 Profile·Artifact 계약과 실제 원격
+수요가 검증된 뒤에 별도 ADR과 API 계약으로 다룬다. 현재 Protocol v1 framing을 network에 그대로
+노출하지 않으며, Remote 구현 전에 다음 계약을 함께 승인해야 한다.
 
 - caller authentication과 Task·Profile·Artifact·Raw Command별 authorization
 - 전송 암호화, server identity, credential rotation과 revocation
@@ -32,7 +34,9 @@ network에 그대로 노출하지 않으며, Remote 구현 전에 다음 계약�
 - Raw Command의 기본 거부 여부와 명시적 허용 범위
 
 daemon의 직접 listener와 별도 Gateway 중 어느 topology를 사용할지, TCP/TLS/mTLS 또는 다른 wire를
-사용할지는 후속 ADR에서 결정한다. 중앙 Hub server는 제품 MVP의 필수 구성요소가 아니다.
+사용할지는 아직 선택하지 않았다. [ADR 0009](decisions/0009-direct-remote-tls-listener.md)는 직접 listener
+후보 분석을 보존하는 `Deferred` 기록이다. 중앙 Hub server는 Local Public Alpha와 Local Product Alpha의
+필수 구성요소가 아니다.
 
 ## 실행 불변 조건
 

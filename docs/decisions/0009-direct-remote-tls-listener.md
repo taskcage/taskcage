@@ -1,23 +1,34 @@
-# 0009. Remote MVP는 taskcaged가 TLS endpoint를 직접 제공한다
+# 0009. Remote topology 결정은 Local Product Alpha 검증 뒤로 보류한다
 
-- Status: Proposed
+- Status: Deferred
 - Date: 2026-08-10
+- Deferred: 2026-08-10
 - Related issue: [#90](https://github.com/taskcage/taskcage/issues/90)
+
+## 보류 결정
+
+이 ADR의 직접 listener 제안은 `Accepted`된 적이 없으며 현재 구현 방향이 아니다. Local Public Alpha에서
+설치 가능한 Local UDS·Raw Command 경로를 먼저 검증하고, 외부 사용자의 반복 수요를 바탕으로 Local
+Product Alpha의 Profile·Artifact 계약을 검증한다.
+
+Remote 수요, trust boundary와 운영 요구가 실제로 확인된 뒤에 직접 listener와 별도 Gateway를 다시
+비교한다. 새 ADR 또는 이 ADR의 갱신안이 `Accepted`되기 전에는 Remote protocol, listener, 인증 또는
+authorization 구현을 시작하지 않는다.
 
 ## 문제
 
-Remote 연결은 TaskCage 제품 MVP의 아키텍처 계약이지만 현재 구현은 owner-only `0600` Local UDS와
-Protocol v1만 제공한다. Remote 구현에 앞서 network endpoint, caller identity, authorization,
-backpressure, 장애와 audit 책임을 어느 process가 소유하는지 결정해야 한다.
+장기적으로 Remote 연결을 제공하려면 network endpoint, caller identity, authorization, backpressure,
+장애와 audit 책임을 어느 process가 소유하는지 결정해야 한다. 현재 구현은 owner-only `0600` Local
+UDS와 Protocol v1만 제공한다.
 
 검토 대상은 다음 두 topology다.
 
 1. `taskcaged`가 TCP + TLS/mTLS listener를 직접 제공한다.
 2. 별도 Gateway가 Remote TLS와 caller authentication을 종료하고 Local daemon core로 전달한다.
 
-이 ADR은 topology와 보안 책임의 경계를 결정한다. Remote wire schema, Artifact 전송 protocol,
-SDK retry API와 구체적인 설정 field는 후속 계약에서 다룬다. 이 ADR만으로 현재 Local Protocol v1
-framing을 network에 노출할 수 없다.
+이 ADR은 당시 topology와 보안 책임의 경계를 비교했지만 현재 어느 topology도 선택하지 않는다. Remote
+wire schema, Artifact 전송 protocol, SDK retry API와 구체적인 설정 field는 후속 계약에서 다룬다. 이
+ADR만으로 현재 Local Protocol v1 framing을 network에 노출할 수 없다.
 
 ## 결정 기준
 
@@ -35,17 +46,17 @@ framing을 network에 노출할 수 없다.
 별도 Gateway의 격리 이점은 중요하지만 현재 owner-only UDS를 그대로 사용하려면 Gateway도 보통 daemon과
 같은 UID로 실행해야 한다. 이 경우 process crash 경계는 나뉘어도 의미 있는 privilege boundary는 생기지
 않는다. 다른 credential로 분리하려면 UDS 권한, Gateway-to-daemon 인증, caller identity assertion과 replay
-방지 protocol을 먼저 추가해야 한다. 이는 Remote MVP의 경량성과 단일 runtime 운영 목표에 비해 큰 선행
+방지 protocol을 먼저 추가해야 한다. 이는 후속 Remote의 경량성과 단일 runtime 운영 목표에 비해 큰 선행
 비용이다.
 
-## 제안 결정
+## 보류된 제안
 
-Remote MVP는 `taskcaged` 안의 선택적 직접 TCP endpoint로 제공한다. endpoint는 TLS 1.3과 필수 mTLS로
-server와 caller를 상호 인증한 뒤, 같은 daemon core의 Task 계약으로 요청을 전달한다.
+당시 제안은 `taskcaged` 안의 선택적 직접 TCP endpoint였다. endpoint가 TLS 1.3과 필수 mTLS로 server와
+caller를 상호 인증한 뒤, 같은 daemon core의 Task 계약으로 요청을 전달하는 후보를 검토했다.
 
-이 결정은 `Status: Proposed`인 동안 구현 승인이 아니다. review에서 trust root 소유자, caller identity
-형식과 fail-closed 조건을 승인하고 상태를 `Accepted`로 바꾸기 전에는 Remote protocol 또는 listener
-구현을 시작하지 않는다.
+이 제안은 보류되었으며 구현 승인이 아니다. Local Product Alpha 검증과 실제 원격 수요를 근거로 trust
+root 소유자, caller identity 형식과 fail-closed 조건을 다시 검토하고 상태를 `Accepted`로 바꾸기 전에는
+Remote protocol 또는 listener 구현을 시작하지 않는다.
 
 ## 배포와 privilege 경계
 
@@ -61,7 +72,7 @@ server와 caller를 상호 인증한 뒤, 같은 daemon core의 Task 계약으�
 
 ## TLS와 caller identity
 
-- Remote MVP의 최소 및 최대 protocol family는 TLS 1.3이다. TLS 1.2 이하는 거부한다.
+- 이 직접 listener 후보의 최소 및 최대 protocol family는 TLS 1.3이다. TLS 1.2 이하는 거부한다.
 - client는 운영자가 구성한 trust root와 기대한 server name을 사용해 server certificate의 DNS/IP SAN과
   `serverAuth` 용도를 검증한다. SAN 검증을 끄는 옵션을 제공하지 않는다.
 - Remote caller는 client certificate를 반드시 제시한다. certificate chain은 운영자가 구성한 client CA와
@@ -171,10 +182,9 @@ record에 남기지 않는다. audit 기록 실패가 admission을 닫아야 하
 
 ## 기각한 선택지: 별도 Gateway
 
-별도 Gateway는 Remote MVP 기본 topology로 선택하지 않는다. 같은 UID로 UDS에 연결하면 privilege 분리가
-약하고, 다른 UID로 실행하면 기존 owner-only `0600` 계약을 바꾸면서 caller identity 전달과 인증 protocol을
-새로 설계해야 한다. 또한 두 process의 capacity, buffering, readiness, restart와 audit 상관관계를 운영해야
-한다.
+별도 Gateway도 현재 기본 topology로 선택하지 않는다. 같은 UID로 UDS에 연결하면 privilege 분리가 약하고,
+다른 UID로 실행하면 기존 owner-only `0600` 계약을 바꾸면서 caller identity 전달과 인증 protocol을 새로
+설계해야 한다. 또한 두 process의 capacity, buffering, readiness, restart와 audit 상관관계를 운영해야 한다.
 
 다음 조건 중 하나가 현실 요구로 확인되면 Gateway 결정을 다시 검토한다.
 
@@ -209,18 +219,19 @@ record에 남기지 않는다. audit 기록 실패가 admission을 닫아야 하
 - TLS와 mTLS는 filesystem, network, syscall 또는 악의적인 target code를 sandbox하지 않는다.
 - Artifact integrity, lost-response retry, wire framing과 구체적 capacity 값은 아직 후속 계약이 필요하다.
 
-## 후속 작업
+## 재검토 조건
 
-이 ADR이 `Accepted`가 된 뒤에만 다음 계약을 순서대로 정의한다.
+다음 조건을 순서대로 충족한 뒤에만 Remote topology 결정을 다시 연다.
 
-1. Remote Task와 authorization wire schema
-2. Remote Artifact transfer, digest, staging과 cleanup
-3. idempotency, disconnect와 response-loss 의미
-4. Raw Command capability와 audit contract
-5. direct TLS listener 구현과 외부 Linux host 검증
+1. Local Public Alpha 설치·서비스·대표 workload 경로를 외부 Linux 호스트에서 검증한다.
+2. 최소 3명의 외부 사용자와 2개 이상의 반복 요구로 Local Product Alpha의 Profile·Artifact 계약을 검증한다.
+3. Remote 사용 사례, trust boundary와 운영 요구를 구체적인 증거로 기록한다.
+4. 직접 listener와 별도 Gateway의 보안·운영·성능 비용을 새 근거로 다시 비교한다.
+5. wire와 구현을 시작하기 전에 새 ADR 또는 이 ADR의 갱신안을 `Accepted`한다.
 
 ## 관련 문서
 
 - [TaskCage 제품 철학과 용어](../product-philosophy.md)
 - [Local Protocol v1 API 명세](../api-mvp.md)
 - [Issue #90](https://github.com/taskcage/taskcage/issues/90)
+- [Issue #95](https://github.com/taskcage/taskcage/issues/95)

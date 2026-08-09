@@ -93,20 +93,24 @@ cgroup controller, 권한, 원자적 task cgroup entry 또는 제한값 read-bac
 상태로 실행하지 않는다. whole-task cleanup을 증명할 수 없다면 새 Task를 시작하지 않고, 필요하면
 fail-stop과 시작 복구를 선택한다.
 
-### 6. Local과 Remote는 같은 Core 계약을 사용한다
+### 6. Local에서 Core 계약을 먼저 검증하고 Remote는 나중에 확장한다
 
-제품 MVP의 Core SDK는 호출 방식과 상관없이 같은 Task·결과·종료 원인 계약을 제공한다.
+Core SDK는 장기적으로 transport와 상관없이 같은 Task·결과·종료 원인 계약을 제공한다.
 
 ```text
 TaskCage Core SDK
-├─ Local Transport: UDS
-└─ Remote Transport: encrypted + authenticated
+├─ Current: Local Transport (UDS)
+└─ Later: authenticated Remote Transport
 ```
 
-현재 병합된 기준선은 Local UDS와 Protocol v1이다. Remote는 제품 MVP 아키텍처 계약에 포함되지만 아직
-구현된 transport가 아니다. [ADR 0009](decisions/0009-direct-remote-tls-listener.md)는 TLS 1.3과 필수 mTLS를
-사용하는 daemon 직접 listener를 Remote MVP topology로 제안한다. ADR이 `Accepted`가 되기 전에는 구현
-결정으로 간주하지 않으며 Remote wire와 API 계약은 별도 후속 작업으로 승인한다.
+현재 병합된 기준선은 Local UDS와 Protocol v1이다. 다음 단계인 Local Public Alpha는 Raw Command 실행을
+설치·운영·관찰 가능한 제품 경로로 검증한다. 최소 3명의 외부 사용자가 이 경로를 사용하고,
+Profile·Package·Artifact로 일반화할 반복 요구가 2개 이상 확인된 뒤에 Local Product Alpha 계약을
+확장한다.
+
+Remote는 Local Public Alpha나 Local Product Alpha의 선행 조건이 아니다. Local 계약과 실제 원격 수요,
+trust boundary와 운영 근거가 확보된 뒤에 topology와 wire를 선택한다. [ADR 0009](decisions/0009-direct-remote-tls-listener.md)는
+직접 listener 후보 분석을 보존하는 `Deferred` 기록이며 현재 구현 방향을 승인하지 않는다.
 
 Remote 구현 전에 최소한 다음 계약을 함께 승인해야 한다.
 
@@ -138,7 +142,7 @@ TaskCage는 다음을 제공하는 것을 목표로 한다.
 - 외부 프로세스의 Task 단위 추상화
 - Linux cgroup v2 기반 자원·수명주기 관리
 - Execution Profile 기반 실행 계약
-- Local UDS와 인증된 Remote runtime 연결
+- Local UDS와 이후 단계의 인증된 Remote runtime 연결
 - 일관된 결과, Artifact와 종료 원인
 
 TaskCage는 다음을 기본 제공하지 않는다.
@@ -149,8 +153,9 @@ TaskCage는 다음을 기본 제공하지 않는다.
 - 임의 URL에서 임의 binary를 받아 실행하는 기능
 - 중앙 Hub server 의존성
 
-Hub는 Bundle·Profile·Binding metadata를 배포할 수 있는 장기 후보일 뿐 MVP 구성요소가 아니다. 제품은
-Hub 없이 설치·검증된 계약으로 동작해야 하며, 이 저장소는 현재 Hub server를 구현하거나 운영하지 않는다.
+Hub는 Bundle·Profile·Binding metadata를 배포할 수 있는 장기 후보일 뿐 Local Public Alpha나 Local
+Product Alpha 구성요소가 아니다. 제품은 Hub 없이 설치·검증된 계약으로 동작해야 하며, 이 저장소는 현재
+Hub server를 구현하거나 운영하지 않는다.
 
 ## 표준 용어
 
@@ -159,13 +164,13 @@ Hub 없이 설치·검증된 계약으로 동작해야 하며, 이 저장소는 
 | TaskCage | 신뢰된 외부 프로세스를 제한된 실행 계약으로 다루는 Linux-native process runtime |
 | Task | 특정 실행 계약을 입력과 자원 정책으로 수행하는 일회성 작업이며, cgroup v2 실행 경계·프로세스 트리·상태·결과를 포함하는 공개 실행 단위 |
 | TaskCage Daemon (`taskcaged`) | Task를 검증하고 task cgroup을 생성해 외부 프로세스를 실행·관찰·정리하는 runtime |
-| TaskCage Core SDK | Task 제출·조회·취소, Local/Remote 연결과 범용 Execution Profile 실행을 제공하는 공통 SDK 계약 |
+| TaskCage Core SDK | Task 제출·조회·취소와 Local 연결을 제공하고, 이후 검증된 Execution Profile·Remote 연결로 확장하는 공통 SDK 계약 |
 | Execution Profile | 입력·출력 schema, argv 구성 규칙, Runtime Package 참조와 기본 자원 정책을 정의한 버전 관리 실행 계약 |
 | TaskCage Bundle | Execution Profile, Runtime Package ref + digest, 호환성·정책·무결성 정보를 담은 불변 실행 계약 |
 | Runtime Package | 실행 binary와 필요한 library·codec·font·설정을 묶어 별도로 cache하는 플랫폼별 실행물 |
 | Profile Binding | Execution Profile을 Java 등의 타입 안전한 domain API로 제공하는 언어별 편의 library |
 | Artifact | Task가 입력으로 사용하거나 결과로 생성하는 file·URI·data 참조 |
 | Raw Command | Execution Profile 없이 실행 파일과 argv를 직접 지정하는 저수준 탈출구 API |
-| TaskCage Hub | Bundle·Profile·Binding metadata를 저장·검색·검증·배포할 수 있는 장기 Registry 후보. MVP에는 포함하지 않음 |
+| TaskCage Hub | Bundle·Profile·Binding metadata를 저장·검색·검증·배포할 수 있는 장기 Registry 후보. Local Public Alpha와 Local Product Alpha에는 포함하지 않음 |
 
 **TaskCage는 프로세스를 실행하는 도구가 아니라, 외부 프로세스를 신뢰 가능한 작업 계약으로 바꾸는 runtime이다.**
