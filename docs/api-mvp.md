@@ -371,7 +371,10 @@ daemon은 예약, `RUNNING`, 최소 보존 기간 안의 `FINISHED`와 정리 �
 }
 ```
 
-`taskCancelled`은 취소 요청 접수가 아니라, 작업 cgroup 전체 정리와 `cgroup.events`의 `populated 0` 확인이 끝난 뒤에만 반환한다. 이미 완료된 작업 취소는 `TASK_ALREADY_FINISHED` 오류를 반환한다.
+`taskCancelled`은 취소 요청 접수가 아니라, 작업 cgroup 전체 정리, `cgroup.events`의 `populated 0`,
+`FINISHED` 저장과 정상 재사용 가능한 실행 슬롯 반환이 끝난 뒤에만 반환한다. process-wide fail-stop이
+슬롯을 보존한 경우에는 새 작업을 받지 않는다. 이미 완료된 작업 취소는 `TASK_ALREADY_FINISHED` 오류를
+반환한다.
 
 ## 실행·출력·보관 정책
 

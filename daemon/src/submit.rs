@@ -20,7 +20,9 @@ use self::registry::MonotonicClock;
 #[cfg(any(target_os = "linux", test))]
 pub(crate) use self::registry::TaskRegistrySettings;
 #[cfg(any(target_os = "linux", test))]
-use self::registry::{RegistryClock, SubmitExecutionOwner, SubmitReservation, TaskRegistry};
+use self::registry::{
+    FinishedTaskPublication, RegistryClock, SubmitExecutionOwner, SubmitReservation, TaskRegistry,
+};
 #[cfg(any(target_os = "linux", test))]
 pub(crate) use self::registry::{RegistryError, SubmitFailure, SubmitObservation};
 #[cfg(any(target_os = "linux", test))]
@@ -703,14 +705,14 @@ async fn run_after_running<C, Fut>(
     // 빠른 종료가 뒤따라도 최초 submit 호출에는 RUNNING을 고정해 전달한다.
     let _ = initial_sender.send(SubmitObservation::Task(running));
     match execution.await {
-        Ok(completed) => {
-            if finish_owner(owner, completed).is_err() {
-                capacity_permit.retain_for_fail_stop();
-            } else {
-                active.complete();
-                finish_capacity(capacity_permit, &fail_stop);
+        Ok(completed) => match finish_owner(owner, completed) {
+            Ok(publication) => {
+                complete_finished_execution(publication, capacity_permit, active, &fail_stop);
             }
-        }
+            Err(_) => {
+                capacity_permit.retain_for_fail_stop();
+            }
+        },
         Err(failure) => {
             report_running_failure(&fail_stop, owner.task_id());
             owner.fail(failure.submit);
@@ -753,14 +755,14 @@ fn finish_after_running<C>(
         };
     let _ = initial_sender.send(SubmitObservation::Task(running));
     match completion {
-        Ok(completed) => {
-            if finish_owner(owner, completed).is_err() {
-                capacity_permit.retain_for_fail_stop();
-            } else {
-                active.complete();
-                finish_capacity(capacity_permit, &fail_stop);
+        Ok(completed) => match finish_owner(owner, completed) {
+            Ok(publication) => {
+                complete_finished_execution(publication, capacity_permit, active, &fail_stop);
             }
-        }
+            Err(_) => {
+                capacity_permit.retain_for_fail_stop();
+            }
+        },
         Err(failure) => {
             report_running_failure(&fail_stop, owner.task_id());
             owner.fail(failure.submit);
@@ -786,15 +788,17 @@ fn finish_without_running<C>(
         active,
         fail_stop,
     } = runtime;
-    let observation = match completion {
+    match completion {
         Ok(completed) => match finish_owner(owner, completed) {
-            Ok(finished) => {
-                active.complete();
-                SubmitObservation::Task(finished)
+            Ok(publication) => {
+                let finished =
+                    complete_finished_execution(publication, capacity_permit, active, &fail_stop);
+                let observation = SubmitObservation::Task(finished);
+                let _ = initial_sender.send(observation);
             }
             Err(error) => {
                 capacity_permit.retain_for_fail_stop();
-                return send_initial_failure(initial_sender, error);
+                send_initial_failure(initial_sender, error);
             }
         },
         Err(failure) => {
@@ -802,11 +806,12 @@ fn finish_without_running<C>(
                 match owner.rollback_before_running(failure.submit) {
                     Ok(observation) => {
                         active.complete();
-                        observation
+                        finish_capacity(capacity_permit, &fail_stop);
+                        let _ = initial_sender.send(observation);
                     }
                     Err(error) => {
                         capacity_permit.retain_for_fail_stop();
-                        return send_initial_failure(initial_sender, error);
+                        send_initial_failure(initial_sender, error);
                     }
                 }
             } else {
@@ -815,14 +820,23 @@ fn finish_without_running<C>(
                 if failure.cleanup_complete {
                     active.complete();
                 }
-                return initial_sender.send(observation).ok().unwrap_or(());
+                let _ = initial_sender.send(observation);
             }
         }
-    };
-    if fail_stop.is_fail_stopping() {
-        capacity_permit.retain_for_fail_stop();
     }
-    let _ = initial_sender.send(observation);
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn complete_finished_execution(
+    publication: FinishedTaskPublication,
+    capacity_permit: TaskCapacityPermit,
+    active: ActiveExecution,
+    fail_stop: &FailStopCoordinator,
+) -> TaskPayload {
+    // FINISHED 저장 뒤 실행 소유권과 슬롯을 정리하고 마지막에 호출자를 깨운다.
+    active.complete();
+    finish_capacity(capacity_permit, fail_stop);
+    publication.publish_completion()
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -864,7 +878,7 @@ fn send_initial_failure(initial_sender: oneshot::Sender<SubmitObservation>, erro
 fn finish_owner<C>(
     owner: SubmitExecutionOwner<C>,
     completion: ExecutionCompletion,
-) -> Result<TaskPayload, RegistryError>
+) -> Result<FinishedTaskPublication, RegistryError>
 where
     C: RegistryClock,
 {
@@ -872,7 +886,7 @@ where
         #[cfg(target_os = "linux")]
         ExecutionCompletion::Real(completed) => owner.finish(completed),
         #[cfg(test)]
-        ExecutionCompletion::Test(finished) => owner.finish_for_test(finished),
+        ExecutionCompletion::Test(finished) => owner.prepare_finish_for_test(finished),
     }
 }
 
@@ -2001,6 +2015,10 @@ mod tests {
         assert_eq!(first_cancel_wait.await, expected);
         assert_eq!(second_cancel.wait().await, expected);
         assert_eq!(registry.snapshot(TASK_ID), Ok(Some(expected)));
+        let released = capacity
+            .try_acquire()
+            .expect("cancel 완료 통지 전에 실행 슬롯을 반환해야 합니다");
+        drop(released);
 
         let reused_starts = Arc::new(AtomicUsize::new(0));
         let reused_counter = Arc::clone(&reused_starts);
