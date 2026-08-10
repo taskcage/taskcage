@@ -129,7 +129,8 @@ cd java-sdk
 ./gradlew build
 ```
 
-현재 공개 API는 제출, 조회, bounded 완료 대기와 취소를 제공한다. 실행 파일과 작업 디렉터리는 절대 경로여야 한다.
+현재 공개 API는 동기 실행, 비동기 제출·조회, bounded 완료 대기와 취소를 제공한다. 실행 파일과 작업
+디렉터리는 절대 경로여야 한다.
 `TaskSpec(command)`는 유한한 SDK 안전 기본 자원 예산을 사용하며, 필요하면 기존 명시적 생성자로 override한다.
 
 ```java
@@ -144,13 +145,14 @@ try (TaskCageClient client = TaskCageClient.connect(
         TaskCageClientConfig.builder()
             .socketPath(Path.of("/run/taskcage/taskcaged.sock"))
             .build())) {
-    TaskHandle task = client.submitHandle(spec);
-    FinishedTaskSnapshot finished = task.await(Duration.ofMinutes(3));
+    FinishedTaskSnapshot finished = client.run(spec, Duration.ofMinutes(3));
     ExecutionResult result = finished.result();
 }
 ```
 
-`TaskHandle.get()`은 현재 snapshot을 조회하고, bounded `await()`는 timeout 시 Task를 자동 취소하지 않는다.
+`run()`의 wait timeout은 제출 응답 뒤 완료 대기를 제한하며 Task의 cgroup wall-time 제한과 별개다. wait
+timeout은 Task를 자동 취소하지 않는다. `TaskHandle.get()`은 현재 snapshot을 조회하고, bounded
+`await()`는 비동기 완료 대기에 사용한다.
 `TaskHandle.cancel()`은 daemon이 whole-task cleanup을 확인한 뒤 반환한다. 저수준 `submit()`,
 `getTask()`, `cancelTask()`도 유지한다.
 

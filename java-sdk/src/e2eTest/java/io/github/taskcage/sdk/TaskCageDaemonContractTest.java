@@ -58,7 +58,7 @@ class TaskCageDaemonContractTest {
 
         try (TaskCageClient client = TaskCageClient.connect(
                 TaskCageClientConfig.builder().socketPath(Path.of(socketPath)).build())) {
-            FinishedTaskSnapshot finished = client.submitHandle(spec).await(Duration.ofSeconds(5));
+            FinishedTaskSnapshot finished = client.run(spec, Duration.ofSeconds(5));
             assertEquals(TerminationReason.EXECUTION_FAILED, finished.result().terminationReason());
         }
     }
@@ -91,9 +91,8 @@ class TaskCageDaemonContractTest {
     @Test
     void reportsWallTimeLimitAfterCleanup() throws Exception {
         try (TaskCageClient client = client()) {
-            FinishedTaskSnapshot finished = client.submitHandle(spec(
-                            "/bin/sleep", List.of("10"), Duration.ofMillis(100)))
-                    .await(Duration.ofSeconds(5), Duration.ofMillis(25));
+            FinishedTaskSnapshot finished = client.run(
+                    spec("/bin/sleep", List.of("10"), Duration.ofMillis(100)), Duration.ofSeconds(5));
             assertEquals(TerminationReason.TIMED_OUT, finished.result().terminationReason());
         }
     }
@@ -126,8 +125,7 @@ class TaskCageDaemonContractTest {
                 new ResourceBudget(new CpuQuota(100_000, 100_000), 64L * 1024 * 1024, 8,
                         Duration.ofSeconds(10), 64, 64));
         try (TaskCageClient client = client()) {
-            FinishedTaskSnapshot finished =
-                    client.submitHandle(spec).await(Duration.ofSeconds(5), Duration.ofMillis(25));
+            FinishedTaskSnapshot finished = client.run(spec, Duration.ofSeconds(5));
             assertEquals(TerminationReason.EXITED, finished.result().terminationReason());
             assertEquals(true, finished.result().output().stdoutTruncated());
             assertEquals(true, finished.result().output().stderrTruncated());

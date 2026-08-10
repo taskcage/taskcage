@@ -45,8 +45,7 @@ class FfmpegReferenceWorkflowTest {
                 referenceBudget(Duration.ofSeconds(30)));
 
         try (TaskCageClient client = client()) {
-            FinishedTaskSnapshot finished = client.submitHandle(UUID.randomUUID(), spec)
-                    .await(RESULT_TIMEOUT, POLL_INTERVAL);
+            FinishedTaskSnapshot finished = client.run(UUID.randomUUID(), spec, RESULT_TIMEOUT);
 
             assertEquals(TerminationReason.EXITED, finished.result().terminationReason());
             assertEquals(0, finished.result().process().exitCode());
