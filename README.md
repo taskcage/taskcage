@@ -211,7 +211,7 @@ Bundle은 Package binary가 아니라 Profile, Runtime Package ref + digest, 플
 담으며, 여러 Bundle이 같은 Package digest를 공유할 수 있다.
 
 Remote는 Local Public Alpha나 Local Product Alpha의 선행 조건이 아니다. Local 계약과 실제 원격 수요가
-검증된 뒤 topology·wire·인증·권한·Artifact 전달·backpressure·응답 유실 의미를 ADR과 API 계약으로
+검증된 뒤 topology·wire·인증·권한·Artifact 전달·backpressure·응답 유실 의미를 별도 설계와 API 계약으로
 결정한다. 중앙 Hub server도 이 단계들의 구성요소가 아니며, 임의 URL에서 임의 binary를 받아 실행하는
 기능을 제공하지 않는다.
 
