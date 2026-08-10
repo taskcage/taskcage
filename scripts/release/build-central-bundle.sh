@@ -78,7 +78,7 @@ jar \
   --file "${bundle_path}" \
   --no-manifest \
   -C "${bundle_staging_directory}" \
-  io
+  org
 jar --list --file "${bundle_path}" >/dev/null
 
 echo "central_bundle=${bundle_path}"
