@@ -60,13 +60,13 @@ TaskSpec spec = new TaskSpec(
     explicitResourceBudget);
 
 UUID clientRequestId = UUID.randomUUID();
-TaskHandle task = client.submitHandle(clientRequestId, spec);
-FinishedTaskSnapshot finished = task.await(Duration.ofSeconds(15), Duration.ofMillis(25));
+FinishedTaskSnapshot finished = client.run(clientRequestId, spec, Duration.ofSeconds(15));
 ```
 
-`TaskHandle.await()`는 유한한 monotonic deadline 안에서 `getTask()`를 polling하고 timeout 시 Task를 자동
-취소하지 않는다. caller-owned `clientRequestId`는 응답 유실 시 같은 요청을 다시 식별하기 위한 값이며
-daemon restart를 가로지르는 exactly-once 보장은 아니다.
+`run()`은 제출 응답 뒤 유한한 monotonic deadline 안에서 `getTask()`를 polling하고 timeout 시 Task를
+자동 취소하지 않는다. 이 wait timeout은 `ResourceBudget.wallTimeLimit`과 별개다. caller-owned
+`clientRequestId`는 응답 유실이나 wait timeout 뒤 같은 요청을 다시 식별하기 위한 값이며 daemon restart를
+가로지르는 exactly-once 보장은 아니다.
 
 ## 비교에서 증명하는 범위
 

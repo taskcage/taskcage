@@ -36,6 +36,7 @@ Java application
 
 - UDS 연결과 length-prefixed JSON Protocol v1 처리
 - 저수준 `capabilities()`, `submit()`, `getTask()`, `cancelTask()`
+- bounded 동기 `run()`
 - `submitHandle()`과 `TaskHandle.get()`, bounded `await()`, `cancel()`
 - 호출자 지정 UUID를 이용한 데몬 생존 기간 내 멱등 제출
 - `RUNNING`/`FINISHED` snapshot과 종료 결과 변환
@@ -44,35 +45,45 @@ Java application
 - `ResourceBudget.safeDefaults()`와 `TaskSpec(command)`의 유한한 요청 기본값
 - 설치된 daemon과 실제 FFmpeg를 사용하는 별도 Local reference E2E
 
-현재 호출자는 필요할 때 자원 예산을 override하고 `TaskHandle`로 상태 조회·완료 대기·취소를 수행할 수
-있다. Maven Central 배포와 동기 `run()` 편의 API는 아직 구현되지 않았다.
+현재 호출자는 필요할 때 자원 예산을 override하고 `run()`으로 동기 실행하거나 `TaskHandle`로 상태
+조회·완료 대기·취소를 수행할 수 있다. Maven Central 배포는 아직 완료되지 않았다.
 
 ## v0.1 Public Alpha 범위
 
 ### 편의 API
 
-기존 저수준 API는 유지하고 그 위에 `TaskHandle` 사용 경험을 제공한다.
+기존 저수준 API는 유지하고 그 위에 동기 `run()`과 비동기 `TaskHandle` 사용 경험을 제공한다.
 
 ```java
 try (TaskCageClient client = TaskCageClient.connect(config)) {
     UUID clientRequestId = UUID.randomUUID();
-    TaskHandle task = client.submitHandle(clientRequestId, spec);
-    TaskSnapshot snapshot = task.get();
-    FinishedTaskSnapshot finished = task.await(Duration.ofMinutes(5));
+    FinishedTaskSnapshot finished = client.run(clientRequestId, spec, Duration.ofMinutes(5));
     ExecutionResult result = finished.result();
-    // 또는 task.cancel()
 }
+```
+
+비동기 상태 조회, 완료 대기 또는 명시적 취소가 필요하면 handle을 사용한다.
+
+```java
+TaskHandle task = client.submitHandle(clientRequestId, spec);
+TaskSnapshot snapshot = task.get();
+FinishedTaskSnapshot finished = task.await(Duration.ofMinutes(5));
+// 또는 task.cancel()
 ```
 
 동작 계약은 다음과 같다.
 
+- `run()`은 제출 응답 뒤 `TaskHandle.await()`와 같은 계약으로 `FINISHED`까지 기다린다.
+- `run()`과 `await()`의 wait timeout은 Task의 cgroup wall-time resource limit과 별개다.
+- wait timeout이나 interruption은 Task를 자동 취소하지 않는다.
 - `await()`는 SDK 내부 polling으로 완료를 기다리며 polling 간격과 전체 대기 시간을 설정할 수 있다.
 - `await()` timeout은 Task를 취소하지 않으며, 다음 `get()`·`await()`·`cancel()` 호출을 허용한다.
 - 대기 중 thread interruption은 보존하고 명확한 SDK 예외 또는 interruption 계약으로 전달한다.
 - `TaskHandle.cancel()`은 기존 `cancelTask()`를 사용하며 daemon의 whole-task cleanup 완료 뒤 반환한다.
 - client `close()`는 기존과 같이 SDK 자원만 정리하고 제출된 Task를 자동 취소하지 않는다.
 
-동기 `run()`은 `TaskHandle`의 같은 종료·정리 계약 위에 추가할 다음 편의 API다.
+응답 유실이나 wait timeout 뒤 Task를 복구해야 하는 `run()` 호출은 caller-owned `clientRequestId` overload를
+사용하고, 같은 ID를 `submitHandle()`에 다시 전달한다.
 
 ### 안전한 기본 자원 정책
 
@@ -81,14 +92,12 @@ Protocol v1은 CPU·메모리·PID·벽시계 시간과 출력 tail 제한을 �
 최종 검증한다. 사용자는 필요한 항목만 작업별로 override할 수 있어야 한다.
 
 ```java
-TaskResult result = client.run(
-    command,
-    ResourcePolicy.builder()
-        .timeout(Duration.ofMinutes(5))
-        .memoryMaxBytes(1024L * 1024 * 1024)
-        .build()
-);
+TaskSpec spec = new TaskSpec(command, explicitResourceBudget);
+FinishedTaskSnapshot finished = client.run(spec, Duration.ofMinutes(6));
 ```
+
+위 `Duration`은 SDK 완료 대기 상한이다. Task 자체의 wall-time 제한은 `explicitResourceBudget`에 별도로
+포함하며, cleanup 결과를 기다릴 시간을 고려해 두 값을 독립적으로 정한다.
 
 SDK 기본값은 무제한 값을 사용하지 않는다. 현재 수치는 FFmpeg 예제와 daemon 정책을 기준으로 공개 API
 문서와 테스트에 고정했다. daemon 기본 정책과 부분 필드 생략은 향후 protocol 변경 후보이며 v0.1 범위가
@@ -99,12 +108,13 @@ SDK 기본값은 무제한 값을 사용하지 않는다. 현재 수치는 FFmpe
 동기·비동기 편의 API는 동일한 최종 결과 타입을 사용한다.
 
 ```text
-TaskResult
+FinishedTaskSnapshot
 ├─ taskId
-├─ terminationReason
-├─ exitCode / signal
-├─ timing / resourceUsage
-└─ stdout / stderr tail과 truncation 여부
+└─ ExecutionResult
+   ├─ terminationReason
+   ├─ exitCode / signal
+   ├─ timing / resourceUsage
+   └─ stdout / stderr tail과 truncation 여부
 ```
 
 외부 프로그램의 0이 아닌 종료, timeout, OOM, PID 제한과 취소는 정상적으로 완료된 Task 결과다. UDS
@@ -133,8 +143,9 @@ dependencies {
 
 ### FFmpeg 예제
 
-`examples/ffmpeg-java/`에 Core SDK의 Raw Command API만 사용하는 독립 예제를 제공한다. 별도 FFmpeg
-Profile Binding을 만들지 않으며, 설치부터 변환 결과 확인까지 10분 안에 재현할 수 있어야 한다.
+[FFmpeg Local Raw Command reference](../docs/reference-ffmpeg.md)는 Core SDK와 Ubuntu FFmpeg package만
+사용한다. 별도 FFmpeg Profile Binding을 만들지 않으며, 설치부터 변환 결과 확인까지 하나의 반복 가능한
+workflow로 검증한다.
 
 예제는 최소한 다음을 보여준다.
 
@@ -148,15 +159,16 @@ Profile Binding을 만들지 않으며, 설치부터 변환 결과 확인까지 
 
 각 단계는 독립적으로 리뷰 가능한 PR과 커밋으로 나눈다.
 
-1. **공개 API 확정:** 현재 `ExternalCommand`, `ResourceBudget`, `ExecutionResult`와 목표 API의
-   `Command`, `ResourcePolicy`, `TaskResult` 관계를 확정하고 Alpha 이전 불필요한 중복 타입을 피한다.
+1. **공개 API 확정 — 구현됨:** `ExternalCommand`, `ResourceBudget`, `FinishedTaskSnapshot`과
+   `ExecutionResult`를 유지하고 Alpha에 불필요한 중복 타입을 추가하지 않았다.
 2. **Task 편의 API — 구현됨:** `TaskHandle`, `get`, `await`, `cancel`과 polling·deadline·interruption
    계약을 구현하고 가짜 daemon 단위 테스트와 실제 daemon reference E2E를 추가했다.
-3. **동기 실행:** `run()`을 구현하고 실제 daemon
-   E2E로 정상 종료·timeout·취소·출력 결과를 검증한다.
-4. **배포 준비:** Maven Central publishing, 서명, POM metadata, sources/javadoc artifact와
-   `0.1.0-alpha.1` 버전을 구성한다.
-5. **첫 사용자 경로:** 독립 FFmpeg 예제와 설치·daemon 연결·실행·문제 해결 문서를 완성한다.
+3. **동기 실행 — 구현됨:** `run()`을 `TaskHandle` 계약 위에 구현하고 실제 daemon·FFmpeg E2E로 정상
+   종료·Task wall-time timeout·출력 결과를 검증했다. 명시적 취소는 `TaskHandle.cancel()`을 사용한다.
+4. **배포 준비 — 구현됨:** Maven Central publishing, 서명, POM metadata, sources/javadoc artifact와
+   `0.1.0-alpha.1` 검증 pipeline을 구성했다. 실제 publication은 별도 release 작업이다.
+5. **첫 사용자 경로 — 구현됨:** FFmpeg reference workflow와 설치·daemon 연결·실행·문제 해결 문서를
+   제공한다.
 
 ## v0.1 완료 기준
 
@@ -225,9 +237,7 @@ TaskSpec spec = new TaskSpec(
         Map.of("LANG", "C.UTF-8")));
 
 try (TaskCageClient client = TaskCageClient.connect(config)) {
-    TaskHandle task = client.submitHandle(spec);
-    TaskSnapshot snapshot = task.get();
-    FinishedTaskSnapshot finished = task.await(Duration.ofMinutes(3));
+    FinishedTaskSnapshot finished = client.run(spec, Duration.ofMinutes(3));
     ExecutionResult result = finished.result();
 }
 ```
@@ -267,13 +277,14 @@ FinishedTaskSnapshot finished = task.await(Duration.ofMinutes(3), Duration.ofMil
 이미 받은 `FINISHED` 결과는 handle에 보관되므로 다시 조회하지 않는다.
 
 `cancel()`은 취소 접수 시점이 아니라 daemon이 whole-task cleanup을 확인한 뒤 반환한다. 상세 최종 결과가
-필요하면 같은 handle에서 `get()` 또는 `await()`를 호출한다. 동기 `run()` 편의 API는 아직 없다.
+필요하면 같은 handle에서 `get()` 또는 `await()`를 호출한다. `run()` wait timeout 뒤 Task를 복구하려면
+caller-owned ID를 같은 `submitHandle()` 호출에 재사용한다.
 
 ## 주요 타입
 
 | 타입 | 역할 |
 |---|---|
-| `TaskCageClient` | capability 조회, 작업 제출·조회·취소 |
+| `TaskCageClient` | capability 조회, 동기 실행, 작업 제출·조회·취소 |
 | `TaskCageClientConfig` | UDS 경로와 연결·요청 timeout |
 | `TaskSpec` | 외부 명령과 필수 자원 예산 |
 | `ExternalCommand` | 실행 파일, argv, 작업 디렉터리, 환경 변수 |
@@ -311,8 +322,8 @@ TASKCAGE_OUTPUT_FLOOD=/home/ubuntu/TaskCage/target/debug/output-flood \
   ./gradlew e2eTest
 ```
 
-현재 E2E는 `TaskHandle` 제출·조회·완료 대기·취소, exec 시작 실패, timeout, 자식 프로세스 정리, 출력
-tail, 멱등 제출을 검증한다. wire 계약은 [Protocol v1 API 명세](../docs/api-mvp.md)를 따른다.
+현재 E2E는 `run()`, `TaskHandle` 제출·조회·완료 대기·취소, exec 시작 실패, timeout, 자식 프로세스 정리,
+출력 tail, 멱등 제출을 검증한다. wire 계약은 [Protocol v1 API 명세](../docs/api-mvp.md)를 따른다.
 
 실제 FFmpeg 정상 실행, 일반 `ProcessBuilder`의 root-only 종료 비교와 TaskCage timeout descendant cleanup은
 [FFmpeg Local Raw Command reference](../docs/reference-ffmpeg.md)와 전용 `ffmpegE2eTest` source set에서

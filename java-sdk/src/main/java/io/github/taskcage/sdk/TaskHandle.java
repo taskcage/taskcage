@@ -145,7 +145,7 @@ public final class TaskHandle {
         return exception;
     }
 
-    private static long requirePositiveNanos(Duration duration, String name) {
+    static long requirePositiveNanos(Duration duration, String name) {
         Objects.requireNonNull(duration, name);
         try {
             long nanos = duration.toNanos();
@@ -158,7 +158,7 @@ public final class TaskHandle {
         }
     }
 
-    private static void throwIfInterrupted(Throwable cause) throws InterruptedException {
+    static void throwIfInterrupted(Throwable cause) throws InterruptedException {
         if (!Thread.currentThread().isInterrupted()) {
             return;
         }

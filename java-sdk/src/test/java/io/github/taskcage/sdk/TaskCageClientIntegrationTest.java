@@ -266,6 +266,99 @@ class TaskCageClientIntegrationTest {
     }
 
     @Test
+    void runWaitsForCleanupConfirmedFinishedSnapshot() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.startSession(List.of(
+                        TaskCageClientIntegrationTest::taskAcceptedResponse,
+                        TaskCageClientIntegrationTest::runningTaskResponse,
+                        TaskCageClientIntegrationTest::finishedTaskResponse));
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            FinishedTaskSnapshot finished = client.run(testTaskSpec(), Duration.ofSeconds(1));
+
+            assertEquals(TerminationReason.TIMED_OUT, finished.result().terminationReason());
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals(List.of("submitTask", "getTask", "getTask"), server.requests().stream()
+                    .map(request -> request.path("type").asText())
+                    .toList());
+        }
+    }
+
+    @Test
+    void runReturnsImmediateFinishedSubmissionWithoutPolling() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::executionFailedResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            FinishedTaskSnapshot finished = client.run(testTaskSpec(), Duration.ofSeconds(1));
+
+            assertEquals(TerminationReason.EXECUTION_FAILED, finished.result().terminationReason());
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals(1, server.requests().size());
+        }
+    }
+
+    @Test
+    void runPreservesCallerSuppliedIdempotencyKey() throws Exception {
+        UUID requestId = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        try (FakeTaskCageServer server = FakeTaskCageServer.startSession(List.of(
+                        TaskCageClientIntegrationTest::taskAcceptedResponse,
+                        TaskCageClientIntegrationTest::finishedTaskResponse));
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            client.run(requestId, testTaskSpec(), Duration.ofSeconds(1));
+
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals(requestId.toString(), server.requests().get(0).path("payload").path("clientRequestId").asText());
+        }
+    }
+
+    @Test
+    void runRejectsInvalidArgumentsBeforeAnyDaemonRequest() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskAcceptedResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            assertThrows(NullPointerException.class, () -> client.run((TaskSpec) null, Duration.ofSeconds(1)));
+            assertThrows(NullPointerException.class, () -> client.run(testTaskSpec(), null));
+            assertThrows(IllegalArgumentException.class, () -> client.run(testTaskSpec(), Duration.ZERO));
+            assertThrows(IllegalArgumentException.class, () -> client.run(testTaskSpec(), Duration.ofNanos(-1)));
+            assertThrows(IllegalArgumentException.class,
+                    () -> client.run(testTaskSpec(), Duration.ofSeconds(Long.MAX_VALUE)));
+            assertThrows(NullPointerException.class,
+                    () -> client.run(null, testTaskSpec(), Duration.ofSeconds(1)));
+
+            assertTrue(server.requests().isEmpty());
+        }
+    }
+
+    @Test
+    void runWaitTimeoutDoesNotCancelTheTask() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.startSession(List.of(
+                        TaskCageClientIntegrationTest::taskAcceptedResponse,
+                        TaskCageClientIntegrationTest::runningTaskResponse));
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            assertThrows(TimeoutException.class,
+                    () -> client.run(testTaskSpec(), Duration.ofMillis(20)));
+
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals(List.of("submitTask", "getTask"), server.requests().stream()
+                    .map(request -> request.path("type").asText())
+                    .toList());
+        }
+    }
+
+    @Test
+    void runRejectsPreInterruptedCallWithoutSubmitting() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskAcceptedResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            Thread.currentThread().interrupt();
+            try {
+                assertThrows(InterruptedException.class,
+                        () -> client.run(testTaskSpec(), Duration.ofSeconds(1)));
+                assertTrue(Thread.currentThread().isInterrupted());
+            } finally {
+                Thread.interrupted();
+            }
+
+            assertTrue(server.requests().isEmpty());
+        }
+    }
+
+    @Test
     void submitDecodesFinishedSnapshotWhenExecutionCannotStart() throws Exception {
         try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::executionFailedResponse);
                 TaskCageClient client = TaskCageClient.connect(configFor(server))) {
