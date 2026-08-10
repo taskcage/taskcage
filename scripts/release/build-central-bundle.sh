@@ -52,9 +52,9 @@ java-sdk/gradlew \
   --no-problems-report
 
 readonly repository_directory="${repository_root}/java-sdk/build/central-repository"
-readonly component_directory="${repository_directory}/io/github/taskcage/taskcage-java-sdk/${release_version}"
+readonly component_directory="${repository_directory}/org/taskcage/taskcage-java-sdk/${release_version}"
 readonly artifact_prefix="${component_directory}/taskcage-java-sdk-${release_version}"
-readonly staged_component_directory="${bundle_staging_directory}/io/github/taskcage/taskcage-java-sdk/${release_version}"
+readonly staged_component_directory="${bundle_staging_directory}/org/taskcage/taskcage-java-sdk/${release_version}"
 
 for artifact in \
   "${artifact_prefix}.jar" \

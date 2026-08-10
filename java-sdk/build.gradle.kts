@@ -6,7 +6,7 @@ plugins {
     signing
 }
 
-group = "io.github.taskcage"
+group = "org.taskcage"
 version = "0.1.0"
 
 java {
