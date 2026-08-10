@@ -1,8 +1,8 @@
 # Ubuntu 24.04 daemon 설치
 
-이 문서는 이미 빌드하고 검증한 `taskcaged` binary를 Ubuntu 24.04의 전용 service account와 delegated
-systemd service로 설치하는 Local Public Alpha 경로를 설명한다. release binary와 checksum 생성은 아직
-이 설치 자산의 책임이 아니다.
+이 문서는 검증한 `taskcaged` Public Alpha archive를 Ubuntu 24.04의 전용 service account와 delegated
+systemd service로 설치하는 경로를 설명한다. release가 아직 공개되지 않았거나 source에서 개발 중이면
+같은 installer에 직접 빌드한 binary를 전달할 수 있다.
 
 ## 배포 계약
 
@@ -26,13 +26,37 @@ target process도 이 account로 실행되므로 필요한 binary와 작업 디�
 - unified cgroup v2의 `cpu`, `memory`, `pids` controller
 - `clone3(CLONE_INTO_CGROUP)`와 `cgroup.kill`을 지원하는 kernel
 - root 권한
-- 신뢰할 수 있는 source에서 얻어 별도로 검증한 Linux `taskcaged` binary
+- GitHub Release에서 받은 Linux x86-64 archive와 SHA-256 sidecar 또는 신뢰할 수 있는 source checkout
 
-저장소에서 직접 준비할 때는 다음처럼 release binary를 빌드한다.
+## Release archive 준비
+
+공개된 버전을 설치할 때는 archive와 checksum을 같은 GitHub Release에서 받고, 압축을 풀기 전에 검증한다.
+아래의 `VERSION`은 설치하려는 실제 release로 바꾼다. `0.1.0-alpha.1`은 pipeline의 첫 후보 버전이며 release가
+공개되기 전에는 URL이 존재하지 않는다.
+
+```bash
+VERSION=0.1.0-alpha.1
+ASSET="taskcage-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+RELEASE_URL="https://github.com/taskcage/taskcage/releases/download/v${VERSION}"
+
+curl --fail --location --remote-name "${RELEASE_URL}/${ASSET}"
+curl --fail --location --remote-name "${RELEASE_URL}/${ASSET}.sha256"
+sha256sum --check "${ASSET}.sha256"
+tar --extract --gzip --file "${ASSET}"
+```
+
+archive는 `bin/taskcaged`, Ubuntu installer·unit·기본 설정, README와 Apache-2.0 LICENSE를 하나의
+versioned top-level directory 아래에 담는다. checksum이 일치하지 않거나 예상하지 않은 파일·symlink가
+있으면 설치하지 않는다.
+
+저장소에서 직접 준비할 때는 checkout의 version과 lockfile을 사용해 release binary를 빌드한다.
 
 ```bash
 cargo build --workspace --release
 ```
+
+이 경우 아래 release 경로 대신 checkout의 `packaging/ubuntu/install-taskcaged.sh`와
+`target/release/taskcaged`를 사용한다.
 
 ## 설치
 
@@ -40,8 +64,8 @@ installer는 기존 `/etc/taskcage/taskcaged.env`를 덮어쓰지 않는다. 처
 service를 시작하는 경로가 기본이다.
 
 ```bash
-sudo packaging/ubuntu/install-taskcaged.sh \
-  --binary target/release/taskcaged
+sudo "taskcage-v${VERSION}-x86_64-unknown-linux-gnu/packaging/ubuntu/install-taskcaged.sh" \
+  --binary "taskcage-v${VERSION}-x86_64-unknown-linux-gnu/bin/taskcaged"
 
 sudoedit /etc/taskcage/taskcaged.env
 sudo systemctl enable --now taskcaged.service
@@ -50,8 +74,8 @@ sudo systemctl enable --now taskcaged.service
 검토 없이 저장소의 명시적 기본값으로 바로 시작하는 smoke 환경에서는 `--start`를 사용할 수 있다.
 
 ```bash
-sudo packaging/ubuntu/install-taskcaged.sh \
-  --binary target/release/taskcaged \
+sudo "taskcage-v${VERSION}-x86_64-unknown-linux-gnu/packaging/ubuntu/install-taskcaged.sh" \
+  --binary "taskcage-v${VERSION}-x86_64-unknown-linux-gnu/bin/taskcaged" \
   --start
 ```
 
@@ -119,7 +143,7 @@ sudo -u taskcage /usr/local/bin/taskcaged status \
 준비된 daemon은 한 줄 JSON과 종료 코드 `0`을 반환한다.
 
 ```json
-{"status":"READY","daemonVersion":"0.1.0","protocolVersions":[1],"maxFrameBytes":1048576,"maxConcurrentTasks":4,"cgroupV2Ready":true}
+{"status":"READY","daemonVersion":"0.1.0-alpha.1","protocolVersions":[1],"maxFrameBytes":1048576,"maxConcurrentTasks":4,"cgroupV2Ready":true}
 ```
 
 연결 실패, timeout, 잘못된 응답 또는 `cgroupV2Ready=false`는 종료 코드가 `0`이 아니다. `status`는 실행
@@ -159,8 +183,9 @@ sudo packaging/ubuntu/install-taskcaged.sh --binary /srv/taskcage/taskcaged-new 
 sudo packaging/ubuntu/install-taskcaged.sh --binary /srv/taskcage/taskcaged-previous --start
 ```
 
-binary provenance와 checksum은 배포 전에 별도로 검증해야 한다. 호환되지 않는 설정 변경이 있다면 이전
-설정도 함께 복원한 뒤 restart한다.
+각 archive의 SHA-256 sidecar를 보관하고 설치 전에 다시 검증한다. Maven Central과 공개된 GitHub Release
+자산은 덮어쓸 수 없으므로 수정 release는 새 버전으로 발행한다. 호환되지 않는 설정 변경이 있다면 이전
+archive와 이전 설정을 함께 복원한 뒤 restart한다.
 
 ## 제거
 

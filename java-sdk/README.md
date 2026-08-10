@@ -2,7 +2,9 @@
 
 TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`에 작업을 제출·조회·취소하도록 제공하는 Java 17+ 라이브러리다. cgroup과 Protocol v1의 세부 사항은 SDK 내부에 숨기고 명령, 자원 예산, 상태와 결과를 Java 타입으로 제공한다.
 
-> **상태:** `0.1.0-SNAPSHOT` PoC. 아직 Maven Central에 배포되지 않았으며 Spring Boot에 의존하지 않는다.
+> **상태:** `0.1.0-alpha.1` Local Public Alpha 후보. Central용 POM·sources·Javadoc·서명 bundle은
+> release pipeline에서 생성하지만, 첫 release가 완료되기 전까지 Maven Central에는 존재하지 않는다.
+> SDK는 Spring Boot에 의존하지 않는다.
 
 현재 SDK는 Local UDS transport와 Raw Command 모델을 구현한다. Execution Profile과 인증된 Remote
 transport를 포함한 제품 방향은 [제품 철학과 용어](../docs/product-philosophy.md)에서 정의하며 아직 구현된
@@ -186,7 +188,15 @@ Profile Binding을 만들지 않으며, 설치부터 변환 결과 확인까지 
 ./gradlew build
 ```
 
-현재 프로젝트에서 로컬 Maven 저장소 배포는 구성하지 않았다. 빌드 결과는 `build/libs/`에 생성된다.
+일반 빌드 결과는 `build/libs/`에 생성된다. Public Alpha가 Maven Central에 공개되면 다음 좌표를 사용한다.
+
+```kotlin
+dependencies {
+    implementation("io.github.taskcage:taskcage-java-sdk:0.1.0-alpha.1")
+}
+```
+
+Central 배포 bundle의 재현과 서명 요구사항은 [Public Alpha release 운영](../docs/releasing.md)을 따른다.
 
 ## 연결
 
