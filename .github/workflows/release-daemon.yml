@@ -1,0 +1,219 @@
+name: Release taskcaged
+
+on:
+  push:
+    tags:
+      - "taskcaged-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing daemon release tag, for example taskcaged-v0.1.0.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: taskcaged-release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate daemon tag and version
+    runs-on: ubuntu-24.04
+    outputs:
+      mode: ${{ steps.context.outputs.mode }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      release_version: ${{ steps.version.outputs.release_version }}
+    steps:
+      - id: context
+        name: Resolve release context
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_TAG: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            echo "mode=prepare" >>"${GITHUB_OUTPUT}"
+            echo "release_tag=${PUSH_TAG}" >>"${GITHUB_OUTPUT}"
+          else
+            echo "mode=publish" >>"${GITHUB_OUTPUT}"
+            echo "release_tag=${INPUT_TAG}" >>"${GITHUB_OUTPUT}"
+          fi
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ steps.context.outputs.release_tag }}
+          fetch-depth: 0
+      - id: version
+        name: Match the tag, manifest, and main history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.context.outputs.release_tag }}
+        run: |
+          [[ "${RELEASE_TAG}" =~ ^taskcaged-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          release_version="${RELEASE_TAG#taskcaged-v}"
+          bash scripts/release/verify-version.sh taskcaged "${release_version}" "${RELEASE_TAG}"
+          git tag --points-at HEAD --list "${RELEASE_TAG}" | grep -Fx "${RELEASE_TAG}"
+          tag_object_sha="$(git rev-parse "${RELEASE_TAG}^{tag}")"
+          [[ "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_sha}" --jq '.verification.verified')" == "true" ]]
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main
+          echo "release_tag=${RELEASE_TAG}" >>"${GITHUB_OUTPUT}"
+          echo "release_version=${release_version}" >>"${GITHUB_OUTPUT}"
+
+  rust-gate:
+    name: Rust release gate
+    if: needs.validate.outputs.mode == 'prepare'
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  cgroup-preflight-gate:
+    name: cgroup preflight release gate
+    if: needs.validate.outputs.mode == 'prepare'
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: stable
+      - run: bash integration-tests/preflight-fail-closed.sh
+
+  cgroup-runner-gate:
+    name: cgroup runner release gate
+    if: needs.validate.outputs.mode == 'prepare'
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: stable
+      - run: bash integration-tests/cgroup-runner-smoke.sh
+
+  systemd-gate:
+    name: systemd release gate
+    if: needs.validate.outputs.mode == 'prepare'
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: stable
+      - run: bash integration-tests/systemd-service-smoke.sh
+
+  ffmpeg-gate:
+    name: FFmpeg compatibility gate
+    if: needs.validate.outputs.mode == 'prepare'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install Ubuntu FFmpeg package
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: bash integration-tests/ffmpeg-reference-workflow.sh
+
+  package:
+    name: Package daemon release assets
+    if: needs.validate.outputs.mode == 'prepare'
+    needs:
+      - validate
+      - rust-gate
+      - cgroup-preflight-gate
+      - cgroup-runner-gate
+      - systemd-gate
+      - ffmpeg-gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: stable
+      - name: Build archive and checksum
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+        run: bash scripts/release/build-daemon-archive.sh "${RELEASE_VERSION}" dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: taskcaged-${{ needs.validate.outputs.release_version }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  draft:
+    name: Create draft daemon release
+    if: needs.validate.outputs.mode == 'prepare'
+    needs:
+      - validate
+      - package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: taskcaged-${{ needs.validate.outputs.release_version }}
+          path: dist
+      - name: Create the draft GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+        run: |
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "ERROR: a GitHub release already exists for ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          release_notes="$(printf 'TaskCage daemon %s\n\nSupported Protocol: v1\nSupported platform: Ubuntu 24.04, Linux x86-64\n\nReview and complete these notes before approving publication.' "${RELEASE_VERSION}")"
+          gh release create "${RELEASE_TAG}" \
+            dist/taskcage-v*-x86_64-unknown-linux-gnu.tar.gz \
+            dist/taskcage-v*-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+            --draft \
+            --prerelease \
+            --verify-tag \
+            --title "TaskCage daemon ${RELEASE_VERSION}" \
+            --notes "${release_notes}"
+
+  publish:
+    name: Publish daemon prerelease
+    if: needs.validate.outputs.mode == 'publish'
+    needs: validate
+    runs-on: ubuntu-24.04
+    environment: taskcaged-release
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the reviewed draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+        run: |
+          release_json="$(gh release view "${RELEASE_TAG}" --json isDraft,isPrerelease)"
+          release_is_draft="$(python3 -c 'import json,sys; print(str(json.load(sys.stdin)["isDraft"]).lower())' <<<"${release_json}")"
+          release_is_prerelease="$(python3 -c 'import json,sys; print(str(json.load(sys.stdin)["isPrerelease"]).lower())' <<<"${release_json}")"
+          [[ "${release_is_draft}" == "true" ]]
+          [[ "${release_is_prerelease}" == "true" ]]
+          gh release edit "${RELEASE_TAG}" --draft=false --prerelease

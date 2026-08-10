@@ -20,7 +20,7 @@ fi
 
 readonly release_version="$1"
 readonly requested_output_directory="${2:-${repository_root}/dist}"
-"${script_directory}/verify-version.sh" "${release_version}" >/dev/null
+"${script_directory}/verify-version.sh" taskcaged "${release_version}" >/dev/null
 
 for required_command in cargo install mktemp readlink sha256sum tar; do
   command -v "${required_command}" >/dev/null 2>&1 || fail "required command is missing: ${required_command}"

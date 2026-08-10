@@ -93,19 +93,23 @@ jobs:
           distribution: temurin
           java-version: "17"
       - name: Build daemon archive and checksum
-        run: bash scripts/release/build-daemon-archive.sh 0.1.0-alpha.1 dist
+        run: bash scripts/release/build-daemon-archive.sh 0.1.0 dist
       - name: Build signed validation-only Central bundle
-        run: bash scripts/release/build-validation-central-bundle.sh 0.1.0-alpha.1 dist
+        run: bash scripts/release/build-validation-central-bundle.sh 0.1.0 dist
+      - name: Verify component release tags
+        run: |
+          bash scripts/release/verify-version.sh taskcaged 0.1.0 taskcaged-v0.1.0
+          bash scripts/release/verify-version.sh java-sdk 0.1.0 java-sdk-v0.1.0
       - name: Install from the release archive
         run: |
           bash integration-tests/release-artifact-smoke.sh \
-            0.1.0-alpha.1 \
-            dist/taskcage-v0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz \
-            dist/taskcage-v0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+            0.1.0 \
+            dist/taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz \
+            dist/taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
       - name: Upload validation-only release candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: taskcage-v0.1.0-alpha.1-validation-only
+          name: taskcage-v0.1.0-validation-only
           path: dist/*
           if-no-files-found: error
           retention-days: 7

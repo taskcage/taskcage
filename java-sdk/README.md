@@ -2,9 +2,9 @@
 
 TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`에 작업을 제출·조회·취소하도록 제공하는 Java 17+ 라이브러리다. cgroup과 Protocol v1의 세부 사항은 SDK 내부에 숨기고 명령, 자원 예산, 상태와 결과를 Java 타입으로 제공한다.
 
-> **상태:** `0.1.0-alpha.1` Local Public Alpha 후보. Central용 POM·sources·Javadoc·서명 bundle은
+> **상태:** `0.1.0` Local Public Alpha 후보. Central용 POM·sources·Javadoc·서명 bundle은
 > release pipeline에서 생성하지만, 첫 release가 완료되기 전까지 Maven Central에는 존재하지 않는다.
-> SDK는 Spring Boot에 의존하지 않는다.
+> `0.x`는 초기 개발 버전이며 SDK는 Spring Boot에 의존하지 않는다.
 
 현재 SDK는 Local UDS transport와 Raw Command 모델을 구현한다. Execution Profile과 인증된 Remote
 transport를 포함한 제품 방향은 [제품 철학과 용어](../docs/product-philosophy.md)에서 정의하며 아직 구현된
@@ -26,7 +26,7 @@ Java application
               taskcaged
 ```
 
-`v0.1.0-alpha`의 목표는 처음 사용하는 Java 개발자가 10분 안에 SDK를 설치하고, 같은 Linux
+`0.1.0`의 목표는 처음 사용하는 Java 개발자가 10분 안에 SDK를 설치하고, 같은 Linux
 호스트의 `taskcaged`를 통해 FFmpeg 작업 하나를 안전하게 실행하는 것이다. Profile·Bundle·Hub보다
 현재 검증된 Raw Command 실행, 자원 제한과 프로세스 트리 정리를 쉽게 사용하는 경험을 우선한다.
 
@@ -123,21 +123,21 @@ FinishedTaskSnapshot
 
 ### 배포와 버전
 
-v0.x 동안 daemon과 Java Core SDK는 같은 release train과 버전을 사용한다. 실제 wire 호환성은 제품
-버전과 별개인 Protocol 버전으로 판단한다.
+daemon과 Java Core SDK는 독립적으로 버전을 관리하고 배포한다. 실제 wire 호환성은 제품
+버전 문자열이 아니라 양쪽이 지원하는 Protocol 버전으로 판단한다.
 
 ```text
-GitHub release: v0.1.0-alpha.1
-taskcaged:      0.1.0-alpha.1
-Java Core SDK:  0.1.0-alpha.1
-Protocol:       1
+Daemon tag:     taskcaged-v0.1.0
+Java SDK tag:   java-sdk-v0.1.0
+Java Core SDK:  0.1.0
+Protocol:       v1
 ```
 
 Maven Central에는 다음 좌표로 main, sources와 javadoc artifact를 서명해 배포하는 것을 목표로 한다.
 
 ```kotlin
 dependencies {
-    implementation("io.github.taskcage:taskcage-java-sdk:0.1.0-alpha.1")
+    implementation("io.github.taskcage:taskcage-java-sdk:0.1.0")
 }
 ```
 
@@ -166,7 +166,7 @@ workflow로 검증한다.
 3. **동기 실행 — 구현됨:** `run()`을 `TaskHandle` 계약 위에 구현하고 실제 daemon·FFmpeg E2E로 정상
    종료·Task wall-time timeout·출력 결과를 검증했다. 명시적 취소는 `TaskHandle.cancel()`을 사용한다.
 4. **배포 준비 — 구현됨:** Maven Central publishing, 서명, POM metadata, sources/javadoc artifact와
-   `0.1.0-alpha.1` 검증 pipeline을 구성했다. 실제 publication은 별도 release 작업이다.
+   독립 `java-sdk-v0.1.0` 검증 pipeline을 구성했다. 실제 publication은 tag release 작업이다.
 5. **첫 사용자 경로 — 구현됨:** FFmpeg reference workflow와 설치·daemon 연결·실행·문제 해결 문서를
    제공한다.
 
@@ -200,11 +200,11 @@ workflow로 검증한다.
 
 ```kotlin
 dependencies {
-    implementation("io.github.taskcage:taskcage-java-sdk:0.1.0-alpha.1")
+    implementation("io.github.taskcage:taskcage-java-sdk:0.1.0")
 }
 ```
 
-Central 배포 bundle의 재현과 서명 요구사항은 [Public Alpha release 운영](../docs/releasing.md)을 따른다.
+Central 배포 bundle의 재현과 서명 요구사항은 [릴리스 운영](../docs/releasing.md)을 따른다.
 
 ## 연결
 
