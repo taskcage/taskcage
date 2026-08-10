@@ -105,18 +105,21 @@ sudo -n install -d -m 0700 "${reference_root}/home" "${reference_root}/gradle-ho
 sudo -n chown -R taskcage:taskcage "${reference_root}"
 sudo -n chmod 0700 "${reference_root}"
 
-sudo -n -u taskcage env \
-  HOME="${reference_root}/home" \
-  GRADLE_USER_HOME="${reference_root}/gradle-home" \
-  JAVA_HOME="${java_home}" \
-  PATH="${java_home}/bin:/usr/local/bin:/usr/bin:/bin" \
-  TASKCAGE_SOCKET=/run/taskcage/taskcaged.sock \
-  TASKCAGE_FFMPEG="${ffmpeg_bin}" \
-  TASKCAGE_FFMPEG_TREE="${reference_root}/bin/ffmpeg-tree" \
-  TASKCAGE_FFMPEG_WORK_DIR="${reference_root}/work" \
-  "${reference_root}/java-sdk/gradlew" \
-  -p "${reference_root}/java-sdk" \
-  test ffmpegE2eTest --rerun-tasks --no-daemon
+sudo -n -u taskcage \
+  /bin/bash -c 'cd "$1" && shift && exec "$@"' taskcage-gradle \
+  "${reference_root}/java-sdk" \
+  /usr/bin/env \
+    HOME="${reference_root}/home" \
+    GRADLE_USER_HOME="${reference_root}/gradle-home" \
+    JAVA_HOME="${java_home}" \
+    PATH="${java_home}/bin:/usr/local/bin:/usr/bin:/bin" \
+    TASKCAGE_SOCKET=/run/taskcage/taskcaged.sock \
+    TASKCAGE_FFMPEG="${ffmpeg_bin}" \
+    TASKCAGE_FFMPEG_TREE="${reference_root}/bin/ffmpeg-tree" \
+    TASKCAGE_FFMPEG_WORK_DIR="${reference_root}/work" \
+    ./gradlew \
+    -p "${reference_root}/java-sdk" \
+    test ffmpegE2eTest --rerun-tasks --no-daemon
 
 [[ "$(count_task_cgroups)" == "${task_cgroups_before}" ]]
 [[ -z "$(sudo -n find "${reference_root}/work" -mindepth 1 -maxdepth 1 -print -quit)" ]]
