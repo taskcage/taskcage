@@ -6,7 +6,7 @@ TaskCage는 신뢰된 외부 프로세스를 호출 코드의 부수 효과가 �
 
 이 문서는 제품 수준의 방향과 공개 용어를 정의한다. 현재 구현된 wire 계약은
 [Local Protocol v1 API 명세](api-mvp.md)를 따르며, 아직 결정되지 않은 Remote topology·보안·wire 세부사항은
-선행 ADR과 API 계약 없이는 구현 대상으로 간주하지 않는다.
+별도의 설계와 API 계약이 확정되기 전에는 구현 대상으로 간주하지 않는다.
 
 ## 우리가 믿는 것
 
@@ -109,8 +109,8 @@ Profile·Package·Artifact로 일반화할 반복 요구가 2개 이상 확인�
 확장한다.
 
 Remote는 Local Public Alpha나 Local Product Alpha의 선행 조건이 아니다. Local 계약과 실제 원격 수요,
-trust boundary와 운영 근거가 확보된 뒤에 topology와 wire를 선택한다. [ADR 0009](decisions/0009-direct-remote-tls-listener.md)는
-직접 listener 후보 분석을 보존하는 `Deferred` 기록이며 현재 구현 방향을 승인하지 않는다.
+trust boundary와 운영 근거가 확보된 뒤에 topology와 wire를 선택한다. daemon의 직접 listener와
+별도 Gateway 중 어느 구조를 사용할지는 아직 선택하지 않았다.
 
 Remote 구현 전에 최소한 다음 계약을 함께 승인해야 한다.
 
