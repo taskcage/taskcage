@@ -31,13 +31,13 @@ target process도 이 account로 실행되므로 필요한 binary와 작업 디�
 ## Release archive 준비
 
 공개된 버전을 설치할 때는 archive와 checksum을 같은 GitHub Release에서 받고, 압축을 풀기 전에 검증한다.
-아래의 `VERSION`은 설치하려는 실제 release로 바꾼다. `0.1.0-alpha.1`은 pipeline의 첫 후보 버전이며 release가
+아래의 `VERSION`은 설치하려는 daemon release로 바꾼다. `0.1.0`은 pipeline의 첫 후보 버전이며 release가
 공개되기 전에는 URL이 존재하지 않는다.
 
 ```bash
-VERSION=0.1.0-alpha.1
+VERSION=0.1.0
 ASSET="taskcage-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-RELEASE_URL="https://github.com/taskcage/taskcage/releases/download/v${VERSION}"
+RELEASE_URL="https://github.com/taskcage/taskcage/releases/download/taskcaged-v${VERSION}"
 
 curl --fail --location --remote-name "${RELEASE_URL}/${ASSET}"
 curl --fail --location --remote-name "${RELEASE_URL}/${ASSET}.sha256"
@@ -143,7 +143,7 @@ sudo -u taskcage /usr/local/bin/taskcaged status \
 준비된 daemon은 한 줄 JSON과 종료 코드 `0`을 반환한다.
 
 ```json
-{"status":"READY","daemonVersion":"0.1.0-alpha.1","protocolVersions":[1],"maxFrameBytes":1048576,"maxConcurrentTasks":4,"cgroupV2Ready":true}
+{"status":"READY","daemonVersion":"0.1.0","protocolVersions":[1],"maxFrameBytes":1048576,"maxConcurrentTasks":4,"cgroupV2Ready":true}
 ```
 
 연결 실패, timeout, 잘못된 응답 또는 `cgroupV2Ready=false`는 종료 코드가 `0`이 아니다. `status`는 실행
