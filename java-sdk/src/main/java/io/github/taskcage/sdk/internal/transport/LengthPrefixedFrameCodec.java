@@ -7,7 +7,6 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.time.Duration;
-import java.util.concurrent.TimeUnit;
 
 /** Protocol v1's four-byte, unsigned big-endian length-prefixed frame codec. */
 public final class LengthPrefixedFrameCodec {
@@ -58,6 +57,12 @@ public final class LengthPrefixedFrameCodec {
         return Math.addExact(System.nanoTime(), timeoutNanos);
     }
 
+    static long timeoutMillisCeiling(long timeoutNanos) {
+        long wholeMillis = timeoutNanos / 1_000_000L;
+        long partialMillis = timeoutNanos % 1_000_000L == 0 ? 0 : 1;
+        return Math.max(1, wholeMillis + partialMillis);
+    }
+
     private static void writeFully(SocketChannel channel, ByteBuffer buffer, long deadlineNanos) throws IOException {
         while (buffer.hasRemaining()) {
             if (channel.write(buffer) == 0) {
@@ -84,13 +89,17 @@ public final class LengthPrefixedFrameCodec {
         }
         try (Selector selector = Selector.open()) {
             channel.register(selector, operation);
-            long remainingNanos = deadlineNanos - System.nanoTime();
-            if (remainingNanos <= 0) {
-                throw new IOException("timed out waiting for a TaskCage daemon response");
-            }
-            long waitMillis = Math.max(1, TimeUnit.NANOSECONDS.toMillis(remainingNanos));
-            if (selector.select(waitMillis) == 0) {
-                throw new IOException("timed out waiting for a TaskCage daemon response");
+            while (true) {
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    throw new IOException("timed out waiting for a TaskCage daemon response");
+                }
+                if (selector.select(timeoutMillisCeiling(remainingNanos)) > 0) {
+                    return;
+                }
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new IOException("interrupted while waiting for a TaskCage daemon response");
+                }
             }
         }
     }

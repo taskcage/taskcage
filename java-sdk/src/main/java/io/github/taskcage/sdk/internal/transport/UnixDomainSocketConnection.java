@@ -44,11 +44,18 @@ public final class UnixDomainSocketConnection implements AutoCloseable {
     }
 
     private static void finishConnect(SocketChannel channel, Duration timeout) throws IOException {
-        long timeoutMillis = Math.max(1, timeout.toMillis());
+        long deadlineNanos = LengthPrefixedFrameCodec.deadlineAfter(timeout);
         try (Selector selector = Selector.open()) {
             channel.register(selector, SelectionKey.OP_CONNECT);
-            if (selector.select(timeoutMillis) == 0 || !channel.finishConnect()) {
-                throw new IOException("timed out connecting to TaskCage daemon");
+            while (!channel.finishConnect()) {
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    throw new IOException("timed out connecting to TaskCage daemon");
+                }
+                if (selector.select(LengthPrefixedFrameCodec.timeoutMillisCeiling(remainingNanos)) == 0
+                        && Thread.currentThread().isInterrupted()) {
+                    throw new IOException("interrupted while connecting to TaskCage daemon");
+                }
             }
         }
     }
