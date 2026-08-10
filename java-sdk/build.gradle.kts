@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "io.github.taskcage"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 
 java {
     toolchain {

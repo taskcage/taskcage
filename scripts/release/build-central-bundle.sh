@@ -17,7 +17,7 @@ fi
 
 readonly release_version="$1"
 readonly requested_output_directory="${2:-${repository_root}/dist}"
-"${script_directory}/verify-version.sh" "${release_version}" >/dev/null
+"${script_directory}/verify-version.sh" java-sdk "${release_version}" >/dev/null
 
 [[ -n "${MAVEN_SIGNING_KEY:-}" ]] || fail "MAVEN_SIGNING_KEY is required"
 [[ -n "${MAVEN_SIGNING_PASSWORD:-}" ]] || fail "MAVEN_SIGNING_PASSWORD is required"
