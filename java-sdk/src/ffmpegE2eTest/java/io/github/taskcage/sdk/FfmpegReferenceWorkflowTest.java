@@ -13,7 +13,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FfmpegReferenceWorkflowTest {
@@ -46,8 +45,8 @@ class FfmpegReferenceWorkflowTest {
                 referenceBudget(Duration.ofSeconds(30)));
 
         try (TaskCageClient client = client()) {
-            FinishedTaskSnapshot finished = awaitFinished(
-                    client, client.submit(UUID.randomUUID(), spec), RESULT_TIMEOUT);
+            FinishedTaskSnapshot finished = client.submitHandle(UUID.randomUUID(), spec)
+                    .await(RESULT_TIMEOUT, POLL_INTERVAL);
 
             assertEquals(TerminationReason.EXITED, finished.result().terminationReason());
             assertEquals(0, finished.result().process().exitCode());
@@ -74,11 +73,11 @@ class FfmpegReferenceWorkflowTest {
                 referenceBudget(Duration.ofSeconds(2)));
 
         try (TaskCageClient client = client()) {
-            Task task = assertInstanceOf(Task.class, client.submit(UUID.randomUUID(), spec));
+            TaskHandle handle = client.submitHandle(UUID.randomUUID(), spec);
             long ffmpegPid = awaitFfmpegPid(ready, Duration.ofSeconds(5));
             assertTrue(isAlive(ffmpegPid), "FFmpeg descendant must be alive before timeout");
 
-            FinishedTaskSnapshot finished = awaitFinished(client, task, RESULT_TIMEOUT);
+            FinishedTaskSnapshot finished = handle.await(RESULT_TIMEOUT, POLL_INTERVAL);
 
             assertEquals(TerminationReason.TIMED_OUT, finished.result().terminationReason());
             awaitGone(ffmpegPid, Duration.ofSeconds(5));
@@ -130,28 +129,6 @@ class FfmpegReferenceWorkflowTest {
                 wallTime,
                 4_096,
                 4_096);
-    }
-
-    private static FinishedTaskSnapshot awaitFinished(
-            TaskCageClient client, TaskSubmission submission, Duration timeout) throws InterruptedException {
-        if (submission instanceof FinishedTaskSnapshot finished) {
-            return finished;
-        }
-        Task task = assertInstanceOf(Task.class, submission);
-        return awaitFinished(client, task, timeout);
-    }
-
-    private static FinishedTaskSnapshot awaitFinished(
-            TaskCageClient client, Task task, Duration timeout) throws InterruptedException {
-        Instant deadline = Instant.now().plus(timeout);
-        while (Instant.now().isBefore(deadline)) {
-            TaskSnapshot snapshot = client.getTask(task.taskId());
-            if (snapshot instanceof FinishedTaskSnapshot finished) {
-                return finished;
-            }
-            Thread.sleep(POLL_INTERVAL.toMillis());
-        }
-        throw new AssertionError("Task did not finish before the reference-workflow deadline");
     }
 
     private static long awaitFfmpegPid(Path ready, Duration timeout) throws Exception {

@@ -9,10 +9,13 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -119,6 +122,146 @@ class TaskCageClientIntegrationTest {
                             Duration.ofSeconds(10), 1_024, 1_024)));
             server.awaitRequests(Duration.ofSeconds(2));
             assertEquals(requestId.toString(), server.requests().get(0).path("payload").path("clientRequestId").asText());
+        }
+    }
+
+    @Test
+    void submitHandlePreservesCallerSuppliedIdempotencyKey() throws Exception {
+        UUID requestId = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskAcceptedResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            TaskHandle handle = client.submitHandle(requestId, testTaskSpec());
+
+            assertEquals(UUID.fromString("b5309d98-f51e-45e1-9866-b1a080c1ba50"), handle.taskId());
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals(requestId.toString(), server.requests().get(0).path("payload").path("clientRequestId").asText());
+        }
+    }
+
+    @Test
+    void submitHandleCachesAnImmediateFinishedSubmission() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::executionFailedResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            TaskHandle handle = client.submitHandle(testTaskSpec());
+
+            FinishedTaskSnapshot finished = handle.await(Duration.ofSeconds(1));
+            assertEquals(TerminationReason.EXECUTION_FAILED, finished.result().terminationReason());
+            assertEquals(finished, handle.get());
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals(1, server.requests().size());
+        }
+    }
+
+    @Test
+    void taskHandleAwaitsFinishedSnapshotWithoutBackgroundPolling() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.startSession(List.of(
+                        TaskCageClientIntegrationTest::taskAcceptedResponse,
+                        TaskCageClientIntegrationTest::runningTaskResponse,
+                        TaskCageClientIntegrationTest::finishedTaskResponse));
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            TaskHandle handle = client.submitHandle(testTaskSpec());
+
+            FinishedTaskSnapshot finished = handle.await(Duration.ofSeconds(1), Duration.ofMillis(1));
+
+            assertEquals(TerminationReason.TIMED_OUT, finished.result().terminationReason());
+            assertEquals(finished, handle.get());
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals(List.of("submitTask", "getTask", "getTask"), server.requests().stream()
+                    .map(request -> request.path("type").asText())
+                    .toList());
+        }
+    }
+
+    @Test
+    void taskHandleTimeoutDoesNotCancelTheTask() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.startSession(List.of(
+                        TaskCageClientIntegrationTest::taskAcceptedResponse,
+                        TaskCageClientIntegrationTest::runningTaskResponse));
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            TaskHandle handle = client.submitHandle(testTaskSpec());
+
+            assertThrows(TimeoutException.class,
+                    () -> handle.await(Duration.ofMillis(20), Duration.ofMillis(100)));
+
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals(List.of("submitTask", "getTask"), server.requests().stream()
+                    .map(request -> request.path("type").asText())
+                    .toList());
+        }
+    }
+
+    @Test
+    void taskHandleBoundsSlowGetRequestByOverallDeadline() throws Exception {
+        Function<JsonNode, JsonNode> slowNoResponse = ignored -> {
+            LockSupport.parkNanos(Duration.ofMillis(200).toNanos());
+            return null;
+        };
+        try (FakeTaskCageServer server = FakeTaskCageServer.startSession(
+                        List.of(TaskCageClientIntegrationTest::taskAcceptedResponse, slowNoResponse));
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            TaskHandle handle = client.submitHandle(testTaskSpec());
+
+            assertThrows(TimeoutException.class,
+                    () -> handle.await(Duration.ofMillis(30), Duration.ofMillis(1)));
+
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals(List.of("submitTask", "getTask"), server.requests().stream()
+                    .map(request -> request.path("type").asText())
+                    .toList());
+        }
+    }
+
+    @Test
+    void taskHandleAwaitPreservesInterruptStatus() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskAcceptedResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            TaskHandle handle = client.submitHandle(testTaskSpec());
+            Thread.currentThread().interrupt();
+            try {
+                assertThrows(InterruptedException.class, () -> handle.await(Duration.ofSeconds(1)));
+                assertTrue(Thread.currentThread().isInterrupted());
+            } finally {
+                Thread.interrupted();
+            }
+
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals(1, server.requests().size());
+        }
+    }
+
+    @Test
+    void taskHandleCancelUsesCleanupConfirmedDaemonCancellation() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.startSession(List.of(
+                        TaskCageClientIntegrationTest::taskAcceptedResponse,
+                        TaskCageClientIntegrationTest::taskCancelledResponse));
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            TaskHandle handle = client.submitHandle(testTaskSpec());
+
+            TaskCancellation cancellation = handle.cancel();
+
+            assertEquals(handle.taskId(), cancellation.taskId());
+            assertEquals(TaskState.FINISHED, cancellation.state());
+            assertEquals(TerminationReason.CANCELLED, cancellation.terminationReason());
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals("cancelTask", server.requests().get(1).path("type").asText());
+        }
+    }
+
+    @Test
+    void taskHandleRejectsInvalidWaitDurationsBeforePolling() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskAcceptedResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            TaskHandle handle = client.submitHandle(testTaskSpec());
+
+            assertThrows(IllegalArgumentException.class, () -> handle.await(Duration.ZERO));
+            assertThrows(IllegalArgumentException.class, () -> handle.await(Duration.ofNanos(-1)));
+            assertThrows(IllegalArgumentException.class, () -> handle.await(Duration.ofSeconds(Long.MAX_VALUE)));
+            assertThrows(IllegalArgumentException.class,
+                    () -> handle.await(Duration.ofSeconds(1), Duration.ZERO));
+
+            server.awaitRequests(Duration.ofSeconds(2));
+            assertEquals(1, server.requests().size());
+            assertFalse(Thread.currentThread().isInterrupted());
         }
     }
 
@@ -233,6 +376,18 @@ class TaskCageClientIntegrationTest {
 
     private static Path absoluteTestPath(String name) {
         return Path.of("").toAbsolutePath().resolve(name);
+    }
+
+    private static TaskSpec testTaskSpec() {
+        return new TaskSpec(
+                new ExternalCommand(absoluteTestPath("true"), List.of(), absoluteTestPath("tmp"), java.util.Map.of()),
+                new ResourceBudget(
+                        new CpuQuota(100_000, 100_000),
+                        64L * 1024 * 1024,
+                        8,
+                        Duration.ofSeconds(10),
+                        1_024,
+                        1_024));
     }
 
     private static ObjectNode capabilitiesResponse(JsonNode request) {

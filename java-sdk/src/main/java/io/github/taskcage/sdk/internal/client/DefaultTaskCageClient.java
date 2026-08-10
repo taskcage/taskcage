@@ -34,6 +34,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
 /** Serializes Protocol v1 requests over one lazily connected Unix domain socket. */
@@ -98,12 +99,25 @@ public final class DefaultTaskCageClient implements TaskCageClient {
 
     @Override
     public TaskSnapshot getTask(UUID taskId) {
+        return requestTask(taskId, null);
+    }
+
+    @Override
+    public TaskSnapshot getTask(UUID taskId, Duration requestTimeout) {
+        requirePositiveNanos(requestTimeout, "requestTimeout");
+        return requestTask(taskId, requestTimeout);
+    }
+
+    private TaskSnapshot requestTask(UUID taskId, Duration requestTimeout) {
         if (taskId == null) {
             throw new NullPointerException("taskId");
         }
         ObjectNode payload = mapper.createObjectNode();
         payload.put("taskId", taskId.toString());
-        return decodeTask(request("getTask", payload), taskId);
+        JsonNode response = requestTimeout == null
+                ? request("getTask", payload)
+                : request("getTask", payload, requestTimeout);
+        return decodeTask(response, taskId);
     }
 
     @Override
@@ -135,7 +149,13 @@ public final class DefaultTaskCageClient implements TaskCageClient {
     }
 
     private JsonNode request(String type, ObjectNode payload) {
-        requestLock.lock();
+        return request(type, payload, null);
+    }
+
+    private JsonNode request(String type, ObjectNode payload, Duration totalTimeout) {
+        long startedAt = System.nanoTime();
+        long totalTimeoutNanos = totalTimeout == null ? 0 : requirePositiveNanos(totalTimeout, "requestTimeout");
+        lockForRequest(totalTimeoutNanos);
         try {
             if (closed) {
                 throw new IllegalStateException("TaskCageClient is closed");
@@ -147,7 +167,16 @@ public final class DefaultTaskCageClient implements TaskCageClient {
             request.put("type", type);
             request.set("payload", payload);
 
-            byte[] responseBytes = requireConnection().request(writeRequest(request), config.requestTimeout());
+            UnixDomainSocketConnection activeConnection;
+            Duration responseTimeout;
+            if (totalTimeout == null) {
+                activeConnection = requireConnection();
+                responseTimeout = config.requestTimeout();
+            } else {
+                activeConnection = requireConnectionWithin(remainingDuration(startedAt, totalTimeoutNanos));
+                responseTimeout = shorter(config.requestTimeout(), remainingDuration(startedAt, totalTimeoutNanos));
+            }
+            byte[] responseBytes = activeConnection.request(writeRequest(request), responseTimeout);
             JsonNode response = mapper.readTree(responseBytes);
             validateResponse(response, requestId);
             if ("error".equals(response.path("type").asText())) {
@@ -162,6 +191,24 @@ public final class DefaultTaskCageClient implements TaskCageClient {
             throw new TaskCageConnectionException("TaskCage daemon connection failed", exception);
         } finally {
             requestLock.unlock();
+        }
+    }
+
+    private void lockForRequest(long totalTimeoutNanos) {
+        if (totalTimeoutNanos == 0) {
+            requestLock.lock();
+            return;
+        }
+        try {
+            if (!requestLock.tryLock(totalTimeoutNanos, TimeUnit.NANOSECONDS)) {
+                throw new TaskCageConnectionException(
+                        "timed out waiting to send a TaskCage daemon request",
+                        new IOException("request lock timeout"));
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new TaskCageConnectionException(
+                    "interrupted while waiting to send a TaskCage daemon request", exception);
         }
     }
 
@@ -278,6 +325,40 @@ public final class DefaultTaskCageClient implements TaskCageClient {
             connection = UnixDomainSocketConnection.connect(config.socketPath(), config.connectTimeout());
         }
         return connection;
+    }
+
+    private UnixDomainSocketConnection requireConnectionWithin(Duration timeout) throws IOException {
+        if (connection == null) {
+            connection = UnixDomainSocketConnection.connect(config.socketPath(), shorter(config.connectTimeout(), timeout));
+        }
+        return connection;
+    }
+
+    private static Duration remainingDuration(long startedAt, long timeoutNanos) throws IOException {
+        long remainingNanos = timeoutNanos - (System.nanoTime() - startedAt);
+        if (remainingNanos <= 0) {
+            throw new IOException("timed out waiting for a TaskCage daemon response");
+        }
+        return Duration.ofNanos(remainingNanos);
+    }
+
+    private static Duration shorter(Duration first, Duration second) {
+        return first.compareTo(second) <= 0 ? first : second;
+    }
+
+    private static long requirePositiveNanos(Duration duration, String name) {
+        if (duration == null) {
+            throw new NullPointerException(name);
+        }
+        try {
+            long nanos = duration.toNanos();
+            if (nanos <= 0) {
+                throw new IllegalArgumentException(name + " must be positive and representable in nanoseconds");
+            }
+            return nanos;
+        } catch (ArithmeticException exception) {
+            throw new IllegalArgumentException(name + " must be representable in nanoseconds", exception);
+        }
     }
 
     private byte[] writeRequest(ObjectNode request) {

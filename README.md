@@ -129,7 +129,7 @@ cd java-sdk
 ./gradlew build
 ```
 
-현재 공개 API는 제출, 조회, 취소를 제공한다. 실행 파일과 작업 디렉터리는 절대 경로여야 한다.
+현재 공개 API는 제출, 조회, bounded 완료 대기와 취소를 제공한다. 실행 파일과 작업 디렉터리는 절대 경로여야 한다.
 `TaskSpec(command)`는 유한한 SDK 안전 기본 자원 예산을 사용하며, 필요하면 기존 명시적 생성자로 override한다.
 
 ```java
@@ -144,17 +144,15 @@ try (TaskCageClient client = TaskCageClient.connect(
         TaskCageClientConfig.builder()
             .socketPath(Path.of("/run/taskcage/taskcaged.sock"))
             .build())) {
-    TaskSubmission submission = client.submit(spec);
-
-    if (submission instanceof Task task) {
-        TaskSnapshot snapshot = client.getTask(task.taskId());
-        // RUNNING 또는 FINISHED 처리
-    } else if (submission instanceof FinishedTaskSnapshot finished) {
-        // exec 시작 실패처럼 즉시 정리가 끝난 결과
-        TerminationReason reason = finished.result().terminationReason();
-    }
+    TaskHandle task = client.submitHandle(spec);
+    FinishedTaskSnapshot finished = task.await(Duration.ofMinutes(3));
+    ExecutionResult result = finished.result();
 }
 ```
+
+`TaskHandle.get()`은 현재 snapshot을 조회하고, bounded `await()`는 timeout 시 Task를 자동 취소하지 않는다.
+`TaskHandle.cancel()`은 daemon이 whole-task cleanup을 확인한 뒤 반환한다. 저수준 `submit()`,
+`getTask()`, `cancelTask()`도 유지한다.
 
 SDK 안전 기본값은 CPU 1개, memory 512 MiB, PID 32, 벽시계 2분, stdout/stderr tail 각각 65,536
 bytes다. 이는 daemon capability 협상이 아니며 배포 최대값을 넘으면 `LIMIT_EXCEEDS_POLICY`로 거절된다.
