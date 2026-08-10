@@ -32,7 +32,7 @@ Java SDK는 Maven Central에 다음 좌표로 main JAR, sources JAR, Javadoc JAR
 PGP signature와 Maven Central이 요구하는 checksum을 포함한다.
 
 ```text
-io.github.taskcage:taskcage-java-sdk:0.1.0
+org.taskcage:taskcage-java-sdk:0.1.0
 ```
 
 Java SDK GitHub prerelease는 사용자 변경 내역, Maven 좌표, 지원 Java와 Protocol version을 제공한다.
@@ -53,7 +53,7 @@ checksum을 검토한 뒤 수동 publish workflow를 실행하면 이 environmen
 
 ### Java SDK
 
-Central Portal에서 `io.github.taskcage` namespace ownership을 검증하고 `java-sdk-release` environment에
+Central Portal에서 `taskcage.org` 도메인 소유권을 사용해 `org.taskcage` namespace ownership을 검증하고 `java-sdk-release` environment에
 다음 secret을 등록한다.
 
 | secret | 값 |
@@ -174,7 +174,7 @@ Java SDK는 Central 상태가 `PUBLISHED`가 되고 실제 POM URL이 resolve되
 
 ```kotlin
 dependencies {
-    implementation("io.github.taskcage:taskcage-java-sdk:0.1.0")
+    implementation("org.taskcage:taskcage-java-sdk:0.1.0")
 }
 ```
 

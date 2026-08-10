@@ -137,7 +137,7 @@ Maven Central에는 다음 좌표로 main, sources와 javadoc artifact를 서명
 
 ```kotlin
 dependencies {
-    implementation("io.github.taskcage:taskcage-java-sdk:0.1.0")
+    implementation("org.taskcage:taskcage-java-sdk:0.1.0")
 }
 ```
 
@@ -200,7 +200,7 @@ workflow로 검증한다.
 
 ```kotlin
 dependencies {
-    implementation("io.github.taskcage:taskcage-java-sdk:0.1.0")
+    implementation("org.taskcage:taskcage-java-sdk:0.1.0")
 }
 ```
 

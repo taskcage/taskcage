@@ -44,7 +44,7 @@ PASS: FFmpeg Local Raw Command 정상 실행, ProcessBuilder descendant 재현, 
 
 ## Java Raw Command 형태
 
-정상 경로는 [FfmpegReferenceWorkflowTest.java](../java-sdk/src/ffmpegE2eTest/java/io/github/taskcage/sdk/FfmpegReferenceWorkflowTest.java)의
+정상 경로는 [FfmpegReferenceWorkflowTest.java](../java-sdk/src/ffmpegE2eTest/java/org/taskcage/sdk/FfmpegReferenceWorkflowTest.java)의
 다음 계약을 사용한다.
 
 ```java

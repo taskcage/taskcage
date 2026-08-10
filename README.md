@@ -121,7 +121,7 @@ cgroup fail-stop으로 `UNREADY`인 경우 종료 코드는 `0`이 아니다. Ub
 
 ## Java SDK 사용
 
-SDK의 첫 공개 좌표는 `io.github.taskcage:taskcage-java-sdk:0.1.0`으로 준비했다. 첫 release가
+SDK의 첫 공개 좌표는 `org.taskcage:taskcage-java-sdk:0.1.0`으로 준비했다. 첫 release가
 완료되기 전까지는 Maven Central에서 받을 수 없으므로 `java-sdk/`에서 직접 빌드해 사용한다.
 
 ```bash
