@@ -144,12 +144,12 @@ jobs:
             echo "ERROR: a GitHub release already exists for ${RELEASE_TAG}" >&2
             exit 1
           fi
-          central_pom_url="https://repo1.maven.org/maven2/io/github/taskcage/taskcage-java-sdk/${RELEASE_VERSION}/taskcage-java-sdk-${RELEASE_VERSION}.pom"
+          central_pom_url="https://repo1.maven.org/maven2/org/taskcage/taskcage-java-sdk/${RELEASE_VERSION}/taskcage-java-sdk-${RELEASE_VERSION}.pom"
           central_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${central_pom_url}")"
           case "${central_status}" in
             404) ;;
             200)
-              echo "ERROR: io.github.taskcage:taskcage-java-sdk:${RELEASE_VERSION} is already public" >&2
+              echo "ERROR: org.taskcage:taskcage-java-sdk:${RELEASE_VERSION} is already public" >&2
               exit 1
               ;;
             *)
@@ -161,7 +161,7 @@ jobs:
             upload \
             "dist/taskcage-java-sdk-${RELEASE_VERSION}-central.zip" \
             "taskcage-java-sdk-${RELEASE_VERSION}")"
-          release_notes="$(printf 'TaskCage Java SDK %s\n\nSupported Protocol: v1\nMaven: io.github.taskcage:taskcage-java-sdk:%s\n\nCentral USER_MANAGED deployment: %s\n\nReview and complete these notes before finalizing publication.' "${RELEASE_VERSION}" "${RELEASE_VERSION}" "${deployment_id}")"
+          release_notes="$(printf 'TaskCage Java SDK %s\n\nSupported Protocol: v1\nMaven: org.taskcage:taskcage-java-sdk:%s\n\nCentral USER_MANAGED deployment: %s\n\nReview and complete these notes before finalizing publication.' "${RELEASE_VERSION}" "${RELEASE_VERSION}" "${deployment_id}")"
           gh release create "${RELEASE_TAG}" \
             --draft \
             --prerelease \

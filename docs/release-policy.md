@@ -83,7 +83,7 @@ Protocol과 source tag를 제공하고, 실제 dependency 설치는 표준 regis
 Java SDK의 Maven 좌표는 다음 형식을 유지한다.
 
 ```text
-io.github.taskcage:taskcage-java-sdk:<version>
+org.taskcage:taskcage-java-sdk:<version>
 ```
 
 Maven Central에 공개된 component는 덮어쓰지 않는다. Central deployment가 `PUBLISHED`가 된 것을 확인한
