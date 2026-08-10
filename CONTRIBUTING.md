@@ -101,6 +101,12 @@ cargo test
 - 구현된 계약과 향후 후보를 명확히 구분하고, 아직 제공하지 않는 기능을 사용 가능한 것처럼 쓰지 않습니다.
 - 공개 API와 운영 계약을 변경하면 관련 문서, fixture와 검증 자료를 같은 PR에서 갱신합니다.
 
+## 릴리스
+
+공개 릴리스는 maintainer가 검증된 `main` 커밋에서 생성합니다. 일반 기여자는 PR에서 공개 tag를 만들거나
+package registry와 GitHub Release에 artifact를 배포하지 않습니다. 컴포넌트 버전, tag와 배포 채널은
+[릴리스 및 버전 정책](docs/release-policy.md)을 따릅니다.
+
 ## 안전한 개발 환경
 
 TaskCage는 Linux cgroup v2와 프로세스 종료를 다룹니다. 개발·테스트 시에는 개인 개발 환경 또는 전용 테스트 VM/컨테이너에서만 제한·정리 테스트를 실행하고, 공유 또는 운영 시스템의 cgroup을 대상으로 하지 않습니다.
