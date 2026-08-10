@@ -48,8 +48,8 @@ Central upload zip은 Portal 입력과 복구용 CI artifact이며 사용자 설
 4. Actions가 tag의 GitHub signature verification 결과와 `main` history 포함 여부를 확인할 수 있도록 기본
    `GITHUB_TOKEN`의 contents read 권한을 유지한다.
 
-`taskcaged-release` environment에는 별도 secret이 필요하지 않다. daemon workflow가 검증과 draft 생성을
-완료하면 이 environment의 승인에서 대기하고, maintainer가 draft release와 checksum을 검토한 뒤 공개한다.
+`taskcaged-release` environment에는 별도 secret이 필요하지 않다. maintainer가 daemon Draft Release와
+checksum을 검토한 뒤 수동 publish workflow를 실행하면 이 environment의 승인에서 대기한다.
 
 ### Java SDK
 
@@ -104,8 +104,7 @@ tag push는 `.github/workflows/release-daemon.yml`을 시작한다. workflow는 
 
 ### 2. draft 검토와 공개
 
-검증이 끝나면 workflow가 daemon archive와 checksum을 생성해 Draft GitHub prerelease에 첨부한다. 공개
-job은 `taskcaged-release` environment 승인에서 대기한다.
+검증이 끝나면 workflow가 daemon archive와 checksum을 생성해 Draft GitHub prerelease에 첨부한다.
 
 승인 전에 maintainer는 다음을 확인한다.
 
@@ -114,7 +113,9 @@ job은 `taskcaged-release` environment 승인에서 대기한다.
 - 릴리스 노트에 사용자 변경, 지원 플랫폼, Protocol과 알려진 제한이 포함됨
 - 깨끗한 Ubuntu 24.04 x86-64 환경에서 archive smoke test가 통과함
 
-검토가 끝나면 environment를 승인한다. workflow는 기존 Draft가 prerelease인지 확인하고 공개한다.
+검토가 끝나면 GitHub Actions의 `Release taskcaged` workflow를 `tag=taskcaged-v0.1.0`으로 수동
+실행한다. `taskcaged-release` environment를 승인하면 workflow는 기존 Draft가 prerelease인지
+확인하고 공개한다. Draft 생성 뒤 workflow가 중단돼도 같은 tag로 공개 단계만 다시 실행할 수 있다.
 
 ## Java SDK 릴리스
 

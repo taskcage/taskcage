@@ -4,12 +4,18 @@ on:
   push:
     tags:
       - "taskcaged-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing daemon release tag, for example taskcaged-v0.1.0.
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: taskcaged-release-${{ github.ref_name }}
+  group: taskcaged-release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
   cancel-in-progress: false
 
 jobs:
@@ -17,17 +23,33 @@ jobs:
     name: Validate daemon tag and version
     runs-on: ubuntu-24.04
     outputs:
+      mode: ${{ steps.context.outputs.mode }}
       release_tag: ${{ steps.version.outputs.release_tag }}
       release_version: ${{ steps.version.outputs.release_version }}
     steps:
+      - id: context
+        name: Resolve release context
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_TAG: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            echo "mode=prepare" >>"${GITHUB_OUTPUT}"
+            echo "release_tag=${PUSH_TAG}" >>"${GITHUB_OUTPUT}"
+          else
+            echo "mode=publish" >>"${GITHUB_OUTPUT}"
+            echo "release_tag=${INPUT_TAG}" >>"${GITHUB_OUTPUT}"
+          fi
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ steps.context.outputs.release_tag }}
           fetch-depth: 0
       - id: version
         name: Match the tag, manifest, and main history
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ steps.context.outputs.release_tag }}
         run: |
           [[ "${RELEASE_TAG}" =~ ^taskcaged-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           release_version="${RELEASE_TAG#taskcaged-v}"
@@ -42,6 +64,7 @@ jobs:
 
   rust-gate:
     name: Rust release gate
+    if: needs.validate.outputs.mode == 'prepare'
     needs: validate
     runs-on: ubuntu-24.04
     steps:
@@ -56,6 +79,7 @@ jobs:
 
   cgroup-preflight-gate:
     name: cgroup preflight release gate
+    if: needs.validate.outputs.mode == 'prepare'
     needs: validate
     runs-on: ubuntu-24.04
     steps:
@@ -67,6 +91,7 @@ jobs:
 
   cgroup-runner-gate:
     name: cgroup runner release gate
+    if: needs.validate.outputs.mode == 'prepare'
     needs: validate
     runs-on: ubuntu-24.04
     steps:
@@ -78,6 +103,7 @@ jobs:
 
   systemd-gate:
     name: systemd release gate
+    if: needs.validate.outputs.mode == 'prepare'
     needs: validate
     runs-on: ubuntu-24.04
     steps:
@@ -89,6 +115,7 @@ jobs:
 
   ffmpeg-gate:
     name: FFmpeg compatibility gate
+    if: needs.validate.outputs.mode == 'prepare'
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -109,6 +136,7 @@ jobs:
 
   package:
     name: Package daemon release assets
+    if: needs.validate.outputs.mode == 'prepare'
     needs:
       - validate
       - rust-gate
@@ -135,6 +163,7 @@ jobs:
 
   draft:
     name: Create draft daemon release
+    if: needs.validate.outputs.mode == 'prepare'
     needs:
       - validate
       - package
@@ -169,9 +198,8 @@ jobs:
 
   publish:
     name: Publish daemon prerelease
-    needs:
-      - validate
-      - draft
+    if: needs.validate.outputs.mode == 'publish'
+    needs: validate
     runs-on: ubuntu-24.04
     environment: taskcaged-release
     permissions:
