@@ -2,7 +2,8 @@
 
 TaskCage는 신뢰된 외부 프로세스를 작업 단위로 실행하고, Linux cgroup v2로 자원과 수명주기를 관리하는 경량 런타임이다.
 
-> **상태:** `0.x` PoC. 다음 목표는 설치 가능한 Local Public Alpha이며, 아직 Maven Central 배포나 운영 호환성을 보장하지 않는다.
+> **상태:** `0.1.0-alpha.1` Local Public Alpha 후보. 검증 가능한 Linux archive와 Maven Central bundle을
+> 만드는 release pipeline은 준비 중이며, 아직 tag·GitHub Release·Maven Central artifact는 공개되지 않았다.
 
 제품의 장기 방향과 표준 용어는 [제품 철학과 용어](docs/product-philosophy.md)에서 정의한다. 이 README는
 현재 구현하고 검증한 PoC 범위를 설명한다.
@@ -76,7 +77,8 @@ TaskCage는 신뢰할 수 없는 코드를 격리하는 보안 sandbox가 아니
 
 실제 cgroup v2 위임이 준비된 Linux 환경에서 먼저 사전 조건을 검사한다.
 
-Ubuntu 24.04의 반복 가능한 service 설치는 [Ubuntu daemon 설치](docs/install-ubuntu.md)를 따른다.
+Ubuntu 24.04의 release archive 설치와 반복 가능한 service 구성은
+[Ubuntu daemon 설치](docs/install-ubuntu.md)를 따른다.
 
 ```bash
 cargo build --workspace
@@ -119,7 +121,8 @@ cgroup fail-stop으로 `UNREADY`인 경우 종료 코드는 `0`이 아니다. Ub
 
 ## Java SDK 사용
 
-SDK는 아직 Maven Central에 배포되지 않았다. 현재는 `java-sdk/`에서 직접 빌드해 사용한다.
+SDK의 Public Alpha 좌표는 `io.github.taskcage:taskcage-java-sdk:0.1.0-alpha.1`로 고정했다. 첫 release가
+완료되기 전까지는 Maven Central에서 받을 수 없으므로 `java-sdk/`에서 직접 빌드해 사용한다.
 
 ```bash
 cd java-sdk
@@ -176,6 +179,9 @@ cd java-sdk
 bash integration-tests/preflight-fail-closed.sh
 bash integration-tests/cgroup-runner-smoke.sh
 bash integration-tests/ffmpeg-reference-workflow.sh
+bash integration-tests/release-artifact-smoke.sh \
+  0.1.0-alpha.1 path/to/taskcage-v0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz \
+  path/to/taskcage-v0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 환경 요구사항과 E2E 실행법은 [Linux 통합 시험](integration-tests/README.md)에 정리되어 있다.
@@ -186,6 +192,7 @@ bash integration-tests/ffmpeg-reference-workflow.sh
 - [Protocol v1 API 명세](docs/api-mvp.md)
 - [Java SDK](java-sdk/README.md)
 - [Ubuntu daemon 설치](docs/install-ubuntu.md)
+- [Public Alpha release 운영](docs/releasing.md)
 - [FFmpeg Local Raw Command reference](docs/reference-ffmpeg.md)
 - [Linux 통합 시험](integration-tests/README.md)
 - [Protocol fixture](protocol-fixtures/v1/README.md)

@@ -73,3 +73,17 @@ owner-only UDS를 사용한다. Java Core SDK가 FFmpeg를 shell 없이 직접 �
 일반 root-only 종료 뒤에는 FFmpeg child가 살아 있음을 먼저 확인한 후 시험이 직접 정리한다. TaskCage
 경로는 `TIMED_OUT`, descendant PID 소멸, task cgroup 원상 복구와 `cleanup_complete=true`를 확인한다.
 출력하는 FFmpeg package version과 전체 소요 시간은 CI evidence이며 Docker 대비 성능 측정은 아니다.
+
+## Public Alpha release artifact smoke test
+
+```bash
+bash integration-tests/release-artifact-smoke.sh \
+  0.1.0-alpha.1 \
+  dist/taskcage-v0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz \
+  dist/taskcage-v0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+```
+
+`release-artifact-smoke.sh`는 checksum과 archive layout을 먼저 검사하고, archive 안의 installer와 prebuilt
+binary만 사용해 전용 account·systemd service·owner-only UDS·live daemon version을 검증한 뒤 제거한다.
+기존 TaskCage 설치나 account가 있는 host는 변경하지 않고 종료 코드 77로 건너뛴다. release gate와
+GitHub Actions에서는 77을 성공으로 처리하지 않는다.
