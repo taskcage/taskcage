@@ -26,17 +26,19 @@ public final class FakeTaskCageServer implements AutoCloseable {
     private final Path socketPath;
     private final ServerSocketChannel server;
     private final List<ResponseHandler> handlers;
+    private final boolean oneConnection;
     private final List<JsonNode> requests = new ArrayList<>();
     private final CountDownLatch handled;
     private final AtomicReference<Throwable> failure = new AtomicReference<>();
     private final Thread thread;
 
-    private FakeTaskCageServer(List<ResponseHandler> handlers) throws IOException {
+    private FakeTaskCageServer(List<ResponseHandler> handlers, boolean oneConnection) throws IOException {
         this.directory = Files.createTempDirectory("taskcage-sdk-test-");
         this.socketPath = directory.resolve("taskcaged.sock");
         this.server = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
         this.server.bind(UnixDomainSocketAddress.of(socketPath));
         this.handlers = List.copyOf(handlers);
+        this.oneConnection = oneConnection;
         this.handled = new CountDownLatch(handlers.size());
         this.thread = new Thread(this::serve, "fake-taskcage-server");
         this.thread.setDaemon(true);
@@ -44,15 +46,19 @@ public final class FakeTaskCageServer implements AutoCloseable {
     }
 
     public static FakeTaskCageServer start(Function<JsonNode, JsonNode> handler) throws IOException {
-        return new FakeTaskCageServer(List.of(encoded(handler)));
+        return new FakeTaskCageServer(List.of(encoded(handler)), false);
     }
 
     public static FakeTaskCageServer start(List<Function<JsonNode, JsonNode>> handlers) throws IOException {
-        return new FakeTaskCageServer(handlers.stream().map(FakeTaskCageServer::encoded).toList());
+        return new FakeTaskCageServer(handlers.stream().map(FakeTaskCageServer::encoded).toList(), false);
+    }
+
+    public static FakeTaskCageServer startSession(List<Function<JsonNode, JsonNode>> handlers) throws IOException {
+        return new FakeTaskCageServer(handlers.stream().map(FakeTaskCageServer::encoded).toList(), true);
     }
 
     public static FakeTaskCageServer startRaw(Function<JsonNode, byte[]> handler) throws IOException {
-        return new FakeTaskCageServer(List.of(handler::apply));
+        return new FakeTaskCageServer(List.of(handler::apply), false);
     }
 
     public Path socketPath() {
@@ -91,25 +97,37 @@ public final class FakeTaskCageServer implements AutoCloseable {
 
     private void serve() {
         try {
-            for (ResponseHandler handler : handlers) {
+            if (oneConnection) {
                 try (SocketChannel client = server.accept()) {
-                    JsonNode request = MAPPER.readTree(
-                            LengthPrefixedFrameCodec.read(client, Duration.ofSeconds(2)));
-                    synchronized (requests) {
-                        requests.add(request);
-                    }
-                    byte[] response = handler.respond(request);
-                    if (response != null) {
-                        LengthPrefixedFrameCodec.write(client, response, Duration.ofSeconds(2));
+                    for (ResponseHandler handler : handlers) {
+                        respond(client, handler);
                     }
                 }
-                handled.countDown();
+            } else {
+                for (ResponseHandler handler : handlers) {
+                    try (SocketChannel client = server.accept()) {
+                        respond(client, handler);
+                    }
+                }
             }
         } catch (Throwable exception) {
             if (server.isOpen()) {
                 failure.compareAndSet(null, exception);
             }
         }
+    }
+
+    private void respond(SocketChannel client, ResponseHandler handler) throws IOException {
+        JsonNode request =
+                MAPPER.readTree(LengthPrefixedFrameCodec.read(client, Duration.ofSeconds(2)));
+        synchronized (requests) {
+            requests.add(request);
+        }
+        byte[] response = handler.respond(request);
+        if (response != null) {
+            LengthPrefixedFrameCodec.write(client, response, Duration.ofSeconds(2));
+        }
+        handled.countDown();
     }
 
     private static ResponseHandler encoded(Function<JsonNode, JsonNode> handler) {
