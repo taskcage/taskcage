@@ -39,9 +39,10 @@ Java application
 - 연결·프로토콜·데몬 오류 구분
 - 가짜 UDS daemon 단위 테스트와 실제 Linux daemon E2E 테스트
 - `ResourceBudget.safeDefaults()`와 `TaskSpec(command)`의 유한한 요청 기본값
+- 설치된 daemon과 실제 FFmpeg를 사용하는 별도 Local reference E2E
 
 현재 호출자는 필요할 때 자원 예산을 override하고 `getTask()`를 직접 polling해야 한다. Maven Central 배포,
-완료 대기와 동기 실행 편의 API, 독립 FFmpeg 예제는 아직 구현되지 않았다.
+완료 대기와 동기 실행 편의 API는 아직 구현되지 않았다.
 
 ## v0.1 Public Alpha 범위
 
@@ -302,3 +303,7 @@ TASKCAGE_OUTPUT_FLOOD=/home/ubuntu/TaskCage/target/debug/output-flood \
 ```
 
 현재 E2E는 제출·조회·취소, exec 시작 실패, timeout, 자식 프로세스 정리, 출력 tail, 멱등 제출을 검증한다. wire 계약은 [Protocol v1 API 명세](../docs/api-mvp.md)를 따른다.
+
+실제 FFmpeg 정상 실행, 일반 `ProcessBuilder`의 root-only 종료 비교와 TaskCage timeout descendant cleanup은
+[FFmpeg Local Raw Command reference](../docs/reference-ffmpeg.md)와 전용 `ffmpegE2eTest` source set에서
+검증한다. 이 workflow는 성능 benchmark가 아니다.
