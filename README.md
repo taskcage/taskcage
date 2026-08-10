@@ -49,6 +49,7 @@ taskcaged (Rust)
 - 종료 원인, exit code/signal, 사용량, 제한된 stdout/stderr tail 반환
 - `submitTask`, `getTask`, `cancelTask` 비동기 API
 - 요청 ID 기반의 데몬 생존 기간 내 멱등 제출
+- Ubuntu FFmpeg package를 사용하는 Local Raw Command 정상·timeout reference workflow
 
 ## 안전 보장
 
@@ -174,6 +175,7 @@ cd java-sdk
 ```bash
 bash integration-tests/preflight-fail-closed.sh
 bash integration-tests/cgroup-runner-smoke.sh
+bash integration-tests/ffmpeg-reference-workflow.sh
 ```
 
 환경 요구사항과 E2E 실행법은 [Linux 통합 시험](integration-tests/README.md)에 정리되어 있다.
@@ -184,6 +186,7 @@ bash integration-tests/cgroup-runner-smoke.sh
 - [Protocol v1 API 명세](docs/api-mvp.md)
 - [Java SDK](java-sdk/README.md)
 - [Ubuntu daemon 설치](docs/install-ubuntu.md)
+- [FFmpeg Local Raw Command reference](docs/reference-ffmpeg.md)
 - [Linux 통합 시험](integration-tests/README.md)
 - [Protocol fixture](protocol-fixtures/v1/README.md)
 - [기여 가이드](CONTRIBUTING.md)

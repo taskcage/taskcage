@@ -57,3 +57,23 @@ jobs:
         with:
           toolchain: stable
       - run: bash integration-tests/systemd-service-smoke.sh
+
+  ffmpeg-reference:
+    name: FFmpeg Local reference
+    needs: [cgroup-runner, systemd-service]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install Ubuntu FFmpeg package
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: bash integration-tests/ffmpeg-reference-workflow.sh

@@ -57,3 +57,19 @@ bash integration-tests/systemd-service-smoke.sh
 binary 설치, 전용 account, `Delegate=yes`, owner-only UDS, manager membership, 설정 보존, stop과 uninstall을
 실제 systemd로 검증한다. 기존 unit, binary, user 또는 group이 있으면 이를 변경하지 않고 종료 코드 77로
 건너뛴다. CI에서는 종료 코드 77도 성공으로 처리하지 않는다.
+
+## FFmpeg Local Raw Command reference workflow
+
+```bash
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends ffmpeg
+bash integration-tests/ffmpeg-reference-workflow.sh
+```
+
+`ffmpeg-reference-workflow.sh`는 기존 TaskCage 설치가 없는 Ubuntu 24.04 host에서 설치된 daemon과
+owner-only UDS를 사용한다. Java Core SDK가 FFmpeg를 shell 없이 직접 실행해 실제 WAVE 결과를 만들고,
+동일한 FFmpeg descendant launcher를 일반 `ProcessBuilder`와 TaskCage timeout으로 각각 실행한다.
+
+일반 root-only 종료 뒤에는 FFmpeg child가 살아 있음을 먼저 확인한 후 시험이 직접 정리한다. TaskCage
+경로는 `TIMED_OUT`, descendant PID 소멸, task cgroup 원상 복구와 `cleanup_complete=true`를 확인한다.
+출력하는 FFmpeg package version과 전체 소요 시간은 CI evidence이며 Docker 대비 성능 측정은 아니다.
