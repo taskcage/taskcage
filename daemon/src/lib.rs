@@ -15,6 +15,7 @@ mod cleanup_fault;
 pub mod codec;
 mod deadline;
 mod deployment_policy;
+pub mod digest;
 mod execution_plan;
 #[cfg(target_os = "linux")]
 mod executor;
@@ -28,6 +29,7 @@ mod handlers;
 mod lifecycle;
 pub mod output;
 pub mod preflight;
+pub mod product_manifest;
 pub mod protocol;
 pub mod resource_budget;
 #[cfg(target_os = "linux")]

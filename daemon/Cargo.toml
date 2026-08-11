@@ -8,8 +8,12 @@ rust-version.workspace = true
 
 [dependencies]
 libc = "0.2"
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# RFC 8785에는 ECMAScript 숫자/문자열 직렬화 규칙이 있어 단순 key 정렬로 대체할 수 없다.
+serde_json_canonicalizer = "0.3.2"
+sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
