@@ -710,7 +710,7 @@ fn is_cgroup_interface_name(name: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
         && suffix.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.')
+            byte.is_ascii_alphabetic() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.')
         })
 }
 
@@ -1175,6 +1175,7 @@ mod tests {
     fn cgroup_interface_names_and_job_names_are_narrow() {
         assert!(is_cgroup_interface_name("cgroup.events"));
         assert!(is_cgroup_interface_name("memory.events.local"));
+        assert!(is_cgroup_interface_name("hugetlb.32MB.rsvd.current"));
         assert!(!is_cgroup_interface_name("unexpected"));
         assert!(validate_job_id("33333333-3333-3333-3333-333333333333").is_ok());
         assert!(validate_job_id("../outside").is_err());
