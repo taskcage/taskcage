@@ -17,5 +17,7 @@ Profile, Runtime Package와 Bundle digest는 각각 자기 manifest 전체를 RF
 bytes의 SHA-256이다. 자기 digest field는 schema에 두지 않아 순환 계산을 만들지 않으며, 검증된 import
 결과, digest-addressed cache path와 요청 또는 Bundle의 참조가 digest를 보유한다.
 
-이 파일은 구현 목표와 호환성 계약이지 현재 release의 availability 주장이 아니다. 예시 digest는 문법
-검증을 위한 결정적인 가짜 값이며 fixture나 Package payload의 실제 SHA-256 값이 아니다.
+이 파일은 구현 목표와 호환성 계약이지 현재 release의 availability 주장이 아니다. Bundle과 Protocol
+fixture가 참조하는 Profile, Runtime Package와 Bundle digest는 이 세 manifest의 canonical SHA-256과
+일치한다. Runtime Package의 개별 payload file digest는 실제 Package bytes가 없는 형식 fixture를 위한
+결정적인 값이다.
