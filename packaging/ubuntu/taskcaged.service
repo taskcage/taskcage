@@ -11,6 +11,7 @@ Group=taskcage
 RuntimeDirectory=taskcage
 RuntimeDirectoryMode=0700
 Environment=RUST_LOG=taskcaged=info
+Environment=TASKCAGE_CGROUP_DELEGATE_SUBGROUP=manager
 EnvironmentFile=/etc/taskcage/taskcaged.env
 ExecStart=/usr/local/bin/taskcaged serve \
   --socket ${TASKCAGE_SOCKET} \
@@ -27,6 +28,7 @@ ExecStart=/usr/local/bin/taskcaged serve \
   --max-task-stdout-tail-bytes ${TASKCAGE_MAX_TASK_STDOUT_TAIL_BYTES} \
   --max-task-stderr-tail-bytes ${TASKCAGE_MAX_TASK_STDERR_TAIL_BYTES}
 Delegate=yes
+DelegateSubgroup=manager
 KillMode=control-group
 KillSignal=SIGTERM
 Restart=on-failure

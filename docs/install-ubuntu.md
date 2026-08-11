@@ -14,7 +14,7 @@ binary를 전달할 수 있다.
 | service account | `taskcage:taskcage`, home과 login shell 없음 |
 | runtime directory | `/run/taskcage` (`taskcage:taskcage`, `0700`, systemd가 관리) |
 | Local UDS | `/run/taskcage/taskcaged.sock` (`taskcage:taskcage`, `0600`) |
-| cgroup | `taskcaged.service` 아래에 `Delegate=yes`로 위임된 manager와 task cgroup |
+| cgroup | `taskcaged.service` 아래에 `Delegate=yes`, `DelegateSubgroup=manager`로 위임된 manager와 task cgroup |
 
 현재 Local UDS는 owner-only다. 따라서 Java SDK caller도 daemon과 같은 `taskcage` UID로 실행해야 한다.
 같은 UID의 모든 process는 socket에 접근할 수 있으며 Local caller별 authorization은 아직 제공하지 않는다.
@@ -22,11 +22,19 @@ target process도 이 account로 실행되므로 필요한 binary와 작업 디�
 
 ## 사전 조건
 
-- Ubuntu 24.04와 systemd
+- Ubuntu 24.04와 systemd 254 이상 (`DelegateSubgroup=` 필요)
 - unified cgroup v2의 `cpu`, `memory`, `pids` controller
 - `clone3(CLONE_INTO_CGROUP)`와 `cgroup.kill`을 지원하는 kernel
 - root 권한
 - GitHub Release에서 받은 Linux x86-64 archive와 SHA-256 sidecar 또는 신뢰할 수 있는 source checkout
+
+### WSL2 지원 경계
+
+systemd를 활성화한 WSL2 Ubuntu 24.04는 로컬 개발과 smoke test 환경으로 지원한다. 운영 배포와 성능
+benchmark의 기준은 native Ubuntu 24.04 host다. WSL distro를 `wsl --terminate`로 종료한 뒤 다시 시작해도
+배포 unit은 첫 시도에 `READY`가 되어야 하며 `systemctl show taskcaged.service --property=NRestarts`가 `0`을
+반환해야 한다. 값이 증가하면 자동 재시작을 정상 시작으로 간주하지 말고 systemd version과 journal의
+`CGROUP` 실패를 확인한다.
 
 ## Release archive 준비
 
@@ -149,7 +157,12 @@ daemon은 socket을 열기 전에 cgroup recovery와 fail-closed preflight를 �
 
 ```bash
 systemctl is-active taskcaged.service
-systemctl show taskcaged.service --property=User --property=Group --property=Delegate
+systemctl show taskcaged.service \
+  --property=User \
+  --property=Group \
+  --property=Delegate \
+  --property=DelegateSubgroup \
+  --property=NRestarts
 sudo stat -c '%a %U %G %n' /run/taskcage/taskcaged.sock
 sudo journalctl -u taskcaged.service --since today
 ```

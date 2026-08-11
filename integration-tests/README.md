@@ -54,7 +54,8 @@ bash integration-tests/systemd-service-smoke.sh
 ```
 
 `systemd-service-smoke.sh`는 기존 TaskCage 설치가 없는 전용 Ubuntu 24.04 host에서만 실행한다. prebuilt
-binary 설치, 전용 account, `Delegate=yes`, owner-only UDS, manager membership, 설정 보존, stop과 uninstall을
+binary 설치, 전용 account, `Delegate=yes`, `DelegateSubgroup=manager`, 첫 시작 무재시도, owner-only UDS,
+manager membership, 설정 보존, stop과 uninstall을
 실제 systemd로 검증한다. 기존 unit, binary, user 또는 group이 있으면 이를 변경하지 않고 종료 코드 77로
 건너뛴다. CI에서는 종료 코드 77도 성공으로 처리하지 않는다.
 

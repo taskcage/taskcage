@@ -3,6 +3,9 @@
 //! 이 모듈은 아직 작업을 실행하지 않는다. 실행 기능이 추가될 때도 여기서 확인한
 //! 위임 경로 안에서만 작업 cgroup을 만들도록 경로 규칙을 한곳에 모아 둔다.
 
+#[cfg(any(target_os = "linux", test))]
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::num::NonZeroU64;
@@ -36,6 +39,10 @@ use crate::preflight::VerifiedEnvironment;
 
 pub const DEFAULT_CGROUP_MOUNT: &str = "/sys/fs/cgroup";
 pub const SELF_CGROUP_FILE: &str = "/proc/self/cgroup";
+#[cfg(target_os = "linux")]
+const CGROUP_ROOT_ENV: &str = "TASKCAGE_CGROUP_ROOT";
+#[cfg(target_os = "linux")]
+const DELEGATE_SUBGROUP_ENV: &str = "TASKCAGE_CGROUP_DELEGATE_SUBGROUP";
 const MANAGER_CGROUP_NAME: &str = "manager";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,12 +75,62 @@ pub enum CgroupPathError {
         "현재 cgroup {actual:?}은 기존 TaskCage manager일 수 있어 부모 위임 경로를 명시해야 합니다"
     )]
     ParentRootRequiredForManager { actual: PathBuf },
+    #[error("지원하지 않는 systemd delegate subgroup입니다: {configured:?}")]
+    UnsupportedDelegateSubgroup { configured: OsString },
+    #[error(
+        "systemd delegate subgroup membership이 다릅니다: 설정 {configured:?}, 실제 {actual:?}"
+    )]
+    DelegateSubgroupMismatch {
+        configured: OsString,
+        actual: PathBuf,
+    },
     #[error("manager 이동 결과가 다릅니다: 예상 {expected:?}, 실제 {actual:?}")]
     ManagerMembershipMismatch { expected: PathBuf, actual: PathBuf },
     #[error("작업 식별자 형식이 올바르지 않습니다: {0:?}")]
     InvalidJobId(String),
     #[error("같은 작업 식별자의 cgroup이 이미 있습니다: {job_id:?}, 경로 {path:?}")]
     DuplicateJobId { job_id: String, path: PathBuf },
+}
+
+#[cfg(target_os = "linux")]
+/// 명시 root가 없으면 systemd가 배치한 manager membership의 부모를 위임 root로 사용한다.
+pub(crate) fn configured_root_from_environment() -> Result<Option<PathBuf>, CgroupPathError> {
+    if let Some(root) = std::env::var_os(CGROUP_ROOT_ENV) {
+        return Ok(Some(PathBuf::from(root)));
+    }
+
+    let Some(subgroup) = std::env::var_os(DELEGATE_SUBGROUP_ENV) else {
+        return Ok(None);
+    };
+    let membership = read_unified_membership()?;
+    infer_delegate_root(Path::new(DEFAULT_CGROUP_MOUNT), &membership, &subgroup).map(Some)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn infer_delegate_root(
+    mount: &Path,
+    membership: &Path,
+    subgroup: &OsStr,
+) -> Result<PathBuf, CgroupPathError> {
+    if subgroup != OsStr::new(MANAGER_CGROUP_NAME) {
+        return Err(CgroupPathError::UnsupportedDelegateSubgroup {
+            configured: subgroup.to_os_string(),
+        });
+    }
+    if membership.file_name() != Some(subgroup) {
+        return Err(CgroupPathError::DelegateSubgroupMismatch {
+            configured: subgroup.to_os_string(),
+            actual: membership.to_path_buf(),
+        });
+    }
+    let Some(parent) = membership.parent() else {
+        return Err(CgroupPathError::DelegateSubgroupMismatch {
+            configured: subgroup.to_os_string(),
+            actual: membership.to_path_buf(),
+        });
+    };
+    let relative = parent.strip_prefix("/").unwrap_or(parent);
+    Ok(mount.join(relative))
 }
 
 #[derive(Debug, Error)]
@@ -1072,6 +1129,54 @@ mod tests {
         assert!(parse_unified_membership("2:cpu:/legacy\n").is_err());
         assert!(parse_unified_membership("0::/a\n0::/b\n").is_err());
         assert!(parse_unified_membership("0::/a (deleted)\n").is_err());
+    }
+
+    #[test]
+    fn delegate_subgroup_infers_its_parent_as_the_delegated_root() {
+        let root = infer_delegate_root(
+            Path::new(DEFAULT_CGROUP_MOUNT),
+            Path::new("/system.slice/taskcaged.service/manager"),
+            OsStr::new(MANAGER_CGROUP_NAME),
+        )
+        .unwrap();
+
+        assert_eq!(
+            root,
+            PathBuf::from("/sys/fs/cgroup/system.slice/taskcaged.service")
+        );
+    }
+
+    #[test]
+    fn delegate_subgroup_rejects_a_membership_outside_the_configured_subgroup() {
+        let actual = Path::new("/system.slice/taskcaged.service");
+        let error = infer_delegate_root(
+            Path::new(DEFAULT_CGROUP_MOUNT),
+            actual,
+            OsStr::new(MANAGER_CGROUP_NAME),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CgroupPathError::DelegateSubgroupMismatch { configured, actual: found }
+                if configured == MANAGER_CGROUP_NAME && found == actual
+        ));
+    }
+
+    #[test]
+    fn delegate_subgroup_rejects_an_unknown_subgroup() {
+        let error = infer_delegate_root(
+            Path::new(DEFAULT_CGROUP_MOUNT),
+            Path::new("/system.slice/taskcaged.service/other"),
+            OsStr::new("other"),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CgroupPathError::UnsupportedDelegateSubgroup { configured }
+                if configured == "other"
+        ));
     }
 
     #[test]

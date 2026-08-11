@@ -53,6 +53,8 @@ sudo -n systemctl is-active --quiet taskcaged.service
 [[ "$(systemctl show taskcaged.service --property=User --value)" == "taskcage" ]]
 [[ "$(systemctl show taskcaged.service --property=Group --value)" == "taskcage" ]]
 [[ "$(systemctl show taskcaged.service --property=Delegate --value)" == "yes" ]]
+[[ "$(systemctl show taskcaged.service --property=DelegateSubgroup --value)" == "manager" ]]
+[[ "$(systemctl show taskcaged.service --property=NRestarts --value)" == "0" ]]
 [[ "$(sudo -n stat -c '%a %U %G' /run/taskcage/taskcaged.sock)" == "600 taskcage taskcage" ]]
 
 status_json="$(sudo -n -u taskcage /usr/local/bin/taskcaged status \
