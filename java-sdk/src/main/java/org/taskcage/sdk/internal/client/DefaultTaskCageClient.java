@@ -90,7 +90,7 @@ public final class DefaultTaskCageClient implements TaskCageClient {
         cpuMax.put("periodMicros", budget.cpuMax().periodMicros());
         limits.put("memoryMaxBytes", budget.memoryMaxBytes());
         limits.put("pidsMax", budget.pidsMax());
-        limits.put("wallTimeLimitMs", budget.wallTimeLimit().toMillis());
+        limits.put("wallTimeLimitMs", budget.wallTimeLimitMillis());
         ObjectNode output = payload.putObject("output");
         output.put("stdoutTailMaxBytes", budget.stdoutTailMaxBytes());
         output.put("stderrTailMaxBytes", budget.stderrTailMaxBytes());
