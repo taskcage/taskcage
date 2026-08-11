@@ -2,15 +2,15 @@
 
 TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`에 작업을 제출·조회·취소하도록 제공하는 Java 17+ 라이브러리다. cgroup과 Protocol v1의 세부 사항은 SDK 내부에 숨기고 명령, 자원 예산, 상태와 결과를 Java 타입으로 제공한다.
 
-> **상태:** `0.1.0` Local Public Alpha 후보. Central용 POM·sources·Javadoc·서명 bundle은
-> release pipeline에서 생성하지만, 첫 release가 완료되기 전까지 Maven Central에는 존재하지 않는다.
+> **상태:** `0.1.0` Local Public Alpha prerelease가
+> [Maven Central](https://repo1.maven.org/maven2/org/taskcage/taskcage-java-sdk/0.1.0/)에 공개됐다.
 > `0.x`는 초기 개발 버전이며 SDK는 Spring Boot에 의존하지 않는다.
 
 현재 SDK는 Local UDS transport와 Raw Command 모델을 구현한다. Execution Profile과 인증된 Remote
 transport를 포함한 제품 방향은 [제품 철학과 용어](../docs/product-philosophy.md)에서 정의하며 아직 구현된
 SDK 기능이 아니다.
 
-## 역할과 v0.1 목표
+## 역할과 v0.1 결과
 
 이 모듈은 특정 외부 도구를 위한 Binding이 아니라 **TaskCage Java Core SDK**다. Java 객체와
 Protocol v1 사이를 변환하고, `taskcaged` 연결과 Task 생명주기를 공통 API로 제공한다.
@@ -26,7 +26,7 @@ Java application
               taskcaged
 ```
 
-`0.1.0`의 목표는 처음 사용하는 Java 개발자가 10분 안에 SDK를 설치하고, 같은 Linux
+`0.1.0`은 처음 사용하는 Java 개발자가 10분 안에 SDK를 설치하고, 같은 Linux
 호스트의 `taskcaged`를 통해 FFmpeg 작업 하나를 안전하게 실행하는 것이다. Profile·Bundle·Hub보다
 현재 검증된 Raw Command 실행, 자원 제한과 프로세스 트리 정리를 쉽게 사용하는 경험을 우선한다.
 
@@ -46,7 +46,7 @@ Java application
 - 설치된 daemon과 실제 FFmpeg를 사용하는 별도 Local reference E2E
 
 현재 호출자는 필요할 때 자원 예산을 override하고 `run()`으로 동기 실행하거나 `TaskHandle`로 상태
-조회·완료 대기·취소를 수행할 수 있다. Maven Central 배포는 아직 완료되지 않았다.
+조회·완료 대기·취소를 수행할 수 있다. SDK는 Maven Central의 공개 좌표로 설치할 수 있다.
 
 ## v0.1 Public Alpha 범위
 
@@ -133,7 +133,7 @@ Java Core SDK:  0.1.0
 Protocol:       v1
 ```
 
-Maven Central에는 다음 좌표로 main, sources와 javadoc artifact를 서명해 배포하는 것을 목표로 한다.
+Maven Central에는 다음 좌표로 main, sources와 javadoc artifact가 서명되어 공개됐다.
 
 ```kotlin
 dependencies {
@@ -165,8 +165,8 @@ workflow로 검증한다.
    계약을 구현하고 가짜 daemon 단위 테스트와 실제 daemon reference E2E를 추가했다.
 3. **동기 실행 — 구현됨:** `run()`을 `TaskHandle` 계약 위에 구현하고 실제 daemon·FFmpeg E2E로 정상
    종료·Task wall-time timeout·출력 결과를 검증했다. 명시적 취소는 `TaskHandle.cancel()`을 사용한다.
-4. **배포 준비 — 구현됨:** Maven Central publishing, 서명, POM metadata, sources/javadoc artifact와
-   독립 `java-sdk-v0.1.0` 검증 pipeline을 구성했다. 실제 publication은 tag release 작업이다.
+4. **배포 — 완료:** Maven Central publishing, 서명, POM metadata, sources/javadoc artifact와 독립
+   `java-sdk-v0.1.0` 검증 pipeline을 구성하고 첫 공개를 완료했다.
 5. **첫 사용자 경로 — 구현됨:** FFmpeg reference workflow와 설치·daemon 연결·실행·문제 해결 문서를
    제공한다.
 
@@ -196,7 +196,7 @@ workflow로 검증한다.
 ./gradlew build
 ```
 
-일반 빌드 결과는 `build/libs/`에 생성된다. Public Alpha가 Maven Central에 공개되면 다음 좌표를 사용한다.
+일반 빌드 결과는 `build/libs/`에 생성된다. 공개된 Public Alpha는 다음 좌표로 설치한다.
 
 ```kotlin
 dependencies {

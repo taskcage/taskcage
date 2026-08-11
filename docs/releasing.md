@@ -3,8 +3,9 @@
 이 문서는 maintainer가 TaskCage daemon과 Java SDK를 검증·배포하고 실패를 복구하는 절차를 정의한다.
 공개 버전과 tag 규칙은 [릴리스 및 버전 정책](release-policy.md)을 따른다.
 
-현재 준비된 첫 컴포넌트 버전은 각각 `0.1.0`이다. workflow를 merge하는 것만으로 tag, GitHub Release 또는
-Maven Central artifact가 생성되지는 않는다.
+첫 컴포넌트 버전 `0.1.0`은 GitHub prerelease와 Maven Central에 공개됐다. 공개된 tag와 artifact는
+수정하거나 재사용하지 않는다. 아래 `0.1.0` 명령은 첫 릴리스 절차를 기록한 예시이며 다시 실행하는 명령이
+아니다. 후속 릴리스는 manifest를 새 patch 또는 minor 버전으로 변경하고 모든 예시의 버전을 함께 바꾼다.
 
 ## 컴포넌트 계약
 
