@@ -145,11 +145,14 @@ done
 bash -n "${package_root}/packaging/ubuntu/install-taskcaged.sh"
 bash -n "${package_root}/packaging/ubuntu/uninstall-taskcaged.sh"
 
+release_metadata_path="${test_root}/releases.json"
+printf '[{"draft":false,"tag_name":"taskcaged-v0.0.1"},{"draft":true,"tag_name":"taskcaged-v99.0.0"},{"draft":false,"tag_name":"taskcaged-v%s"}]\n' \
+  "${release_version}" >"${release_metadata_path}"
+
 installation_attempted=true
-sudo -n bash "${bootstrap_installer_path}" \
-  --version "${release_version}" \
-  --release-url "file://$(dirname -- "${archive_path}")" \
-  --start
+sudo -n env TASKCAGE_RELEASE_API_URL="file://${release_metadata_path}" \
+  bash "${bootstrap_installer_path}" \
+  --release-url "file://$(dirname -- "${archive_path}")"
 sudo -n systemd-analyze verify taskcaged.service
 
 for _ in {1..100}; do
