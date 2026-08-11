@@ -1,0 +1,12 @@
+.git
+.github
+.idea
+.vscode
+target
+java-sdk/.gradle
+java-sdk/build
+dev/container/runtime
+*.iml
+*.log
+*.pid
+*.sock

@@ -47,6 +47,10 @@ bash integration-tests/cgroup-runner-smoke.sh
 
 Java SDK와 실제 데몬의 공개 API 계약은 `java-sdk`의 `e2eTest`에서 별도로 검증한다. Protocol v1의 JSON 형태는 [`protocol-fixtures/v1`](../protocol-fixtures/v1/README.md)이 고정한다.
 
+로컬에서 별도 Linux VM 준비 없이 실제 daemon과 Java E2E를 실행하려면
+[`dev/container`](../dev/container/README.md)의 개발 전용 Docker Compose 환경을 사용할 수 있다. 이
+환경은 privileged container를 사용하므로 최종 Linux host 검증을 대체하지 않는다.
+
 ## Ubuntu systemd service smoke test
 
 ```bash

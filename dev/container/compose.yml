@@ -1,0 +1,54 @@
+name: taskcage-dev
+
+services:
+  taskcaged:
+    image: taskcage-dev/taskcaged:local
+    build:
+      context: ../..
+      dockerfile: dev/container/Dockerfile
+      target: daemon
+    privileged: true
+    cgroup: private
+    pid: host
+    network_mode: none
+    stop_grace_period: 15s
+    volumes:
+      - taskcage-runtime:/run/taskcage
+      - taskcage-work:/taskcage-work
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/taskcaged
+        - status
+        - --socket
+        - /run/taskcage/taskcaged.sock
+        - --timeout-ms
+        - "1000"
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  java-e2e:
+    image: taskcage-dev/java-e2e:local
+    profiles: [test]
+    build:
+      context: ../..
+      dockerfile: dev/container/Dockerfile
+      target: java-e2e
+    depends_on:
+      taskcaged:
+        condition: service_healthy
+    pid: host
+    environment:
+      JAVA_TOOL_OPTIONS: -Djava.io.tmpdir=/taskcage-work
+      TASKCAGE_SOCKET: /run/taskcage/taskcaged.sock
+      TASKCAGE_GHOST_TREE: /usr/local/libexec/taskcage/ghost-tree
+      TASKCAGE_OUTPUT_FLOOD: /usr/local/libexec/taskcage/output-flood
+    volumes:
+      - taskcage-runtime:/run/taskcage
+      - taskcage-work:/taskcage-work
+
+volumes:
+  taskcage-runtime:
+  taskcage-work:
