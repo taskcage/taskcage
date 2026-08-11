@@ -141,9 +141,9 @@ Runner와 lifecycle을 사용해야 한다.
     "profile": {
       "id": "org.taskcage.ffmpeg.transcode",
       "version": "1.0.0",
-      "digest": "sha256:01d667dade05be47cbd6fc285aa4e13acde1961a2516b82b6b72c35591890199"
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
     },
-    "bundleDigest": "sha256:e11581dc8be885c4fed87fb9705200d4b2390fe85be2ff8af4ac49e01346f477",
+    "bundleDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     "inputs": {
       "format": "MP4",
       "quality": 23,
@@ -171,8 +171,8 @@ Runner와 lifecycle을 사용해야 한다.
 ```
 
 이 예시는 [`submit-profile-valid.json`](../protocol-fixtures/v2/submit-profile-valid.json)과 같다. 문서와
-fixture의 Profile과 Bundle digest는 `product-fixtures/v1/` manifest의 canonical SHA-256과 일치한다.
-실제 payload가 없는 input/output Artifact와 resolved plan digest만 wire 형식을 위한 결정적인 값이다.
+fixture의 반복 숫자 digest는 wire 문법을 고정하는 결정적 가짜 값이며, 예시 JSON bytes의 실제 SHA-256이
+아니다. 실제 import와 submit은 importer가 계산한 digest를 사용한다.
 
 ### 공통 field
 
@@ -185,11 +185,7 @@ fixture의 Profile과 Bundle digest는 `product-fixtures/v1/` manifest의 canoni
 - alias나 `latest`는 허용하지 않는다.
 - `inputs`와 `artifacts`의 key는 Profile이 선언한 slot 이름과 정확히 일치해야 한다. 누락, 추가 field,
   대소문자 차이는 `INVALID_PROFILE_INPUT`이다.
-- 이름은 ASCII 소문자로 시작하고 이후 ASCII 영문자·숫자·`_`·`-`를 허용하는
-  `[a-z][A-Za-z0-9_-]{0,63}` 형식이다.
-- canonical Product Alpha manifest와 request에서 정수는 소수점·지수 표기 없이
-  `-9007199254740991`~`9007199254740991`의 exact I-JSON 범위여야 한다. 이 범위는 Rust와 Java가
-  RFC 8785 bytes와 digest를 반올림 없이 동일하게 계산하기 위한 v0.2 제한이다.
+- 이름은 ASCII 소문자로 시작하는 `[a-z][a-z0-9_-]{0,63}` 형식이다.
 
 ### scalar input
 
@@ -199,7 +195,7 @@ fixture의 Profile과 Bundle digest는 `product-fixtures/v1/` manifest의 canoni
 | Profile `type` | 요청 JSON 값 | 규칙 |
 |---|---|---|
 | `string` | string | UTF-8, NUL 없음, 최대 4,096 bytes. Profile의 `enum`, `minLength`, `maxLength`를 적용한다. |
-| `integer` | number | exact I-JSON 정수 범위이며 Profile의 `minimum`, `maximum`을 적용한다. |
+| `integer` | number | 지수·소수점 없는 JSON 정수이며 signed 64-bit 범위다. Profile의 `minimum`, `maximum`을 적용한다. |
 | `boolean` | boolean | JSON `true` 또는 `false`만 허용한다. |
 
 요청에 `{ "type": "string", "value": "MP4" }` 같은 typed wrapper를 넣지 않는다. `null`, floating
@@ -268,13 +264,13 @@ Profile 기본값 자체가 daemon 배포 정책을 넘으면 해당 제출은 `
     "profile": {
       "id": "org.taskcage.ffmpeg.transcode",
       "version": "1.0.0",
-      "digest": "sha256:01d667dade05be47cbd6fc285aa4e13acde1961a2516b82b6b72c35591890199"
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
     },
-    "bundleDigest": "sha256:e11581dc8be885c4fed87fb9705200d4b2390fe85be2ff8af4ac49e01346f477",
+    "bundleDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     "runtimePackage": {
       "id": "org.taskcage.ffmpeg",
       "version": "7.1.1-taskcage.1",
-      "digest": "sha256:49c3a4b8e209375766448c957f06740fae824c12f002eda5f69e700d9e4425c6"
+      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
     },
     "resolvedPlanDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
     "effectiveResources": {
@@ -322,13 +318,13 @@ Profile 기본값 자체가 daemon 배포 정책을 넘으면 해당 제출은 `
     "profile": {
       "id": "org.taskcage.ffmpeg.transcode",
       "version": "1.0.0",
-      "digest": "sha256:01d667dade05be47cbd6fc285aa4e13acde1961a2516b82b6b72c35591890199"
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
     },
-    "bundleDigest": "sha256:e11581dc8be885c4fed87fb9705200d4b2390fe85be2ff8af4ac49e01346f477",
+    "bundleDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     "runtimePackage": {
       "id": "org.taskcage.ffmpeg",
       "version": "7.1.1-taskcage.1",
-      "digest": "sha256:49c3a4b8e209375766448c957f06740fae824c12f002eda5f69e700d9e4425c6"
+      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
     },
     "resolvedPlanDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
     "submittedAt": "2026-08-11T12:00:00Z",
@@ -351,13 +347,13 @@ Profile 기본값 자체가 daemon 배포 정책을 넘으면 해당 제출은 `
     "profile": {
       "id": "org.taskcage.ffmpeg.transcode",
       "version": "1.0.0",
-      "digest": "sha256:01d667dade05be47cbd6fc285aa4e13acde1961a2516b82b6b72c35591890199"
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
     },
-    "bundleDigest": "sha256:e11581dc8be885c4fed87fb9705200d4b2390fe85be2ff8af4ac49e01346f477",
+    "bundleDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     "runtimePackage": {
       "id": "org.taskcage.ffmpeg",
       "version": "7.1.1-taskcage.1",
-      "digest": "sha256:49c3a4b8e209375766448c957f06740fae824c12f002eda5f69e700d9e4425c6"
+      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
     },
     "resolvedPlanDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
     "terminationReason": "EXITED",
@@ -404,13 +400,13 @@ Profile 기본값 자체가 daemon 배포 정책을 넘으면 해당 제출은 `
     "profile": {
       "id": "org.taskcage.ffmpeg.transcode",
       "version": "1.0.0",
-      "digest": "sha256:01d667dade05be47cbd6fc285aa4e13acde1961a2516b82b6b72c35591890199"
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
     },
-    "bundleDigest": "sha256:e11581dc8be885c4fed87fb9705200d4b2390fe85be2ff8af4ac49e01346f477",
+    "bundleDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     "runtimePackage": {
       "id": "org.taskcage.ffmpeg",
       "version": "7.1.1-taskcage.1",
-      "digest": "sha256:49c3a4b8e209375766448c957f06740fae824c12f002eda5f69e700d9e4425c6"
+      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
     },
     "resolvedPlanDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
     "profileOutcome": "FAILED",
@@ -604,19 +600,10 @@ Execution Profile은 Bundle 안에 포함되며 요청자가 program, raw argv, 
 }
 ```
 
-v0.2 manifest JSON은 최대 1 MiB다. identity는 최대 255 ASCII bytes, 선언한 input slot 합계는 최대 64개,
-scalar enum과 `choice.cases`는 각각 최대 256개, Artifact `mediaTypes`는 최대 64개다. Profile environment는
-최대 64개이며 key/value UTF-8 bytes 합계가 65,536 이하여야 한다. Runtime Package는 file 4,096개,
-`libraryPaths` 64개, license metadata 256개를 상한으로 한다.
-
 Profile schema는 `additionalProperties: false` 의미로 검증한다. Profile JSON 자기 안에는 자신의 digest를
 넣지 않는다. importer는 Profile object 전체를 RFC 8785로 canonicalize한 bytes에서 `profileDigest`를
 계산하고 Bundle catalog와 request/result identity에서 보유한다. `entrypoint`는 Runtime Package root 기준
 canonical relative path이며 executable regular file이어야 한다.
-
-Profile `environment`는 daemon이나 caller의 환경을 상속하지 않는 고정 UTF-8 map이다. `PATH`와 `LD_`로
-시작하는 key는 Profile에서 금지한다. package executable과 loader search path는 daemon이 검증된 Runtime
-Package handle로 구성하며 host PATH, `LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH` fallback을 허용하지 않는다.
 
 output slot은 정확히 하나이고 `required: true`여야 한다. `fileName`은 slash가 없는 canonical path segment
 하나이며 caller input으로 대체할 수 없다. daemon은 이 값과 `taskId`로 published relative path를 만든다.
@@ -903,7 +890,7 @@ Bundle은 Profile과 고정된 Runtime Package 참조를 담는 작은 불변 JS
   "runtimePackage": {
     "id": "org.taskcage.ffmpeg",
     "version": "7.1.1-taskcage.1",
-    "digest": "sha256:49c3a4b8e209375766448c957f06740fae824c12f002eda5f69e700d9e4425c6"
+    "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
   },
   "platform": {
     "os": "linux",
@@ -919,8 +906,8 @@ Bundle은 Profile과 고정된 Runtime Package 참조를 담는 작은 불변 JS
   },
   "integrity": {
     "algorithm": "SHA-256",
-    "profileDigest": "sha256:01d667dade05be47cbd6fc285aa4e13acde1961a2516b82b6b72c35591890199",
-    "runtimePackageDigest": "sha256:49c3a4b8e209375766448c957f06740fae824c12f002eda5f69e700d9e4425c6"
+    "profileDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "runtimePackageDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
   }
 }
 ```

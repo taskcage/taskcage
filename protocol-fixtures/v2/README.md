@@ -16,6 +16,5 @@ fixture가 고정하는 계약은 다음과 같다.
 - Profile 입력, Artifact, Runtime Package 무결성 오류는 Task 실행 전의 구조화된 오류로 반환한다.
 
 이 fixture는 Rust daemon과 언어별 SDK가 함께 구현해야 할 계약을 정의하지만, 현재 release에서 해당 기능을
-이미 사용할 수 있다는 availability 주장은 아니다. Profile, Runtime Package와 Bundle digest는
-`product-fixtures/v1/` manifest의 canonical SHA-256과 일치한다. input/output Artifact와 resolved plan
-digest는 실제 payload가 없는 wire 예시를 위한 결정적인 값이다.
+이미 사용할 수 있다는 availability 주장은 아니다. 예시 digest는 문법 검증을 위한 결정적인 가짜 값이며
+fixture 파일 bytes의 실제 SHA-256 값이 아니다.
