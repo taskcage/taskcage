@@ -17,6 +17,7 @@ pub mod codec;
 mod deadline;
 mod deployment_policy;
 pub mod digest;
+mod execution_plan;
 #[cfg(target_os = "linux")]
 mod executor;
 mod fail_stop;
