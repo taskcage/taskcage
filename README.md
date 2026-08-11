@@ -2,11 +2,13 @@
 
 TaskCage는 신뢰된 외부 프로세스를 작업 단위로 실행하고, Linux cgroup v2로 자원과 수명주기를 관리하는 경량 런타임이다.
 
-> **상태:** daemon과 Java SDK `0.1.0` Local Public Alpha 후보. 컴포넌트별 release pipeline은 준비됐지만,
-> 아직 tag·GitHub Release·Maven Central artifact는 공개되지 않았다. `0.x`는 초기 개발 버전이다.
+> **상태:** daemon과 Java SDK `0.1.0` Local Public Alpha prerelease가 공개됐다. daemon은
+> [GitHub Release](https://github.com/taskcage/taskcage/releases/tag/taskcaged-v0.1.0), Java SDK는
+> [Maven Central](https://repo1.maven.org/maven2/org/taskcage/taskcage-java-sdk/0.1.0/)에서 설치할 수 있다.
+> `0.x`는 초기 개발 버전이며 공개 API와 운영 계약이 이후 minor 버전에서 변경될 수 있다.
 
 제품의 장기 방향과 표준 용어는 [제품 철학과 용어](docs/product-philosophy.md)에서 정의한다. 이 README는
-현재 구현하고 검증한 PoC 범위를 설명한다.
+현재 구현하고 공개한 Local Public Alpha 범위를 설명한다.
 
 ## 해결하려는 문제
 
@@ -24,7 +26,7 @@ TaskCage는 외부 프로세스를 단일 PID가 아니라 제한과 결과를 �
 공개 계약에서 Task 하나는 task cgroup root 하나를 소유한다. 내부 하위 cgroup은 별도 공개 실행 단위가
 아니며 daemon 구현 세부사항이다.
 
-## 현재 PoC
+## 현재 Public Alpha
 
 ```text
 Java application
@@ -75,22 +77,24 @@ TaskCage는 신뢰할 수 없는 코드를 격리하는 보안 sandbox가 아니
 
 ## 데몬 실행
 
-첫 GitHub Release가 공개된 뒤에는 Ubuntu 24.04 x86-64 host에서 bootstrap installer로 최신 공개 daemon을
-설치하고 바로 시작할 수 있다. 내려받은 스크립트의 내용을 확인한 뒤 root로 실행한다.
+Ubuntu 24.04 x86-64 host에서는 버전이 고정된 GitHub Release의 bootstrap installer로 daemon을 설치하고
+바로 시작할 수 있다. 내려받은 스크립트의 내용을 확인한 뒤 root로 실행한다.
 
 ```bash
-curl --fail --location \
-  --output install-taskcaged.sh \
-  https://raw.githubusercontent.com/taskcage/taskcage/main/packaging/ubuntu/install-taskcaged-release.sh
+VERSION=0.1.0
+RELEASE_URL="https://github.com/taskcage/taskcage/releases/download/taskcaged-v${VERSION}"
+
+curl --fail --location --output install-taskcaged.sh \
+  "${RELEASE_URL}/install-taskcaged.sh"
 less install-taskcaged.sh
-sudo bash install-taskcaged.sh
+sudo bash install-taskcaged.sh --version "${VERSION}"
 ```
 
 재현 가능한 설치는 버전을 명시하고, 설정을 검토하기 전 service를 시작하지 않으려면
 `--no-autostart`를 추가한다.
 
 ```bash
-sudo bash install-taskcaged.sh --version 0.1.0 --no-autostart
+sudo bash install-taskcaged.sh --version "${VERSION}" --no-autostart
 sudoedit /etc/taskcage/taskcaged.env
 sudo systemctl enable --now taskcaged.service
 ```
@@ -141,12 +145,12 @@ cgroup fail-stop으로 `UNREADY`인 경우 종료 코드는 `0`이 아니다. Ub
 
 ## Java SDK 사용
 
-SDK의 첫 공개 좌표는 `org.taskcage:taskcage-java-sdk:0.1.0`으로 준비했다. 첫 release가
-완료되기 전까지는 Maven Central에서 받을 수 없으므로 `java-sdk/`에서 직접 빌드해 사용한다.
+Java SDK `0.1.0`은 Maven Central에 공개됐다. Gradle 프로젝트에서는 다음 좌표를 추가한다.
 
-```bash
-cd java-sdk
-./gradlew build
+```kotlin
+dependencies {
+    implementation("org.taskcage:taskcage-java-sdk:0.1.0")
+}
 ```
 
 현재 공개 API는 동기 실행, 비동기 제출·조회, bounded 완료 대기와 취소를 제공한다. 실행 파일과 작업
@@ -222,9 +226,9 @@ bash integration-tests/release-artifact-smoke.sh \
 
 ## 단계별 제품 방향
 
-다음 목표는 Local UDS와 Raw Command를 실제 Ubuntu 호스트에 설치해 반복 사용할 수 있는 Local Public
-Alpha다. 서비스 계정과 systemd cgroup 위임, readiness와 구조화된 log, 배포 정책과 기본 자원 계약,
-하나의 대표 workload, release artifact와 Java 배포 경로를 먼저 검증한다.
+`0.1.0`은 Local UDS와 Raw Command를 실제 Ubuntu 호스트에서 사용할 수 있는 Local Public Alpha 기준선이다.
+다음 목표는 외부 사용자의 설치 시간, 실제 workload와 운영 피드백을 수집하고 호환되는 결함은 patch
+버전으로 수정하는 것이다.
 
 Execution Profile과 Artifact 계약은 Public Alpha를 최소 3명의 외부 사용자가 사용하고,
 Profile·Package·Artifact로 일반화할 반복 요구가 2개 이상 확인되면 Local Product Alpha에서 도입한다.
