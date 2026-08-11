@@ -181,7 +181,8 @@ bash integration-tests/cgroup-runner-smoke.sh
 bash integration-tests/ffmpeg-reference-workflow.sh
 bash integration-tests/release-artifact-smoke.sh \
   0.1.0 path/to/taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz \
-  path/to/taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+  path/to/taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+  path/to/install-taskcaged.sh
 ```
 
 환경 요구사항과 E2E 실행법은 [Linux 통합 시험](integration-tests/README.md)에 정리되어 있다.

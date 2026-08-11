@@ -80,7 +80,8 @@ owner-only UDS를 사용한다. Java Core SDK가 FFmpeg를 shell 없이 직접 �
 bash integration-tests/release-artifact-smoke.sh \
   0.1.0 \
   dist/taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz \
-  dist/taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+  dist/taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+  dist/install-taskcaged.sh
 ```
 
 `release-artifact-smoke.sh`는 checksum과 archive layout을 먼저 검사하고, archive 안의 installer와 prebuilt

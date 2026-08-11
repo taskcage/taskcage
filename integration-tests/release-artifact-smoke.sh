@@ -19,8 +19,8 @@ for required_command in python3 readlink sha256sum tar; do
     exit 1
   }
 done
-if [[ $# -ne 3 ]]; then
-  echo "ERROR: usage: release-artifact-smoke.sh VERSION ARCHIVE CHECKSUM" >&2
+if [[ $# -ne 4 ]]; then
+  echo "ERROR: usage: release-artifact-smoke.sh VERSION ARCHIVE CHECKSUM BOOTSTRAP_INSTALLER" >&2
   exit 1
 fi
 if [[ -e /etc/systemd/system/taskcaged.service || -e /usr/local/bin/taskcaged ]] || \
@@ -34,6 +34,8 @@ archive_path="$(readlink -f "$2")"
 readonly archive_path
 checksum_path="$(readlink -f "$3")"
 readonly checksum_path
+bootstrap_installer_path="$(readlink -f "$4")"
+readonly bootstrap_installer_path
 readonly archive_root="taskcage-v${release_version}-x86_64-unknown-linux-gnu"
 
 [[ -f "${archive_path}" && ! -L "${archive_path}" ]] || {
@@ -44,6 +46,11 @@ readonly archive_root="taskcage-v${release_version}-x86_64-unknown-linux-gnu"
   echo "ERROR: release checksum must be a regular file" >&2
   exit 1
 }
+[[ -f "${bootstrap_installer_path}" && ! -L "${bootstrap_installer_path}" ]] || {
+  echo "ERROR: release bootstrap installer must be a regular file" >&2
+  exit 1
+}
+bash -n "${bootstrap_installer_path}"
 
 (
   cd "$(dirname -- "${archive_path}")"
@@ -139,8 +146,9 @@ bash -n "${package_root}/packaging/ubuntu/install-taskcaged.sh"
 bash -n "${package_root}/packaging/ubuntu/uninstall-taskcaged.sh"
 
 installation_attempted=true
-sudo -n "${package_root}/packaging/ubuntu/install-taskcaged.sh" \
-  --binary "${package_root}/bin/taskcaged" \
+sudo -n bash "${bootstrap_installer_path}" \
+  --version "${release_version}" \
+  --release-url "file://$(dirname -- "${archive_path}")" \
   --start
 sudo -n systemd-analyze verify taskcaged.service
 
