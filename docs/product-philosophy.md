@@ -87,10 +87,6 @@ TaskCage Bundle은 Package binary를 포함하지 않는다. Runtime Package는 
 저장하며, 여러 Bundle이 같은 digest의 Runtime Package를 공유할 수 있다. Bundle과 Package의 무결성
 검증이 끝나기 전에는 Task를 시작하지 않는다.
 
-Bundle과 Package signature는 장기 authenticity 계약이다. v0.2 형식 초안은 local administrator가
-설치한 read-only store와 SHA-256 digest 무결성까지만 구현하며 publisher trust root와 서명 검증은 후속
-단계로 남긴다.
-
 ### 5. 안전은 제한 없는 fallback보다 중요하다
 
 cgroup controller, 권한, 원자적 task cgroup entry 또는 제한값 read-back을 확인할 수 없다면 제한 없는
@@ -107,11 +103,10 @@ TaskCage Core SDK
 └─ Later: authenticated Remote Transport
 ```
 
-현재 공개 기준선은 Local UDS와 Protocol v1 Raw Command를 제공하는 `0.1.0 Local Public Alpha`다. 다음
-minor 단계인 `v0.2 Product Alpha`는 Local Execution Profile, Artifact, Runtime Package와 Bundle 계약을
-FFmpeg vertical slice 하나로 구현한다. 기존 Raw Command와 Protocol v1의 의미는 유지하며 Profile 실행은
-additive Protocol v2로 분리한다. 구체적인 wire·파일·수명주기 계약은
-[v0.2 Product Alpha 계약](api-product-alpha.md)에서 정의한다.
+현재 병합된 기준선은 Local UDS와 Protocol v1이다. 다음 단계인 Local Public Alpha는 Raw Command 실행을
+설치·운영·관찰 가능한 제품 경로로 검증한다. 최소 3명의 외부 사용자가 이 경로를 사용하고,
+Profile·Package·Artifact로 일반화할 반복 요구가 2개 이상 확인된 뒤에 Local Product Alpha 계약을
+확장한다.
 
 Remote는 Local Public Alpha나 Local Product Alpha의 선행 조건이 아니다. Local 계약과 실제 원격 수요,
 trust boundary와 운영 근거가 확보된 뒤에 topology와 wire를 선택한다. daemon의 직접 listener와
