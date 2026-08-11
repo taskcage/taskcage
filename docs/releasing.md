@@ -101,7 +101,8 @@ tag push는 `.github/workflows/release-daemon.yml`을 시작한다. workflow는 
 - tag version과 `daemon/Cargo.toml`이 일치함
 - GitHub가 tag signature를 verified로 판정함
 - tag commit이 `origin/main` history에 포함됨
-- Rust format, clippy와 전체 test
+- stable Rust의 format, clippy와 전체 test
+- 선언된 최소 Rust 버전의 locked dependency 전체 test
 - cgroup preflight·runner, systemd와 FFmpeg compatibility gate
 
 ### 2. draft 검토와 공개

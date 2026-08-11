@@ -69,7 +69,7 @@ TaskCage는 다음 조건을 실행 계약으로 취급한다.
 ## 지원 환경
 
 - Linux cgroup v2
-- Rust 1.85 이상
+- Rust 1.88 이상
 - Java 17 이상
 - PoC 검증 환경: Ubuntu 24.04
 
