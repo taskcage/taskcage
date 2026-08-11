@@ -29,7 +29,6 @@ pub(crate) use self::registry::{RegistryError, SubmitFailure, SubmitObservation}
 use crate::cancellation::{CancellationRuntime, RunningCancellation, cancellation_channel};
 #[cfg(any(target_os = "linux", test))]
 use crate::capacity::{TaskCapacity, TaskCapacityPermit, TaskCapacitySettings};
-use crate::execution_plan::ResolvedExecutionPlan;
 #[cfg(any(target_os = "linux", test))]
 use crate::fail_stop::{
     ActiveExecution, CleanupFailureReport, FailStopCoordinator, FailStopSettings,
@@ -226,7 +225,8 @@ struct SubmitExecutionConfig {
     submitted_at: String,
     start_time: TaskStartTimeSource,
     cleanup_timeout: Duration,
-    plan: ResolvedExecutionPlan,
+    command: crate::protocol::CommandSpec,
+    budget: ResourceBudget,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -379,7 +379,8 @@ impl SubmitCoordinator {
                             submitted_at: config.submitted_at,
                             start_time: config.start_time,
                             cleanup_timeout: config.cleanup_timeout,
-                            plan: config.plan,
+                            command: config.command,
+                            budget: config.budget,
                         },
                         running_sender,
                         cancellation,
@@ -574,7 +575,8 @@ where
                 submitted_at: metadata.submitted_at,
                 start_time: metadata.start_time,
                 cleanup_timeout: metadata.cleanup_timeout,
-                plan: owner.request().plan().clone(),
+                command: owner.request().payload().command.clone(),
+                budget: owner.request().budget().clone(),
             };
             let (initial_sender, initial_receiver) = oneshot::channel();
             tokio::spawn(run_owner(
@@ -893,7 +895,7 @@ where
 #[derive(Debug, Clone)]
 pub(crate) struct ValidatedSubmit {
     payload: SubmitTaskPayload,
-    plan: ResolvedExecutionPlan,
+    budget: ResourceBudget,
 }
 
 impl ValidatedSubmit {
@@ -925,8 +927,7 @@ impl ValidatedSubmit {
         validate_command(&payload)?;
         let budget =
             ResourceBudget::try_from_protocol(payload.limits.clone(), payload.output.clone())?;
-        let plan = ResolvedExecutionPlan::from_validated_raw(&payload.command, budget);
-        Ok(Self { payload, plan })
+        Ok(Self { payload, budget })
     }
 
     pub(crate) fn payload(&self) -> &SubmitTaskPayload {
@@ -934,11 +935,7 @@ impl ValidatedSubmit {
     }
 
     pub(crate) fn budget(&self) -> &ResourceBudget {
-        self.plan.budget()
-    }
-
-    fn plan(&self) -> &ResolvedExecutionPlan {
-        &self.plan
+        &self.budget
     }
 }
 
@@ -1228,7 +1225,7 @@ mod tests {
     fn verified_running(config: &SubmitExecutionConfig) -> VerifiedRunningTask {
         VerifiedRunningTask::new(
             running(&config.task_id),
-            config.plan.budget().verified_effective_limits_for_test(),
+            config.budget.verified_effective_limits_for_test(),
         )
     }
 

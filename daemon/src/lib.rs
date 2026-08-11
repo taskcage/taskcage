@@ -15,7 +15,6 @@ mod cleanup_fault;
 pub mod codec;
 mod deadline;
 mod deployment_policy;
-mod execution_plan;
 #[cfg(target_os = "linux")]
 mod executor;
 mod fail_stop;

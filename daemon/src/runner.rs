@@ -1,13 +1,15 @@
 //! 검증된 자원 예산으로 atomic runner를 실행하고 단일 task lifecycle을 완료한다.
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::future::pending;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::cancellation::CancellationRuntime;
 use crate::cgroup::{CgroupError, CgroupManager, JobCgroup, JobStats, VerifiedCgroupLimits};
 use crate::deadline::MonotonicDeadline;
-use crate::execution_plan::{ResolvedCommand, ResolvedExecutable, ResolvedExecutionPlan};
 #[cfg(not(test))]
 use crate::executor::spawn_in_cgroup;
 #[cfg(test)]
@@ -22,7 +24,8 @@ use crate::lifecycle::{
 };
 use crate::output::{CaptureLimits, CapturedOutput};
 use crate::preflight::VerifiedEnvironment;
-use crate::protocol::TaskPayload;
+use crate::protocol::{CommandSpec, TaskPayload};
+use crate::resource_budget::ResourceBudget;
 use crate::submit::{RunnerPermit, TaskStartTime, TaskStartTimeSource, VerifiedRunningTask};
 use crate::{Error, Result};
 
@@ -54,7 +57,8 @@ pub(crate) struct TaskRunConfig {
     pub(crate) submitted_at: String,
     pub(crate) start_time: TaskStartTimeSource,
     pub(crate) cleanup_timeout: Duration,
-    pub(crate) plan: ResolvedExecutionPlan,
+    pub(crate) command: CommandSpec,
+    pub(crate) budget: ResourceBudget,
 }
 
 #[derive(Debug)]
@@ -163,23 +167,17 @@ impl TaskRunner {
             });
         }
 
-        let TaskRunConfig {
-            task_id,
-            submitted_at,
-            start_time,
-            cleanup_timeout,
-            plan,
-        } = config;
-        let (command, budget) = plan.into_parts();
-        let prepared =
-            prepare_resolved_command(command).map_err(TaskRunFailure::with_reusable_capacity)?;
+        let prepared = prepare_protocol_command(&config.command)
+            .map_err(TaskRunFailure::with_reusable_capacity)?;
+        let task_id = config.task_id;
+        let submitted_at = config.submitted_at;
         let mut lifecycle = None;
         let execution = ExecutionConfig {
             job_id: task_id.clone(),
-            limits: budget.cgroup_limits(),
-            wall_timeout: budget.wall_timeout(),
-            cleanup_timeout,
-            capture_limits: budget.capture_limits(),
+            limits: config.budget.cgroup_limits(),
+            wall_timeout: config.budget.wall_timeout(),
+            cleanup_timeout: config.cleanup_timeout,
+            capture_limits: config.budget.capture_limits(),
             prepared,
         };
 
@@ -188,7 +186,7 @@ impl TaskRunner {
             execution,
             cancellation,
             Some(&self.fail_stop),
-            start_time,
+            config.start_time,
             |start_time, verified_cgroup_limits| {
                 let running_lifecycle = SingleTaskLifecycle::running(
                     task_id.clone(),
@@ -199,7 +197,9 @@ impl TaskRunner {
                 // execve 성공을 확인한 뒤 실제로 완료할 같은 lifecycle의 snapshot만 공개한다.
                 let _ = running_sender.send(VerifiedRunningTask::new(
                     running_lifecycle.snapshot(),
-                    budget.verified_effective_limits(verified_cgroup_limits),
+                    config
+                        .budget
+                        .verified_effective_limits(verified_cgroup_limits),
                 ));
                 lifecycle = Some(running_lifecycle);
             },
@@ -244,13 +244,20 @@ impl TaskRunner {
     }
 }
 
-fn prepare_resolved_command(command: ResolvedCommand) -> Result<PreparedCommand> {
-    let (executable, arguments, working_directory, environment) = command.into_parts();
-    let ResolvedExecutable::RawPath(executable) = executable;
-    let mut argv = Vec::with_capacity(arguments.len() + 1);
-    argv.push(executable);
-    argv.extend(arguments);
-    Ok(PreparedCommand::new(argv, &working_directory, environment)?)
+fn prepare_protocol_command(command: &CommandSpec) -> Result<PreparedCommand> {
+    let mut argv = Vec::with_capacity(command.args.len() + 1);
+    argv.push(OsString::from(&command.program));
+    argv.extend(command.args.iter().map(OsString::from));
+    let environment = command
+        .environment
+        .iter()
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+        .collect::<BTreeMap<_, _>>();
+    Ok(PreparedCommand::new(
+        argv,
+        &PathBuf::from(&command.working_directory),
+        environment,
+    )?)
 }
 
 pub(crate) struct ExecutionConfig {
