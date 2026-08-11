@@ -1,0 +1,10 @@
+{
+  "protocolVersion": 2,
+  "requestId": "66666666-6666-4666-8666-666666666666",
+  "type": "error",
+  "payload": {
+    "code": "ARTIFACT_DIGEST_MISMATCH",
+    "message": "artifacts.source does not match the declared digest and size",
+    "retryable": false
+  }
+}

@@ -1,0 +1,150 @@
+{
+  "schemaVersion": "taskcage.bundle/v0alpha1",
+  "id": "org.taskcage.ffmpeg.transcode",
+  "version": "1.0.0",
+  "profile": {
+    "schemaVersion": "taskcage.execution-profile/v0alpha1",
+    "id": "org.taskcage.ffmpeg.transcode",
+    "version": "1.0.0",
+    "entrypoint": "bin/ffmpeg",
+    "inputSchema": {
+      "scalars": {
+        "format": {
+          "type": "string",
+          "required": true,
+          "enum": ["MP4"]
+        },
+        "quality": {
+          "type": "integer",
+          "required": true,
+          "enum": [18, 23, 28]
+        },
+        "stripMetadata": {
+          "type": "boolean",
+          "required": true
+        }
+      },
+      "artifacts": {
+        "source": {
+          "kind": "LOCAL_INPUT",
+          "required": true,
+          "mediaTypes": ["video/quicktime", "video/mp4", "video/x-matroska"],
+          "maxSizeBytes": 2147483648
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "artifacts": {
+        "result": {
+          "kind": "LOCAL_FILE",
+          "required": true,
+          "mediaType": "video/mp4",
+          "maxSizeBytes": 2147483648,
+          "fileName": "result.mp4",
+          "publication": "TASK_SCOPED"
+        }
+      },
+      "additionalProperties": false
+    },
+    "argv": [
+      { "kind": "literal", "value": "-hide_banner" },
+      { "kind": "literal", "value": "-loglevel" },
+      { "kind": "literal", "value": "error" },
+      { "kind": "literal", "value": "-nostdin" },
+      { "kind": "literal", "value": "-n" },
+      { "kind": "literal", "value": "-i" },
+      { "kind": "artifact", "slot": "source" },
+      { "kind": "literal", "value": "-map" },
+      { "kind": "literal", "value": "0:v:0?" },
+      { "kind": "literal", "value": "-map" },
+      { "kind": "literal", "value": "0:a:0?" },
+      { "kind": "literal", "value": "-c:v" },
+      { "kind": "literal", "value": "libx264" },
+      { "kind": "literal", "value": "-crf" },
+      {
+        "kind": "choice",
+        "input": "quality",
+        "cases": [
+          { "equals": 18, "value": "18" },
+          { "equals": 23, "value": "23" },
+          { "equals": 28, "value": "28" }
+        ]
+      },
+      { "kind": "literal", "value": "-c:a" },
+      { "kind": "literal", "value": "aac" },
+      { "kind": "literal", "value": "-map_metadata" },
+      {
+        "kind": "choice",
+        "input": "stripMetadata",
+        "cases": [
+          { "equals": true, "value": "-1" },
+          { "equals": false, "value": "0" }
+        ]
+      },
+      { "kind": "literal", "value": "-movflags" },
+      { "kind": "literal", "value": "+faststart" },
+      { "kind": "literal", "value": "-f" },
+      {
+        "kind": "choice",
+        "input": "format",
+        "cases": [
+          { "equals": "MP4", "value": "mp4" }
+        ]
+      },
+      { "kind": "artifact", "slot": "result" }
+    ],
+    "environment": {
+      "LANG": "C",
+      "LC_ALL": "C"
+    },
+    "resourcePolicy": {
+      "defaults": {
+        "limits": {
+          "cpuMax": { "quotaMicros": 100000, "periodMicros": 100000 },
+          "memoryMaxBytes": 536870912,
+          "pidsMax": 32,
+          "wallTimeLimitMs": 120000
+        },
+        "output": {
+          "stdoutTailMaxBytes": 65536,
+          "stderrTailMaxBytes": 65536
+        }
+      },
+      "maxOverrides": {
+        "limits": {
+          "cpuMax": { "quotaMicros": 200000, "periodMicros": 100000 },
+          "memoryMaxBytes": 2147483648,
+          "pidsMax": 128,
+          "wallTimeLimitMs": 900000
+        },
+        "output": {
+          "stdoutTailMaxBytes": 65536,
+          "stderrTailMaxBytes": 65536
+        }
+      }
+    }
+  },
+  "runtimePackage": {
+    "id": "org.taskcage.ffmpeg",
+    "version": "7.1.1-taskcage.1",
+    "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "platform": {
+    "os": "linux",
+    "architecture": "x86_64",
+    "abi": "gnu"
+  },
+  "policy": {
+    "resourcePolicySource": "PROFILE",
+    "artifactInputs": ["LOCAL_INPUT"],
+    "artifactOutputs": ["LOCAL_FILE"],
+    "outputPublication": "PROFILE_DECLARED",
+    "overwritePublishedArtifacts": false
+  },
+  "integrity": {
+    "algorithm": "SHA-256",
+    "profileDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "runtimePackageDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+  }
+}

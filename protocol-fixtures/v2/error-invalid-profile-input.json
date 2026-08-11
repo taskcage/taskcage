@@ -1,0 +1,10 @@
+{
+  "protocolVersion": 2,
+  "requestId": "55555555-5555-4555-8555-555555555555",
+  "type": "error",
+  "payload": {
+    "code": "INVALID_PROFILE_INPUT",
+    "message": "inputs.quality must be one of the profile-declared integer choices",
+    "retryable": false
+  }
+}

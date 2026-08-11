@@ -1,0 +1,76 @@
+{
+  "schemaVersion": "taskcage.runtime-package/v0alpha1",
+  "id": "org.taskcage.ffmpeg",
+  "version": "7.1.1-taskcage.1",
+  "platform": {
+    "os": "linux",
+    "architecture": "x86_64",
+    "abi": "gnu",
+    "libc": {
+      "family": "glibc",
+      "minimumVersion": "2.39"
+    }
+  },
+  "entrypoint": "bin/ffmpeg",
+  "libraryPaths": ["lib"],
+  "files": [
+    {
+      "path": "bin/ffmpeg",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sizeBytes": 82739200,
+      "mode": "0555"
+    },
+    {
+      "path": "lib/libavcodec.so.61",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sizeBytes": 15123456,
+      "mode": "0444"
+    },
+    {
+      "path": "lib/libavformat.so.61",
+      "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "sizeBytes": 3817472,
+      "mode": "0444"
+    },
+    {
+      "path": "lib/libavutil.so.59",
+      "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "sizeBytes": 1048576,
+      "mode": "0444"
+    },
+    {
+      "path": "lib/libswresample.so.5",
+      "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "sizeBytes": 442368,
+      "mode": "0444"
+    },
+    {
+      "path": "lib/libswscale.so.8",
+      "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "sizeBytes": 737280,
+      "mode": "0444"
+    },
+    {
+      "path": "share/licenses/ffmpeg/COPYING.GPLv2",
+      "digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "sizeBytes": 18092,
+      "mode": "0444"
+    },
+    {
+      "path": "share/sbom.spdx.json",
+      "digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "sizeBytes": 16384,
+      "mode": "0444"
+    }
+  ],
+  "licenses": [
+    {
+      "spdxId": "GPL-2.0-or-later",
+      "path": "share/licenses/ffmpeg/COPYING.GPLv2"
+    }
+  ],
+  "sbom": {
+    "format": "SPDX-JSON-2.3",
+    "path": "share/sbom.spdx.json"
+  }
+}

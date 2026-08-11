@@ -1,0 +1,10 @@
+{
+  "protocolVersion": 2,
+  "requestId": "77777777-7777-4777-8777-777777777777",
+  "type": "error",
+  "payload": {
+    "code": "PACKAGE_INTEGRITY_FAILED",
+    "message": "the cached Runtime Package does not match its manifest",
+    "retryable": false
+  }
+}
