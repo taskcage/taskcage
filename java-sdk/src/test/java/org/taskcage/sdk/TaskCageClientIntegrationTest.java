@@ -111,6 +111,22 @@ class TaskCageClientIntegrationTest {
     }
 
     @Test
+    void submitRejectsAnInvalidWireDurationBeforeAnyDaemonRequest() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskAcceptedResponse);
+                TaskCageClient client = TaskCageClient.connect(configFor(server))) {
+            ExternalCommand command = new ExternalCommand(
+                    absoluteTestPath("true"), List.of(), absoluteTestPath("tmp"), java.util.Map.of());
+
+            assertThrows(IllegalArgumentException.class, () -> client.submit(new TaskSpec(
+                    command,
+                    new ResourceBudget(new CpuQuota(100_000, 100_000), 64L * 1024 * 1024, 8,
+                            Duration.ofNanos(1), 1_024, 1_024))));
+
+            assertTrue(server.requests().isEmpty());
+        }
+    }
+
+    @Test
     void submitUsesCallerSuppliedIdempotencyKey() throws Exception {
         UUID requestId = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
         try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::taskAcceptedResponse);

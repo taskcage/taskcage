@@ -1,6 +1,7 @@
 package org.taskcage.sdk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.file.Path;
 import java.time.Duration;
@@ -31,5 +32,42 @@ class ResourceBudgetTest {
                 Map.of());
 
         assertEquals(ResourceBudget.safeDefaults(), new TaskSpec(command).budget());
+    }
+
+    @Test
+    void rejectsPositiveDurationsThatAreNotWholeMilliseconds() {
+        assertThrows(IllegalArgumentException.class, () -> budgetWithWallTime(Duration.ofNanos(1)));
+        assertThrows(IllegalArgumentException.class, () -> budgetWithWallTime(Duration.ofNanos(1_000_001)));
+    }
+
+    @Test
+    void acceptsPositiveWholeMillisecondsIncludingTheWireBoundary() {
+        ResourceBudget oneMillisecond = budgetWithWallTime(Duration.ofMillis(1));
+        ResourceBudget maximumMilliseconds = budgetWithWallTime(Duration.ofMillis(Long.MAX_VALUE));
+
+        assertEquals(1, oneMillisecond.wallTimeLimitMillis());
+        assertEquals(Long.MAX_VALUE, maximumMilliseconds.wallTimeLimitMillis());
+    }
+
+    @Test
+    void rejectsZeroAndNegativeDurations() {
+        assertThrows(IllegalArgumentException.class, () -> budgetWithWallTime(Duration.ZERO));
+        assertThrows(IllegalArgumentException.class, () -> budgetWithWallTime(Duration.ofMillis(-1)));
+    }
+
+    @Test
+    void rejectsDurationsThatOverflowTheWireMillisecondInteger() {
+        assertThrows(IllegalArgumentException.class,
+                () -> budgetWithWallTime(Duration.ofSeconds(Long.MAX_VALUE)));
+    }
+
+    private static ResourceBudget budgetWithWallTime(Duration wallTimeLimit) {
+        return new ResourceBudget(
+                new CpuQuota(100_000, 100_000),
+                512L * 1024 * 1024,
+                32,
+                wallTimeLimit,
+                65_536,
+                65_536);
     }
 }

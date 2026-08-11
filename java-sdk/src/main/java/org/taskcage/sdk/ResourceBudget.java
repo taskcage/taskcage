@@ -14,9 +14,31 @@ public record ResourceBudget(CpuQuota cpuMax, long memoryMaxBytes, long pidsMax,
         if (memoryMaxBytes <= 0 || pidsMax <= 0 || wallTimeLimit.isZero() || wallTimeLimit.isNegative()) {
             throw new IllegalArgumentException("resource limits must be positive");
         }
+        requirePositiveWholeMilliseconds(wallTimeLimit);
         if (stdoutTailMaxBytes < 1 || stderrTailMaxBytes < 1 || stdoutTailMaxBytes > 65_536
                 || stderrTailMaxBytes > 65_536 || stdoutTailMaxBytes + stderrTailMaxBytes > 131_072) {
             throw new IllegalArgumentException("output tail limits must comply with Protocol v1");
+        }
+    }
+
+    /** Returns the wall-time limit in Protocol v1's positive whole-millisecond representation. */
+    public long wallTimeLimitMillis() {
+        return requirePositiveWholeMilliseconds(wallTimeLimit);
+    }
+
+    private static long requirePositiveWholeMilliseconds(Duration duration) {
+        if (duration.getNano() % 1_000_000 != 0) {
+            throw new IllegalArgumentException("wallTimeLimit must be an exact whole number of milliseconds");
+        }
+        try {
+            long milliseconds = duration.toMillis();
+            if (milliseconds <= 0) {
+                throw new IllegalArgumentException("wallTimeLimit must be positive");
+            }
+            return milliseconds;
+        } catch (ArithmeticException exception) {
+            throw new IllegalArgumentException(
+                    "wallTimeLimit must fit in a signed 64-bit millisecond value", exception);
         }
     }
 
