@@ -63,16 +63,11 @@ artifact를 Maven Central, PyPI, npm 또는 안정 배포 채널에 올리지 �
 
 제품 버전과 Protocol 버전은 같은 의미가 아니다.
 
-| component | 지원 Protocol |
-|---|---|
-| taskcaged `0.1.x` | v1 Raw Command |
-| Java SDK `0.1.x` | v1 Raw Command |
-| taskcaged `0.2.x` 목표 | v1 Raw Command, v2 Local Profile |
-| Java SDK `0.2.x` 목표 | v1 Raw Command, v2 Local Profile |
-
-`0.2.x`의 Protocol v2 지원은 Protocol v1을 제거하지 않는다. Java SDK `0.2.x`도 Raw Command에는 v1을
-사용하고 Profile 작업에만 v2를 사용한다. 따라서 daemon과 SDK의 minor version이 달라도 공통 Protocol과
-요청 종류가 있으면 그 경로는 호환될 수 있다.
+```text
+taskcaged 0.1.0   ─┐
+taskcaged 0.2.0   ─┼─ Protocol v1
+Java SDK 0.1.0    ─┘
+```
 
 daemon과 SDK는 제품 버전 문자열이 아니라 서로 지원하는 Protocol version의 교집합으로 연결 가능 여부를
 판정한다. Protocol field, 상태, 오류 코드 또는 의미를 변경하면 API 명세, daemon, SDK와 fixture를 같은

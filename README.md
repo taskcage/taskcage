@@ -8,7 +8,7 @@ TaskCage는 신뢰된 외부 프로세스를 작업 단위로 실행하고, Linu
 > `0.x`는 초기 개발 버전이며 공개 API와 운영 계약이 이후 minor 버전에서 변경될 수 있다.
 
 제품의 장기 방향과 표준 용어는 [제품 철학과 용어](docs/product-philosophy.md)에서 정의한다. 이 README는
-현재 구현하고 공개한 Local Public Alpha 범위와 다음 `v0.2 Product Alpha` 계약을 설명한다.
+현재 구현하고 공개한 Local Public Alpha 범위를 설명한다.
 
 ## 해결하려는 문제
 
@@ -215,30 +215,26 @@ bash integration-tests/release-artifact-smoke.sh \
 
 - [제품 철학과 용어](docs/product-philosophy.md)
 - [Protocol v1 API 명세](docs/api-mvp.md)
-- [v0.2 Product Alpha 계약](docs/api-product-alpha.md)
 - [Java SDK](java-sdk/README.md)
 - [Ubuntu daemon 설치](docs/install-ubuntu.md)
 - [릴리스 및 버전 정책](docs/release-policy.md)
 - [릴리스 운영](docs/releasing.md)
 - [FFmpeg Local Raw Command reference](docs/reference-ffmpeg.md)
 - [Linux 통합 시험](integration-tests/README.md)
-- [Protocol v1 fixture](protocol-fixtures/v1/README.md)
-- [Product Alpha Protocol v2 fixture](protocol-fixtures/v2/README.md)
-- [Profile·Package·Bundle fixture](product-fixtures/v1/README.md)
+- [Protocol fixture](protocol-fixtures/v1/README.md)
 - [기여 가이드](CONTRIBUTING.md)
 
 ## 단계별 제품 방향
 
 `0.1.0`은 Local UDS와 Raw Command를 실제 Ubuntu 호스트에서 사용할 수 있는 Local Public Alpha 기준선이다.
-다음 minor 단계인 `v0.2 Product Alpha`는 Local Execution Profile, 범용 `ProfileRequest`, Local Artifact
-입출력 계약, digest 기반 Runtime Package cache, TaskCage Bundle 형식 초안과 FFmpeg Profile Binding 하나를
-완성한다. 재현 가능한 실행은 버전 관리되는 Execution Profile과 digest로 고정한 Runtime Package를
-사용한다. Bundle은 Package binary가 아니라 Profile, Runtime Package ref + digest, 플랫폼·정책·무결성
-정보를 담으며, 여러 Bundle이 같은 Package digest를 공유할 수 있다.
+다음 목표는 외부 사용자의 설치 시간, 실제 workload와 운영 피드백을 수집하고 호환되는 결함은 patch
+버전으로 수정하는 것이다.
 
-`v0.2`는 기존 Raw Command와 Protocol v1 의미를 유지하면서 Profile 실행을 additive Protocol v2로
-추가한다. 완료 기준과 비목표는 [v0.2 Product Alpha 계약](docs/api-product-alpha.md)과
-[GitHub milestone](https://github.com/taskcage/taskcage/milestone/1)에서 추적한다.
+Execution Profile과 Artifact 계약은 Public Alpha를 최소 3명의 외부 사용자가 사용하고,
+Profile·Package·Artifact로 일반화할 반복 요구가 2개 이상 확인되면 Local Product Alpha에서 도입한다.
+재현 가능한 실행은 버전 관리되는 Execution Profile과 digest로 고정한 Runtime Package를 사용한다.
+Bundle은 Package binary가 아니라 Profile, Runtime Package ref + digest, 플랫폼·정책·무결성 정보를
+담으며, 여러 Bundle이 같은 Package digest를 공유할 수 있다.
 
 Remote는 Local Public Alpha나 Local Product Alpha의 선행 조건이 아니다. Local 계약과 실제 원격 수요가
 검증된 뒤 topology·wire·인증·권한·Artifact 전달·backpressure·응답 유실 의미를 별도 설계와 API 계약으로
