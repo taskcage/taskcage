@@ -10,6 +10,7 @@ target/
 
 # TaskCage 로컬 실행 파일
 .taskcage/
+dev/container/runtime/
 *.pid
 *.sock
 *.log
