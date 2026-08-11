@@ -771,10 +771,10 @@ impl RestartGuard {
             return Vec::new();
         }
         let mut errors = Vec::new();
-        if self.daemon_root.exists() {
-            if let Err(error) = fs::write(self.daemon_root.join("cgroup.kill"), "1\n") {
-                errors.push(format!("시험 cgroup.kill: {error}"));
-            }
+        if self.daemon_root.exists()
+            && let Err(error) = fs::write(self.daemon_root.join("cgroup.kill"), "1\n")
+        {
+            errors.push(format!("시험 cgroup.kill: {error}"));
         }
         stop_child(self.first.as_mut());
         stop_child(self.rejected.as_mut());
