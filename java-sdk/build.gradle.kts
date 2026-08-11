@@ -101,6 +101,12 @@ configurations[ffmpegE2eTest.runtimeOnlyConfigurationName].extendsFrom(configura
 
 tasks.test {
     useJUnitPlatform()
+    val protocolFixturesDir = layout.projectDirectory.dir("../protocol-fixtures")
+    inputs.dir(protocolFixturesDir)
+    systemProperty(
+        "taskcage.protocolFixturesDir",
+        protocolFixturesDir.asFile.toPath().toAbsolutePath().normalize().toString(),
+    )
 }
 
 tasks.register<Test>("e2eTest") {

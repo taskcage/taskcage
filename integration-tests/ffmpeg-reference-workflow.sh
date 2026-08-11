@@ -100,6 +100,7 @@ count_task_cgroups() {
 task_cgroups_before="$(count_task_cgroups)"
 
 sudo -n cp -R java-sdk "${reference_root}/java-sdk"
+sudo -n cp -R protocol-fixtures "${reference_root}/protocol-fixtures"
 sudo -n install -D -m 0755 target/debug/ffmpeg-tree "${reference_root}/bin/ffmpeg-tree"
 sudo -n install -d -m 0700 "${reference_root}/home" "${reference_root}/gradle-home" "${reference_root}/work"
 sudo -n chown -R taskcage:taskcage "${reference_root}"
