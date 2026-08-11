@@ -19,12 +19,16 @@
 원격 전송, 작업 대기열, 스트리밍, 영속 Registry, 재시작 뒤 작업 재개와 Profile·Bundle 실행은 이 Local
 Protocol v1의 범위가 아니다.
 
+`v0.2 Product Alpha`의 Local Profile 실행은 Protocol v1을 재해석하지 않고 별도 additive Protocol v2로
+정의한다. Protocol v1 Raw Command client와의 호환 경계와 v2 계약은
+[v0.2 Product Alpha 계약](api-product-alpha.md)을 따른다.
+
 ### 후속 Remote 경계
 
-현재 Protocol v1과 다음 Local Public Alpha는 Local UDS를 사용한다. Remote는 Local Public Alpha나
-Local Product Alpha의 선행 조건이 아니며, Local Product Alpha의 Profile·Artifact 계약과 실제 원격
-수요가 검증된 뒤에 별도 설계와 API 계약으로 다룬다. 현재 Protocol v1 framing을 network에 그대로
-노출하지 않으며, Remote 구현 전에 다음 계약을 함께 승인해야 한다.
+현재 Protocol v1 Local Public Alpha와 v0.2 Local Product Alpha는 Local UDS를 사용한다. Remote는 두
+단계의 선행 조건이 아니며, Local Product Alpha의 Profile·Artifact 계약과 실제 원격 수요가 검증된 뒤에
+별도 설계와 API 계약으로 다룬다. 현재 Protocol framing을 network에 그대로 노출하지 않으며, Remote
+구현 전에 다음 계약을 함께 승인해야 한다.
 
 - caller authentication과 Task·Profile·Artifact·Raw Command별 authorization
 - 전송 암호화, server identity, credential rotation과 revocation
