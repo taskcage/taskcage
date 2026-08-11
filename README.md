@@ -75,10 +75,30 @@ TaskCage는 신뢰할 수 없는 코드를 격리하는 보안 sandbox가 아니
 
 ## 데몬 실행
 
-실제 cgroup v2 위임이 준비된 Linux 환경에서 먼저 사전 조건을 검사한다.
+첫 GitHub Release가 공개된 뒤에는 Ubuntu 24.04 x86-64 host에서 bootstrap installer로 최신 공개 daemon을
+설치하고 바로 시작할 수 있다. 내려받은 스크립트의 내용을 확인한 뒤 root로 실행한다.
 
-Ubuntu 24.04의 release archive 설치와 반복 가능한 service 구성은
-[Ubuntu daemon 설치](docs/install-ubuntu.md)를 따른다.
+```bash
+curl --fail --location \
+  --output install-taskcaged.sh \
+  https://raw.githubusercontent.com/taskcage/taskcage/main/packaging/ubuntu/install-taskcaged-release.sh
+less install-taskcaged.sh
+sudo bash install-taskcaged.sh
+```
+
+재현 가능한 설치는 버전을 명시하고, 설정을 검토하기 전 service를 시작하지 않으려면
+`--no-autostart`를 추가한다.
+
+```bash
+sudo bash install-taskcaged.sh --version 0.1.0 --no-autostart
+sudoedit /etc/taskcage/taskcaged.env
+sudo systemctl enable --now taskcaged.service
+```
+
+bootstrap installer는 선택한 GitHub Release의 archive와 SHA-256 checksum을 받아 검증한 뒤 packaged
+installer를 실행한다. 상세 설치·재설치·제거 절차는 [Ubuntu daemon 설치](docs/install-ubuntu.md)를 따른다.
+
+source checkout에서 실행할 때는 실제 cgroup v2 위임이 준비된 Linux 환경에서 먼저 사전 조건을 검사한다.
 
 ```bash
 cargo build --workspace
@@ -181,7 +201,8 @@ bash integration-tests/cgroup-runner-smoke.sh
 bash integration-tests/ffmpeg-reference-workflow.sh
 bash integration-tests/release-artifact-smoke.sh \
   0.1.0 path/to/taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz \
-  path/to/taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+  path/to/taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+  path/to/install-taskcaged.sh
 ```
 
 환경 요구사항과 E2E 실행법은 [Linux 통합 시험](integration-tests/README.md)에 정리되어 있다.

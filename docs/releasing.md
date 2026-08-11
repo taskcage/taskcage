@@ -23,6 +23,7 @@ daemon GitHub prerelease에는 다음 파일을 게시한다.
 ```text
 taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
 taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+install-taskcaged.sh
 ```
 
 archive는 `bin/taskcaged`, Ubuntu installer·uninstaller, systemd unit, 기본 설정, README와 LICENSE를
@@ -104,11 +105,12 @@ tag push는 `.github/workflows/release-daemon.yml`을 시작한다. workflow는 
 
 ### 2. draft 검토와 공개
 
-검증이 끝나면 workflow가 daemon archive와 checksum을 생성해 Draft GitHub prerelease에 첨부한다.
+검증이 끝나면 workflow가 daemon archive, checksum과 bootstrap installer를 생성해 Draft GitHub prerelease에
+첨부한다.
 
 승인 전에 maintainer는 다음을 확인한다.
 
-- archive와 checksum 파일명이 tag version과 일치함
+- archive와 checksum 파일명이 tag version과 일치하고 bootstrap installer가 함께 첨부됨
 - Actions artifact와 Draft asset의 checksum이 일치함
 - 릴리스 노트에 사용자 변경, 지원 플랫폼, Protocol과 알려진 제한이 포함됨
 - 깨끗한 Ubuntu 24.04 x86-64 환경에서 archive smoke test가 통과함

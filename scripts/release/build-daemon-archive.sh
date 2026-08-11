@@ -32,9 +32,12 @@ readonly output_directory
 readonly archive_root="taskcage-v${release_version}-x86_64-unknown-linux-gnu"
 readonly archive_path="${output_directory}/${archive_root}.tar.gz"
 readonly checksum_path="${archive_path}.sha256"
+readonly bootstrap_installer_path="${output_directory}/install-taskcaged.sh"
 
 [[ ! -e "${archive_path}" ]] || fail "release archive already exists: ${archive_path}"
 [[ ! -e "${checksum_path}" ]] || fail "release checksum already exists: ${checksum_path}"
+[[ ! -e "${bootstrap_installer_path}" ]] || \
+  fail "release bootstrap installer already exists: ${bootstrap_installer_path}"
 
 staging_directory="$(mktemp -d /tmp/taskcage-release.XXXXXX)"
 resolved_staging_directory="$(readlink -f "${staging_directory}")"
@@ -80,6 +83,8 @@ tar \
   sha256sum "$(basename -- "${archive_path}")" >"$(basename -- "${checksum_path}")"
   sha256sum --check "$(basename -- "${checksum_path}")"
 )
+install -m 0755 packaging/ubuntu/install-taskcaged-release.sh "${bootstrap_installer_path}"
 
 echo "archive=${archive_path}"
 echo "checksum=${checksum_path}"
+echo "installer=${bootstrap_installer_path}"

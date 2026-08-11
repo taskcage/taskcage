@@ -34,6 +34,37 @@ target process도 이 account로 실행되므로 필요한 binary와 작업 디�
 아래의 `VERSION`은 설치하려는 daemon release로 바꾼다. `0.1.0`은 pipeline의 첫 후보 버전이며 release가
 공개되기 전에는 URL이 존재하지 않는다.
 
+bootstrap installer를 사용하면 최신 공개 Release 선택, archive 다운로드, checksum 검증, 설치와 service
+시작을 한 번에 수행할 수 있다. Docker convenience installer와 마찬가지로 내려받은 내용을 검토한 뒤
+실행한다. 현재 `0.x` prerelease도 공개된 `taskcaged-v*` Release라면 최신 버전 선택 대상이다.
+
+```bash
+curl --fail --location \
+  --output install-taskcaged.sh \
+  https://raw.githubusercontent.com/taskcage/taskcage/main/packaging/ubuntu/install-taskcaged-release.sh
+sudo bash install-taskcaged.sh
+```
+
+특정 버전을 재현 가능하게 설치하려면 해당 Release에 첨부된 bootstrap installer와 `--version`을 사용한다.
+
+```bash
+VERSION=0.1.0
+RELEASE_URL="https://github.com/taskcage/taskcage/releases/download/taskcaged-v${VERSION}"
+
+curl --fail --location --remote-name "${RELEASE_URL}/install-taskcaged.sh"
+sudo bash install-taskcaged.sh --version "${VERSION}"
+```
+
+설정 파일을 검토하기 전에는 service를 시작하지 않으려면 `--no-autostart`를 사용한다.
+
+```bash
+sudo bash install-taskcaged.sh --version "${VERSION}" --no-autostart
+sudoedit /etc/taskcage/taskcaged.env
+sudo systemctl enable --now taskcaged.service
+```
+
+수동 설치나 bootstrap installer 자체를 검증하려면 아래처럼 archive와 checksum을 직접 받을 수 있다.
+
 ```bash
 VERSION=0.1.0
 ASSET="taskcage-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
