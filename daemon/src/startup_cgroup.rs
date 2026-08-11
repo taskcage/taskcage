@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::cgroup::{CgroupPaths, StartupCgroupPlacement, validate_job_id};
+use crate::cgroup::{
+    CgroupPaths, StartupCgroupPlacement, configured_root_from_environment, validate_job_id,
+};
 use crate::deadline::MonotonicDeadline;
 
 const CGROUP2_SUPER_MAGIC: libc::c_long = 0x6367_7270;
@@ -58,7 +60,13 @@ pub(crate) struct StartupRecoveryReport {
 pub(crate) fn recover_from_environment(
     timeout: Duration,
 ) -> Result<StartupRecoveryReport, StartupCgroupError> {
-    let configured = std::env::var_os("TASKCAGE_CGROUP_ROOT").map(PathBuf::from);
+    let configured = configured_root_from_environment().map_err(|error| {
+        StartupCgroupError::new(
+            "cgroup 위임 경로 설정",
+            "/proc/self/cgroup",
+            error.to_string(),
+        )
+    })?;
     recover(timeout, configured)
 }
 

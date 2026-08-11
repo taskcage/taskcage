@@ -3,6 +3,19 @@
 TaskCage는 daemon과 SDK의 버전을 독립적으로 관리한다. 이 문서는 공개 컴포넌트 릴리스에서 사용자에게
 영향을 주는 변경과 호환성 정보를 기록한다.
 
+## Unreleased
+
+### 수정
+
+- Ubuntu service가 systemd의 `DelegateSubgroup=manager`를 사용해 daemon을 처음부터 manager cgroup에
+  배치한다. daemon은 이 opt-in 설정에서 현재 membership의 부모를 위임 root로 검증하므로 WSL cold boot
+  뒤 첫 시작의 `219/CGROUP` 재시도를 피하면서 기존 fail-closed 경계를 유지한다.
+
+### 호환성
+
+- 배포되는 Ubuntu service는 `DelegateSubgroup=`를 지원하는 systemd 254 이상이 필요하다. 지원 기준인
+  Ubuntu 24.04는 이 요구사항을 충족한다.
+
 ## TaskCage Java SDK 0.1.0 - 2026-08-11
 
 TaskCage Java Core SDK의 첫 Local Public Alpha 릴리스다. Java 애플리케이션이 같은 Linux host의

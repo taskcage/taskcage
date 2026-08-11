@@ -23,7 +23,7 @@ use thiserror::Error;
 
 use crate::cgroup::CgroupPathError;
 #[cfg(target_os = "linux")]
-use crate::cgroup::{CgroupPaths, StartupCgroupPlacement};
+use crate::cgroup::{CgroupPaths, StartupCgroupPlacement, configured_root_from_environment};
 
 #[cfg(any(target_os = "linux", test))]
 const REQUIRED_CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
@@ -150,18 +150,30 @@ pub trait CapabilityProbe {
 #[derive(Debug, Clone, Default)]
 pub struct SystemProbe {
     root_override: Option<PathBuf>,
+    read_environment: bool,
 }
 
 impl SystemProbe {
     pub fn from_environment() -> Self {
         Self {
-            root_override: std::env::var_os("TASKCAGE_CGROUP_ROOT").map(PathBuf::from),
+            root_override: None,
+            read_environment: true,
         }
     }
 
     pub fn with_root(root: impl Into<PathBuf>) -> Self {
         Self {
             root_override: Some(root.into()),
+            read_environment: false,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn resolved_root(&self) -> Result<Option<PathBuf>, PreflightError> {
+        if self.read_environment {
+            Ok(configured_root_from_environment()?)
+        } else {
+            Ok(self.root_override.clone())
         }
     }
 
@@ -170,7 +182,8 @@ impl SystemProbe {
         &self,
         placement: StartupCgroupPlacement,
     ) -> Result<VerifiedEnvironment, PreflightError> {
-        check_linux(self.root_override.as_deref(), placement)
+        let root = self.resolved_root()?;
+        check_linux(root.as_deref(), placement)
     }
 }
 
@@ -178,15 +191,13 @@ impl CapabilityProbe for SystemProbe {
     fn check(&self) -> Result<VerifiedEnvironment, PreflightError> {
         #[cfg(target_os = "linux")]
         {
-            check_linux(
-                self.root_override.as_deref(),
-                StartupCgroupPlacement::DelegatedRoot,
-            )
+            let root = self.resolved_root()?;
+            check_linux(root.as_deref(), StartupCgroupPlacement::DelegatedRoot)
         }
 
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = &self.root_override;
+            let _ = (&self.root_override, self.read_environment);
             Err(PreflightError::UnsupportedPlatform)
         }
     }
