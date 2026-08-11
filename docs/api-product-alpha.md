@@ -141,9 +141,9 @@ Runner와 lifecycle을 사용해야 한다.
     "profile": {
       "id": "org.taskcage.ffmpeg.transcode",
       "version": "1.0.0",
-      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      "digest": "sha256:01d667dade05be47cbd6fc285aa4e13acde1961a2516b82b6b72c35591890199"
     },
-    "bundleDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "bundleDigest": "sha256:e11581dc8be885c4fed87fb9705200d4b2390fe85be2ff8af4ac49e01346f477",
     "inputs": {
       "format": "MP4",
       "quality": 23,
@@ -171,8 +171,8 @@ Runner와 lifecycle을 사용해야 한다.
 ```
 
 이 예시는 [`submit-profile-valid.json`](../protocol-fixtures/v2/submit-profile-valid.json)과 같다. 문서와
-fixture의 반복 숫자 digest는 wire 문법을 고정하는 결정적 가짜 값이며, 예시 JSON bytes의 실제 SHA-256이
-아니다. 실제 import와 submit은 importer가 계산한 digest를 사용한다.
+fixture의 Profile과 Bundle digest는 `product-fixtures/v1/` manifest의 canonical SHA-256과 일치한다.
+실제 payload가 없는 input/output Artifact와 resolved plan digest만 wire 형식을 위한 결정적인 값이다.
 
 ### 공통 field
 
@@ -264,13 +264,13 @@ Profile 기본값 자체가 daemon 배포 정책을 넘으면 해당 제출은 `
     "profile": {
       "id": "org.taskcage.ffmpeg.transcode",
       "version": "1.0.0",
-      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      "digest": "sha256:01d667dade05be47cbd6fc285aa4e13acde1961a2516b82b6b72c35591890199"
     },
-    "bundleDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "bundleDigest": "sha256:e11581dc8be885c4fed87fb9705200d4b2390fe85be2ff8af4ac49e01346f477",
     "runtimePackage": {
       "id": "org.taskcage.ffmpeg",
       "version": "7.1.1-taskcage.1",
-      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+      "digest": "sha256:49c3a4b8e209375766448c957f06740fae824c12f002eda5f69e700d9e4425c6"
     },
     "resolvedPlanDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
     "effectiveResources": {
@@ -318,13 +318,13 @@ Profile 기본값 자체가 daemon 배포 정책을 넘으면 해당 제출은 `
     "profile": {
       "id": "org.taskcage.ffmpeg.transcode",
       "version": "1.0.0",
-      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      "digest": "sha256:01d667dade05be47cbd6fc285aa4e13acde1961a2516b82b6b72c35591890199"
     },
-    "bundleDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "bundleDigest": "sha256:e11581dc8be885c4fed87fb9705200d4b2390fe85be2ff8af4ac49e01346f477",
     "runtimePackage": {
       "id": "org.taskcage.ffmpeg",
       "version": "7.1.1-taskcage.1",
-      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+      "digest": "sha256:49c3a4b8e209375766448c957f06740fae824c12f002eda5f69e700d9e4425c6"
     },
     "resolvedPlanDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
     "submittedAt": "2026-08-11T12:00:00Z",
@@ -347,13 +347,13 @@ Profile 기본값 자체가 daemon 배포 정책을 넘으면 해당 제출은 `
     "profile": {
       "id": "org.taskcage.ffmpeg.transcode",
       "version": "1.0.0",
-      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      "digest": "sha256:01d667dade05be47cbd6fc285aa4e13acde1961a2516b82b6b72c35591890199"
     },
-    "bundleDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "bundleDigest": "sha256:e11581dc8be885c4fed87fb9705200d4b2390fe85be2ff8af4ac49e01346f477",
     "runtimePackage": {
       "id": "org.taskcage.ffmpeg",
       "version": "7.1.1-taskcage.1",
-      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+      "digest": "sha256:49c3a4b8e209375766448c957f06740fae824c12f002eda5f69e700d9e4425c6"
     },
     "resolvedPlanDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
     "terminationReason": "EXITED",
@@ -400,13 +400,13 @@ Profile 기본값 자체가 daemon 배포 정책을 넘으면 해당 제출은 `
     "profile": {
       "id": "org.taskcage.ffmpeg.transcode",
       "version": "1.0.0",
-      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      "digest": "sha256:01d667dade05be47cbd6fc285aa4e13acde1961a2516b82b6b72c35591890199"
     },
-    "bundleDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "bundleDigest": "sha256:e11581dc8be885c4fed87fb9705200d4b2390fe85be2ff8af4ac49e01346f477",
     "runtimePackage": {
       "id": "org.taskcage.ffmpeg",
       "version": "7.1.1-taskcage.1",
-      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+      "digest": "sha256:49c3a4b8e209375766448c957f06740fae824c12f002eda5f69e700d9e4425c6"
     },
     "resolvedPlanDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
     "profileOutcome": "FAILED",
@@ -890,7 +890,7 @@ Bundle은 Profile과 고정된 Runtime Package 참조를 담는 작은 불변 JS
   "runtimePackage": {
     "id": "org.taskcage.ffmpeg",
     "version": "7.1.1-taskcage.1",
-    "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+    "digest": "sha256:49c3a4b8e209375766448c957f06740fae824c12f002eda5f69e700d9e4425c6"
   },
   "platform": {
     "os": "linux",
@@ -906,8 +906,8 @@ Bundle은 Profile과 고정된 Runtime Package 참조를 담는 작은 불변 JS
   },
   "integrity": {
     "algorithm": "SHA-256",
-    "profileDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-    "runtimePackageDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+    "profileDigest": "sha256:01d667dade05be47cbd6fc285aa4e13acde1961a2516b82b6b72c35591890199",
+    "runtimePackageDigest": "sha256:49c3a4b8e209375766448c957f06740fae824c12f002eda5f69e700d9e4425c6"
   }
 }
 ```
