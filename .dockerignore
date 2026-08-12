@@ -5,6 +5,10 @@
 target
 java-sdk/.gradle
 java-sdk/build
+java-bindings/**/.gradle
+java-bindings/**/build
+examples/**/.gradle
+examples/**/build
 dev/container/runtime
 *.iml
 *.log

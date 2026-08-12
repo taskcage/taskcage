@@ -2,6 +2,7 @@ name: taskcage-dev
 
 services:
   taskcaged:
+    platform: linux/amd64
     image: taskcage-dev/taskcaged:local
     build:
       context: ../..
@@ -30,6 +31,7 @@ services:
       start_period: 2s
 
   java-e2e:
+    platform: linux/amd64
     image: taskcage-dev/java-e2e:local
     profiles: [test]
     build:
@@ -46,6 +48,22 @@ services:
       TASKCAGE_GHOST_TREE: /usr/local/libexec/taskcage/ghost-tree
       TASKCAGE_OUTPUT_FLOOD: /usr/local/libexec/taskcage/output-flood
       TASKCAGE_ARTIFACT_ROOT: /taskcage-work/artifacts
+    volumes:
+      - taskcage-runtime:/run/taskcage
+      - taskcage-work:/taskcage-work
+
+  ffmpeg-example:
+    platform: linux/amd64
+    image: taskcage-dev/ffmpeg-example:local
+    profiles: [example]
+    build:
+      context: ../..
+      dockerfile: dev/container/Dockerfile
+      target: ffmpeg-example
+    depends_on:
+      taskcaged:
+        condition: service_healthy
+    pid: host
     volumes:
       - taskcage-runtime:/run/taskcage
       - taskcage-work:/taskcage-work
