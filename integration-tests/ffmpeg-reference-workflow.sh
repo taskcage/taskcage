@@ -103,8 +103,51 @@ sudo -n cp -R java-sdk "${reference_root}/java-sdk"
 sudo -n cp -R protocol-fixtures "${reference_root}/protocol-fixtures"
 sudo -n install -D -m 0755 target/debug/ffmpeg-tree "${reference_root}/bin/ffmpeg-tree"
 sudo -n install -d -m 0700 "${reference_root}/home" "${reference_root}/gradle-home" "${reference_root}/work"
+"${ffmpeg_bin}" \
+  -hide_banner \
+  -loglevel error \
+  -nostdin \
+  -f lavfi \
+  -i 'sine=frequency=1000:sample_rate=44100:duration=1' \
+  -c:a pcm_s16le \
+  "${reference_root}/profile-source.wav"
 sudo -n chown -R taskcage:taskcage "${reference_root}"
 sudo -n chmod 0700 "${reference_root}"
+
+submit_test=""
+while IFS= read -r artifact; do
+  if [[ "${artifact}" == *'"target":{"kind":["lib"]'* &&
+        "${artifact}" == *'"test":true'* &&
+        "${artifact}" == *'"executable":"'* ]]; then
+    submit_test="${artifact#*\"executable\":\"}"
+    submit_test="${submit_test%%\"*}"
+  fi
+done < <(cargo test -p taskcaged --lib --no-run --message-format=json)
+if [[ -z "${submit_test}" || ! -x "${submit_test}" ]]; then
+  echo "FAIL: 실제 FFmpeg Profile 통합 시험 실행 파일을 찾지 못했습니다" >&2
+  exit 1
+fi
+profile_test_bin="${reference_root}/bin/taskcaged-profile-tests"
+sudo -n install -m 0755 "${submit_test}" "${profile_test_bin}"
+sudo -n chown taskcage:taskcage "${profile_test_bin}"
+
+sudo -n systemd-run \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-real-ffmpeg-profile-$$" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --uid=taskcage \
+  --gid=taskcage \
+  --setenv=TASKCAGE_RUN_REAL_FFMPEG_PROFILE_INTEGRATION=1 \
+  --setenv=TASKCAGE_REAL_FFMPEG_BIN="${ffmpeg_bin}" \
+  --setenv=TASKCAGE_REAL_FFMPEG_INPUT="${reference_root}/profile-source.wav" \
+  "${profile_test_bin}" \
+  'handlers::tests::actual_real_ffmpeg_profile_imports_and_resolves_under_service_uid' \
+  --exact \
+  --nocapture
 
 sudo -n -u taskcage \
   /bin/bash -c 'cd "$1" && shift && exec "$@"' taskcage-gradle \

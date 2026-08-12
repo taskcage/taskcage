@@ -1,16 +1,18 @@
 //! wire 형식과 실행 코어 사이에서 검증된 명령과 자원 예산을 보존한다.
 
 #![cfg_attr(
-    not(any(target_os = "linux", test)),
+    not(target_os = "linux"),
     allow(
         dead_code,
-        reason = "실행 plan 소비자는 Linux Runner이며 다른 플랫폼은 API 검증만 빌드합니다"
+        reason = "고정 descriptor Profile 실행 plan 소비자는 Linux Runner에서만 빌드됩니다"
     )
 )]
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::fs::File;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::protocol::CommandSpec;
 use crate::resource_budget::ResourceBudget;
@@ -31,6 +33,29 @@ impl ResolvedExecutionPlan {
         }
     }
 
+    /// 검증된 Runtime Package entrypoint inode를 실행 시점까지 고정한 Profile plan이다.
+    pub(crate) fn from_pinned_entrypoint(
+        entrypoint: File,
+        argv0: OsString,
+        arguments: Vec<OsString>,
+        working_directory: PathBuf,
+        environment: BTreeMap<OsString, OsString>,
+        budget: ResourceBudget,
+    ) -> Self {
+        Self {
+            command: ResolvedCommand {
+                executable: ResolvedExecutable::PinnedDescriptor {
+                    descriptor: Arc::new(entrypoint),
+                    argv0,
+                },
+                arguments,
+                working_directory,
+                environment,
+            },
+            budget,
+        }
+    }
+
     pub(crate) fn budget(&self) -> &ResourceBudget {
         &self.budget
     }
@@ -40,7 +65,7 @@ impl ResolvedExecutionPlan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 /// 셸이나 PATH 해석 없이 execve에 전달할 명령 값이다.
 pub(crate) struct ResolvedCommand {
     executable: ResolvedExecutable,
@@ -49,10 +74,14 @@ pub(crate) struct ResolvedCommand {
     environment: BTreeMap<OsString, OsString>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// 실행 파일을 여는 방식이다. Product Package는 후속 variant로 고정 handle을 전달할 수 있다.
+#[derive(Debug, Clone)]
+/// 실행 파일을 여는 방식이다. Package entrypoint는 검증한 inode descriptor를 직접 실행한다.
 pub(crate) enum ResolvedExecutable {
     RawPath(OsString),
+    PinnedDescriptor {
+        descriptor: Arc<File>,
+        argv0: OsString,
+    },
 }
 
 impl ResolvedCommand {
@@ -133,10 +162,11 @@ mod tests {
             ResolvedExecutionPlan::from_validated_raw(&command, budget()).into_parts();
         let (executable, arguments, _, _) = resolved.into_parts();
 
-        assert_eq!(
+        assert!(matches!(
             executable,
-            ResolvedExecutable::RawPath(OsString::from("/opt/task cage/bin/tool"))
-        );
+            ResolvedExecutable::RawPath(value)
+                if value == "/opt/task cage/bin/tool"
+        ));
         assert_eq!(
             arguments,
             vec![

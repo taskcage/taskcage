@@ -246,11 +246,25 @@ impl TaskRunner {
 
 fn prepare_resolved_command(command: ResolvedCommand) -> Result<PreparedCommand> {
     let (executable, arguments, working_directory, environment) = command.into_parts();
-    let ResolvedExecutable::RawPath(executable) = executable;
-    let mut argv = Vec::with_capacity(arguments.len() + 1);
-    argv.push(executable);
-    argv.extend(arguments);
-    Ok(PreparedCommand::new(argv, &working_directory, environment)?)
+    match executable {
+        ResolvedExecutable::RawPath(executable) => {
+            let mut argv = Vec::with_capacity(arguments.len() + 1);
+            argv.push(executable);
+            argv.extend(arguments);
+            Ok(PreparedCommand::new(argv, &working_directory, environment)?)
+        }
+        ResolvedExecutable::PinnedDescriptor { descriptor, argv0 } => {
+            let mut argv = Vec::with_capacity(arguments.len() + 1);
+            argv.push(argv0);
+            argv.extend(arguments);
+            Ok(PreparedCommand::new_pinned(
+                descriptor,
+                argv,
+                &working_directory,
+                environment,
+            )?)
+        }
+    }
 }
 
 pub(crate) struct ExecutionConfig {

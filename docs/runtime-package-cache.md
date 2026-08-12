@@ -12,10 +12,12 @@ Runtime Package는 신뢰된 Linux 실행 파일과 필요한 library·license·
 
 ## 관리자 import
 
-배포 관리자는 root 권한으로 local source directory를 명시적으로 import한다.
+배포 관리자는 daemon과 같은 service UID로 local source directory를 명시적으로 import한다. cache root와
+그 하위 entry는 import process의 effective UID가 소유해야 하므로 root로 import한 cache를 `taskcage`
+daemon이 소비하는 경로는 허용하지 않는다.
 
 ```bash
-sudo taskcaged import-package \
+sudo -u taskcage taskcaged import-package \
   --source /srv/taskcage-import/ffmpeg-7.1.1 \
   --cache-root /var/lib/taskcage
 ```
@@ -122,3 +124,18 @@ filesystem에서는 실패한다. 그러므로 concurrent reader는 partial Pack
 Task 실행 경로는 Package를 digest로 열고 manifest, platform과 전체 content를 다시 검증한다. 검증된
 rootfs와 entrypoint file descriptor를 실행 준비가 끝날 때까지 보유하므로 cache path가 바뀌어도 검증하지
 않은 inode로 전환되지 않는다. Protocol v1 Raw Command의 absolute executable 동작은 변경하지 않는다.
+
+## FFmpeg Profile 정적 등록
+
+`ffmpeg-audio-to-wav@1.0.0`은 generic registry 없이 하나의 cache root와 digest를 정적으로 등록한다.
+Artifact 설정과 아래 두 옵션을 모두 지정해야 한다.
+
+```text
+--runtime-package-cache-root /var/lib/taskcage
+--ffmpeg-audio-to-wav-package-digest sha256:<64-lowercase-hex>
+```
+
+daemon은 시작할 때 등록 digest를 resolve하고 package `id`가 `org.taskcage.ffmpeg`, `entrypoint`가
+`bin/ffmpeg`인지 확인한다. missing, incompatible, corrupted package와 계약 불일치는 daemon 시작 실패다.
+각 새 Task도 같은 digest의 manifest, platform, 전체 content를 다시 검증하고 고정 entrypoint descriptor를
+`execveat(AT_EMPTY_PATH)`로 실행한다. shell과 PATH lookup은 사용하지 않는다.
