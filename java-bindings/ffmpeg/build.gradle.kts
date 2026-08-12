@@ -27,6 +27,33 @@ dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter")
 }
 
+val bindingE2eTest by sourceSets.creating {
+    java.srcDir("src/bindingE2eTest/java")
+    resources.srcDir("src/bindingE2eTest/resources")
+    compileClasspath += sourceSets.main.get().output
+    runtimeClasspath += output + compileClasspath
+}
+
+configurations[bindingE2eTest.implementationConfigurationName]
+    .extendsFrom(configurations.testImplementation.get())
+configurations[bindingE2eTest.runtimeOnlyConfigurationName]
+    .extendsFrom(configurations.testRuntimeOnly.get())
+
 tasks.test {
     useJUnitPlatform()
+}
+
+tasks.register<Test>("bindingE2eTest") {
+    group = "verification"
+    description = "Runs the FFmpeg Binding against a real TaskCage daemon and Runtime Package."
+    testClassesDirs = bindingE2eTest.output.classesDirs
+    classpath = bindingE2eTest.runtimeClasspath
+    useJUnitPlatform()
+    doFirst {
+        listOf("TASKCAGE_SOCKET", "TASKCAGE_ARTIFACT_ROOT").forEach { name ->
+            require(!System.getenv(name).isNullOrBlank()) {
+                "bindingE2eTest requires $name"
+            }
+        }
+    }
 }
