@@ -1464,6 +1464,26 @@ mod tests {
         .expect("file-copy Profile test budget")
     }
 
+    #[cfg(target_os = "linux")]
+    fn real_ffmpeg_profile_budget() -> ResourceBudget {
+        ResourceBudget::try_from_protocol(
+            ResourceLimits {
+                cpu_max: CpuMax {
+                    quota_micros: 100_000,
+                    period_micros: 100_000,
+                },
+                memory_max_bytes: 512 * 1024 * 1024,
+                pids_max: 32,
+                wall_time_limit_ms: 10_000,
+            },
+            OutputLimits {
+                stdout_tail_max_bytes: 4_096,
+                stderr_tail_max_bytes: 4_096,
+            },
+        )
+        .expect("real FFmpeg Profile test budget")
+    }
+
     fn running() -> TaskPayload {
         running_for(TASK_ID)
     }
@@ -2710,7 +2730,7 @@ mod tests {
         let profile_runtime = LocalProfileRuntime::open(
             &artifacts,
             32 * 1024 * 1024,
-            profile_budget(),
+            real_ffmpeg_profile_budget(),
             Some((&cache, package_digest)),
         )
         .expect("service UID import와 daemon resolve가 같은 ownership 계약을 사용해야 합니다");
@@ -2749,7 +2769,7 @@ mod tests {
             ..
         } = result
         else {
-            panic!("실제 FFmpeg Profile 성공 결과가 필요합니다")
+            panic!("실제 FFmpeg Profile 성공 결과가 필요합니다: {result:#?}")
         };
         let audio = published.get("audio").expect("audio Artifact");
         assert_eq!(audio.media_type, "audio/wav");
