@@ -5,6 +5,21 @@ TaskCage는 daemon과 SDK의 버전을 독립적으로 관리한다. 이 문서�
 
 ## Unreleased
 
+### TaskCage Java SDK 0.2.0 release candidate
+
+- Protocol v1 Raw Command API를 유지하면서 Protocol v2 Local Profile 제출·조회·대기·취소 API를 추가한다.
+- typed Profile input, Local Artifact reference, resource override와 published Artifact 결과 모델을 제공한다.
+- 공유 Protocol v2 fixture, 실제 daemon Profile E2E와 FFmpeg Binding E2E로 호환성을 검증한다.
+- Java 17 이상, Local UDS와 Protocol v1·v2를 지원한다. Remote transport는 포함하지 않는다.
+
+### TaskCage FFmpeg Binding 0.1.0 release candidate
+
+- `ffmpeg-audio-to-wav@1.0.0` Profile을 Java typed request와 result로 제공한다.
+- FFmpeg executable path와 argv를 애플리케이션 API에서 숨기고 mono/stereo와 16/44.1/48 kHz 출력을 제한된
+  enum으로 선택한다.
+- `org.taskcage:taskcage-java-sdk:0.2.0`을 transitive dependency로 사용한다.
+- taskcaged `0.2.0`, 검증된 FFmpeg Runtime Package와 Local Artifact root가 필요하다.
+
 ### 수정
 
 - Ubuntu service가 systemd의 `DelegateSubgroup=manager`를 사용해 daemon을 처음부터 manager cgroup에

@@ -49,7 +49,19 @@ Java SDK와 실제 데몬의 공개 API 계약은 `java-sdk`의 `e2eTest`에서 
 
 로컬에서 별도 Linux VM 준비 없이 실제 daemon과 Java E2E를 실행하려면
 [`dev/container`](../dev/container/README.md)의 개발 전용 Docker Compose 환경을 사용할 수 있다. 이
-환경은 privileged container를 사용하므로 최종 Linux host 검증을 대체하지 않는다.
+환경은 privileged container를 사용하므로 최종 Linux host 검증을 대체하지 않는다. 이 환경의 Java E2E는
+Core Profile API와 실제 FFmpeg Binding까지 함께 실행한다.
+
+## Java release consumer smoke test
+
+```bash
+bash integration-tests/java-release-consumer-smoke.sh
+```
+
+이 검증은 폐기 가능한 PGP key로 Java Core SDK `0.2.0`과 FFmpeg Binding `0.1.0` Central bundle을 만든다.
+두 bundle만 임시 Maven repository에 풀고, 저장소 composite build를 사용하지 않는 별도 Java 17 project가
+Binding과 transitive Core SDK를 resolve해 compile하는지 확인한다. 공개 registry에는 아무것도 upload하지
+않는다.
 
 ## Ubuntu systemd service smoke test
 
@@ -81,7 +93,7 @@ owner-only UDS를 사용한다. Java Core SDK가 FFmpeg를 shell 없이 직접 �
 
 같은 workflow는 실제 FFmpeg binary를 Runtime Package로 `taskcage` service UID에서 import하고, 같은 UID의
 daemon 실행 경계가 `ffmpeg-audio-to-wav@1.0.0`을 고정 entrypoint descriptor로 실행해 `audio/result.wav`를
-publish하는지도 확인한다. Java Binding E2E는 이 daemon gate와 별도의 후속 Java PR 범위다.
+publish하는지도 확인한다. 실제 typed Java Binding E2E는 container workflow에서 별도로 검증한다.
 
 ## Public Alpha release artifact smoke test
 

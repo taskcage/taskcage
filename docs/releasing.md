@@ -1,6 +1,6 @@
 # TaskCage 릴리스 운영
 
-이 문서는 maintainer가 TaskCage daemon과 Java SDK를 검증·배포하고 실패를 복구하는 절차를 정의한다.
+이 문서는 maintainer가 TaskCage daemon, Java Core SDK와 공식 Java Binding을 검증·배포하고 실패를 복구하는 절차를 정의한다.
 공개 버전과 tag 규칙은 [릴리스 및 버전 정책](release-policy.md)을 따른다.
 
 첫 컴포넌트 버전 `0.1.0`은 GitHub prerelease와 Maven Central에 공개됐다. 공개된 tag와 artifact는
@@ -12,10 +12,12 @@
 | 컴포넌트 | tag | 배포 workflow | 공개 위치 |
 |---|---|---|---|
 | daemon | `taskcaged-v0.1.0` | `Release taskcaged` | GitHub Release |
-| Java SDK | `java-sdk-v0.1.0` | `Release Java SDK` | Maven Central, GitHub Release |
+| Java Core SDK | `java-sdk-v0.2.0` | `Release Java SDK` | Maven Central, GitHub Release |
+| FFmpeg Java Binding | `ffmpeg-binding-v0.1.0` | `Release FFmpeg Binding` | Maven Central, GitHub Release |
 
-두 컴포넌트는 독립적으로 배포하며 제품 버전이 같을 필요가 없다. 현재 daemon과 Java SDK는 Protocol v1을
-지원한다. 연결 호환성은 제품 버전 문자열이 아니라 공통 Protocol version으로 판단한다.
+컴포넌트는 독립적으로 배포하며 제품 버전이 같을 필요가 없다. Core SDK `0.2.0`은 Protocol v1과 v2를
+지원한다. FFmpeg Binding `0.1.0`은 Core SDK `0.2.0`과 `ffmpeg-audio-to-wav@1.0.0` Profile을 제공하는
+daemon `0.2.0`을 요구한다. 연결 호환성은 제품 버전 문자열이 아니라 공통 Protocol version으로 판단한다.
 
 ## 공개 산출물
 
@@ -34,7 +36,8 @@ Java SDK는 Maven Central에 다음 좌표로 main JAR, sources JAR, Javadoc JAR
 PGP signature와 Maven Central이 요구하는 checksum을 포함한다.
 
 ```text
-org.taskcage:taskcage-java-sdk:0.1.0
+org.taskcage:taskcage-java-sdk:0.2.0
+org.taskcage:taskcage-ffmpeg-binding:0.1.0
 ```
 
 Java SDK GitHub prerelease는 사용자 변경 내역, Maven 좌표, 지원 Java와 Protocol version을 제공한다.
@@ -70,10 +73,11 @@ CI는 release secret을 받지 않고 매번 폐기되는 임시 PGP key로 Cent
 
 ## PR release candidate 검증
 
-일반 CI의 `Public Alpha release candidate` job은 두 컴포넌트의 현재 manifest 버전으로 다음을 수행한다.
+일반 CI의 `Public Alpha release candidate` job은 각 컴포넌트의 현재 manifest 버전으로 다음을 수행한다.
 
 - Linux x86-64 daemon archive와 SHA-256 sidecar 생성
-- 임시 PGP key로 Java SDK Central validation bundle 생성
+- 임시 PGP key로 Java Core SDK와 FFmpeg Binding Central validation bundle 생성
+- 두 bundle만 제공하는 임시 Maven repository에서 별도 소비자 project compile
 - 컴포넌트별 tag 형식과 manifest version 일치 검사
 - archive의 prebuilt binary와 installer를 사용한 Ubuntu systemd smoke test
 - 검토용 GitHub Actions artifact 업로드
@@ -130,9 +134,9 @@ Java SDK manifest version을 확인하고 `main`의 검증된 커밋에 독립 t
 ```bash
 git switch main
 git pull --ff-only
-bash scripts/release/verify-version.sh java-sdk 0.1.0
-git tag --sign java-sdk-v0.1.0 -m "TaskCage Java SDK 0.1.0"
-git push origin java-sdk-v0.1.0
+bash scripts/release/verify-version.sh java-sdk 0.2.0
+git tag --sign java-sdk-v0.2.0 -m "TaskCage Java SDK 0.2.0"
+git push origin java-sdk-v0.2.0
 ```
 
 tag push는 `.github/workflows/release-java-sdk.yml`의 prepare 경로를 시작한다. workflow는 tag signature,
@@ -155,7 +159,7 @@ Central deployment가 `VALIDATED`인지 확인하고 Draft release의 사용자�
 `Release Java SDK` workflow를 수동 실행한다.
 
 ```text
-tag: java-sdk-v0.1.0
+tag: java-sdk-v0.2.0
 central_deployment_id: Draft release에 기록된 UUID
 ```
 
@@ -169,6 +173,28 @@ central_deployment_id: Draft release에 기록된 UUID
 이미 Central은 `PUBLISHED`이고 GitHub Release만 Draft라면 같은 tag와 deployment ID로 finalize를 다시
 실행할 수 있다.
 
+## FFmpeg Binding 릴리스
+
+Java Core SDK `0.2.0`과 taskcaged `0.2.0`이 모두 공개된 뒤 검증된 `main` 커밋에 Binding tag를 생성한다.
+
+```bash
+git switch main
+git pull --ff-only
+bash scripts/release/verify-version.sh ffmpeg-binding 0.1.0
+git tag --sign ffmpeg-binding-v0.1.0 -m "TaskCage FFmpeg Binding 0.1.0"
+git push origin ffmpeg-binding-v0.1.0
+```
+
+`Release FFmpeg Binding` workflow는 Core SDK `0.2.0` POM과 공개 taskcaged `0.2.0` prerelease를 먼저
+확인한다. 이후 Binding 단위 build, 실제 container daemon E2E, 서명된 Central bundle 생성과
+`USER_MANAGED` upload를 수행하고 Draft GitHub prerelease를 만든다. Central deployment가 `VALIDATED`가
+되면 같은 workflow를 다음 입력으로 수동 실행해 Central과 GitHub prerelease를 순서대로 공개한다.
+
+```text
+tag: ffmpeg-binding-v0.1.0
+central_deployment_id: Draft release에 기록된 UUID
+```
+
 ## 설치 확인
 
 daemon은 [Ubuntu daemon 설치](install-ubuntu.md)의 checksum-first 절차로 설치한다. 설치 후 같은 service
@@ -178,7 +204,8 @@ Java SDK는 Central 상태가 `PUBLISHED`가 되고 실제 POM URL이 resolve되
 
 ```kotlin
 dependencies {
-    implementation("org.taskcage:taskcage-java-sdk:0.1.0")
+    implementation("org.taskcage:taskcage-java-sdk:0.2.0")
+    implementation("org.taskcage:taskcage-ffmpeg-binding:0.1.0")
 }
 ```
 

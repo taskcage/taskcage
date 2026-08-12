@@ -10,19 +10,19 @@ fail() {
 }
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
-  fail "usage: build-validation-central-bundle.sh VERSION [OUTPUT_DIRECTORY]"
+  fail "usage: build-validation-ffmpeg-binding-central-bundle.sh VERSION [OUTPUT_DIRECTORY]"
 fi
 command -v gpg >/dev/null 2>&1 || fail "required command is missing: gpg"
 
 readonly release_version="$1"
 readonly output_directory="${2:-}"
-validation_key_home="$(mktemp -d /tmp/taskcage-release-key.XXXXXX)"
+validation_key_home="$(mktemp -d /tmp/taskcage-ffmpeg-binding-release-key.XXXXXX)"
 resolved_validation_key_home="$(readlink -f "${validation_key_home}")"
 
 cleanup() {
   if [[ -n "${resolved_validation_key_home}" && -d "${resolved_validation_key_home}" ]]; then
     case "${resolved_validation_key_home}" in
-      /tmp/taskcage-release-key.*|/private/tmp/taskcage-release-key.*) rm -rf -- "${resolved_validation_key_home}" ;;
+      /tmp/taskcage-ffmpeg-binding-release-key.*|/private/tmp/taskcage-ffmpeg-binding-release-key.*) rm -rf -- "${resolved_validation_key_home}" ;;
       *) echo "WARN: refusing to remove unexpected key path: ${resolved_validation_key_home}" >&2 ;;
     esac
   fi
@@ -56,7 +56,7 @@ MAVEN_SIGNING_KEY="$(gpg \
 export MAVEN_SIGNING_KEY
 
 if [[ -n "${output_directory}" ]]; then
-  "${script_directory}/build-central-bundle.sh" "${release_version}" "${output_directory}"
+  "${script_directory}/build-ffmpeg-binding-central-bundle.sh" "${release_version}" "${output_directory}"
 else
-  "${script_directory}/build-central-bundle.sh" "${release_version}"
+  "${script_directory}/build-ffmpeg-binding-central-bundle.sh" "${release_version}"
 fi

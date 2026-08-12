@@ -1,13 +1,13 @@
-name: Release Java SDK
+name: Release FFmpeg Binding
 
 on:
   push:
     tags:
-      - "java-sdk-v*"
+      - "ffmpeg-binding-v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing Java SDK release tag, for example java-sdk-v0.2.0.
+        description: Existing FFmpeg Binding release tag, for example ffmpeg-binding-v0.1.0.
         required: true
         type: string
       central_deployment_id:
@@ -19,12 +19,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: java-sdk-release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  group: ffmpeg-binding-release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
   cancel-in-progress: false
 
 jobs:
   validate:
-    name: Validate Java SDK tag and version
+    name: Validate FFmpeg Binding tag and version
     runs-on: ubuntu-24.04
     outputs:
       mode: ${{ steps.context.outputs.mode }}
@@ -45,8 +45,8 @@ jobs:
             mode="finalize"
             release_tag="${INPUT_TAG}"
           fi
-          [[ "${release_tag}" =~ ^java-sdk-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          release_version="${release_tag#java-sdk-v}"
+          [[ "${release_tag}" =~ ^ffmpeg-binding-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          release_version="${release_tag#ffmpeg-binding-v}"
           echo "mode=${mode}" >>"${GITHUB_OUTPUT}"
           echo "release_tag=${release_tag}" >>"${GITHUB_OUTPUT}"
           echo "release_version=${release_version}" >>"${GITHUB_OUTPUT}"
@@ -60,7 +60,7 @@ jobs:
           RELEASE_TAG: ${{ steps.context.outputs.release_tag }}
           RELEASE_VERSION: ${{ steps.context.outputs.release_version }}
         run: |
-          bash scripts/release/verify-version.sh java-sdk "${RELEASE_VERSION}" "${RELEASE_TAG}"
+          bash scripts/release/verify-version.sh ffmpeg-binding "${RELEASE_VERSION}" "${RELEASE_TAG}"
           git tag --points-at HEAD --list "${RELEASE_TAG}" | grep -Fx "${RELEASE_TAG}"
           tag_object_sha="$(git rev-parse "${RELEASE_TAG}^{tag}")"
           [[ "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_sha}" --jq '.verification.verified')" == "true" ]]
@@ -68,7 +68,7 @@ jobs:
           git merge-base --is-ancestor HEAD origin/main
 
   java-gate:
-    name: Java SDK release gate
+    name: FFmpeg Binding release gate
     if: needs.validate.outputs.mode == 'prepare'
     needs: validate
     runs-on: ubuntu-24.04
@@ -78,32 +78,10 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - run: ./gradlew clean build --no-daemon --no-problems-report
-        working-directory: java-sdk
+      - run: ./java-sdk/gradlew -p java-bindings/ffmpeg clean build --no-daemon --no-problems-report
 
-  ffmpeg-gate:
-    name: Java and daemon compatibility gate
-    if: needs.validate.outputs.mode == 'prepare'
-    needs: validate
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        with:
-          toolchain: stable
-      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
-        with:
-          distribution: temurin
-          java-version: "17"
-      - name: Install Ubuntu FFmpeg package
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
-      - run: bash integration-tests/ffmpeg-reference-workflow.sh
-
-  profile-gate:
-    name: Java Profile and daemon compatibility gate
+  container-gate:
+    name: FFmpeg Binding and daemon compatibility gate
     if: needs.validate.outputs.mode == 'prepare'
     needs: validate
     runs-on: ubuntu-24.04
@@ -118,8 +96,7 @@ jobs:
     needs:
       - validate
       - java-gate
-      - ffmpeg-gate
-      - profile-gate
+      - container-gate
     runs-on: ubuntu-24.04
     environment: java-sdk-release
     permissions:
@@ -135,12 +112,12 @@ jobs:
           MAVEN_SIGNING_KEY: ${{ secrets.MAVEN_SIGNING_KEY }}
           MAVEN_SIGNING_PASSWORD: ${{ secrets.MAVEN_SIGNING_PASSWORD }}
           RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
-        run: bash scripts/release/build-central-bundle.sh "${RELEASE_VERSION}" dist
+        run: bash scripts/release/build-ffmpeg-binding-central-bundle.sh "${RELEASE_VERSION}" dist
       - name: Preserve the signed Central bundle for recovery
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: taskcage-java-sdk-${{ needs.validate.outputs.release_version }}-central
-          path: dist/taskcage-java-sdk-*-central.zip
+          name: taskcage-ffmpeg-binding-${{ needs.validate.outputs.release_version }}-central
+          path: dist/taskcage-ffmpeg-binding-*-central.zip
           if-no-files-found: error
           retention-days: 30
       - name: Upload USER_MANAGED deployment and create a draft GitHub release
@@ -155,12 +132,22 @@ jobs:
             echo "ERROR: a GitHub release already exists for ${RELEASE_TAG}" >&2
             exit 1
           fi
-          central_pom_url="https://repo1.maven.org/maven2/org/taskcage/taskcage-java-sdk/${RELEASE_VERSION}/taskcage-java-sdk-${RELEASE_VERSION}.pom"
+          core_pom_url="https://repo1.maven.org/maven2/org/taskcage/taskcage-java-sdk/0.2.0/taskcage-java-sdk-0.2.0.pom"
+          [[ "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${core_pom_url}")" == "200" ]] || {
+            echo "ERROR: org.taskcage:taskcage-java-sdk:0.2.0 must be public before the Binding" >&2
+            exit 1
+          }
+          daemon_release="$(gh release view taskcaged-v0.2.0 --json isDraft,isPrerelease,tagName)" || {
+            echo "ERROR: taskcaged-v0.2.0 must be public before the Binding" >&2
+            exit 1
+          }
+          python3 -c 'import json,sys; release=json.load(sys.stdin); assert not release["isDraft"] and release["isPrerelease"] and release["tagName"] == "taskcaged-v0.2.0", "taskcaged-v0.2.0 is not a public prerelease"' <<<"${daemon_release}"
+          central_pom_url="https://repo1.maven.org/maven2/org/taskcage/taskcage-ffmpeg-binding/${RELEASE_VERSION}/taskcage-ffmpeg-binding-${RELEASE_VERSION}.pom"
           central_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${central_pom_url}")"
           case "${central_status}" in
             404) ;;
             200)
-              echo "ERROR: org.taskcage:taskcage-java-sdk:${RELEASE_VERSION} is already public" >&2
+              echo "ERROR: org.taskcage:taskcage-ffmpeg-binding:${RELEASE_VERSION} is already public" >&2
               exit 1
               ;;
             *)
@@ -170,14 +157,14 @@ jobs:
           esac
           deployment_id="$(bash scripts/release/central-portal.sh \
             upload \
-            "dist/taskcage-java-sdk-${RELEASE_VERSION}-central.zip" \
-            "taskcage-java-sdk-${RELEASE_VERSION}")"
-          release_notes="$(printf 'TaskCage Java SDK %s\n\nSupported Protocols: v1, v2\nMaven: org.taskcage:taskcage-java-sdk:%s\n\nCentral USER_MANAGED deployment: %s\n\nReview and complete these notes before finalizing publication.' "${RELEASE_VERSION}" "${RELEASE_VERSION}" "${deployment_id}")"
+            "dist/taskcage-ffmpeg-binding-${RELEASE_VERSION}-central.zip" \
+            "taskcage-ffmpeg-binding-${RELEASE_VERSION}")"
+          release_notes="$(printf 'TaskCage FFmpeg Binding %s\n\nRequires Java Core SDK: 0.2.0\nRequires taskcaged: 0.2.0 with ffmpeg-audio-to-wav@1.0.0 configured\nSupported Protocol: v2\nMaven: org.taskcage:taskcage-ffmpeg-binding:%s\n\nCentral USER_MANAGED deployment: %s\n\nReview and complete these notes before finalizing publication.' "${RELEASE_VERSION}" "${RELEASE_VERSION}" "${deployment_id}")"
           gh release create "${RELEASE_TAG}" \
             --draft \
             --prerelease \
             --verify-tag \
-            --title "TaskCage Java SDK ${RELEASE_VERSION}" \
+            --title "TaskCage FFmpeg Binding ${RELEASE_VERSION}" \
             --notes "${release_notes}"
           echo "Central deployment ID: ${deployment_id}" >>"${GITHUB_STEP_SUMMARY}"
 
