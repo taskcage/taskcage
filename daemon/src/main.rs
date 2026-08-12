@@ -162,6 +162,8 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
     let mut max_task_timeout_ms = None;
     let mut max_task_stdout_tail_bytes = None;
     let mut max_task_stderr_tail_bytes = None;
+    let mut profile_artifact_root = None;
+    let mut profile_artifact_max_bytes = None;
     let mut index = 0;
     while index < args.len() {
         let name = args[index].to_str().ok_or_else(|| {
@@ -208,6 +210,12 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             "--max-task-stderr-tail-bytes" if max_task_stderr_tail_bytes.is_none() => {
                 max_task_stderr_tail_bytes = Some(parse_number(name, value)?);
             }
+            "--profile-artifact-root" if profile_artifact_root.is_none() => {
+                profile_artifact_root = Some(PathBuf::from(value));
+            }
+            "--profile-artifact-max-bytes" if profile_artifact_max_bytes.is_none() => {
+                profile_artifact_max_bytes = Some(parse_number(name, value)?);
+            }
             "--socket"
             | "--max-concurrent-tasks"
             | "--max-registry-tasks"
@@ -220,7 +228,9 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             | "--max-task-pids"
             | "--max-task-timeout-ms"
             | "--max-task-stdout-tail-bytes"
-            | "--max-task-stderr-tail-bytes" => {
+            | "--max-task-stderr-tail-bytes"
+            | "--profile-artifact-root"
+            | "--profile-artifact-max-bytes" => {
                 return Err(Error::InvalidArgument(format!(
                     "serve 옵션이 중복되었습니다: {name}"
                 )));
@@ -234,7 +244,7 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
         index += 2;
     }
 
-    DaemonConfig::new(
+    let config = DaemonConfig::new(
         required_option("socket", socket_path)?,
         required_option("max-concurrent-tasks", max_concurrent_tasks)?,
         required_option("max-registry-tasks", max_registry_tasks)?,
@@ -271,7 +281,15 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
                 )?,
             },
         ),
-    )
+    )?;
+    match (profile_artifact_root, profile_artifact_max_bytes) {
+        (None, None) => Ok(config),
+        (Some(root), Some(maximum_bytes)) => config.with_file_copy_profile(root, maximum_bytes),
+        _ => Err(Error::InvalidArgument(
+            "file-copy Profile에는 --profile-artifact-root와 --profile-artifact-max-bytes를 함께 지정해야 합니다"
+                .to_owned(),
+        )),
+    }
 }
 
 fn parse_run_once(args: Vec<OsString>) -> taskcaged::Result<RunOnceConfig> {
@@ -794,6 +812,47 @@ mod tests {
         let error = super::parse_serve(invalid).unwrap_err();
         assert!(error.to_string().contains("deployment resource policy"));
         assert!(error.to_string().contains("0보다 커야"));
+    }
+
+    #[test]
+    fn serve_enables_file_copy_only_with_a_complete_artifact_configuration() {
+        let base = vec![
+            OsString::from("--socket"),
+            std::env::temp_dir().join("taskcaged.sock").into_os_string(),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("1"),
+            OsString::from("--max-registry-tasks"),
+            OsString::from("1"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("1"),
+            OsString::from("--cleanup-timeout-ms"),
+            OsString::from("1"),
+            OsString::from("--fail-stop-timeout-ms"),
+            OsString::from("1"),
+        ];
+        let mut root_only = base.clone();
+        root_only.extend([
+            OsString::from("--profile-artifact-root"),
+            std::env::temp_dir().into_os_string(),
+        ]);
+        let error = super::parse_serve(with_deployment_policy(root_only)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("artifact-root와 --profile-artifact-max-bytes"),
+            "unexpected error: {error}"
+        );
+
+        let mut complete = base;
+        complete.extend([
+            OsString::from("--profile-artifact-root"),
+            std::env::temp_dir().into_os_string(),
+            OsString::from("--profile-artifact-max-bytes"),
+            OsString::from("1024"),
+        ]);
+        let config = super::parse_serve(with_deployment_policy(complete))
+            .expect("complete Profile configuration");
+        assert!(format!("{config:?}").contains("local_profile: Some"));
     }
 
     #[test]

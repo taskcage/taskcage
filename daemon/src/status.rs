@@ -144,6 +144,11 @@ fn error_code_name(code: crate::protocol::ErrorCode) -> &'static str {
         ErrorCode::IdempotencyConflict => "IDEMPOTENCY_CONFLICT",
         ErrorCode::LimitExceedsPolicy => "LIMIT_EXCEEDS_POLICY",
         ErrorCode::InternalError => "INTERNAL_ERROR",
+        ErrorCode::ProfileNotFound => "PROFILE_NOT_FOUND",
+        ErrorCode::InvalidProfileInput => "INVALID_PROFILE_INPUT",
+        ErrorCode::InvalidArtifactPath => "INVALID_ARTIFACT_PATH",
+        ErrorCode::ArtifactDigestMismatch => "ARTIFACT_DIGEST_MISMATCH",
+        ErrorCode::TaskKindMismatch => "TASK_KIND_MISMATCH",
     }
 }
 

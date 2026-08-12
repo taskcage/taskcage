@@ -125,10 +125,24 @@ target/debug/taskcaged serve \
   --max-task-pids 128 \
   --max-task-timeout-ms 900000 \
   --max-task-stdout-tail-bytes 65536 \
-  --max-task-stderr-tail-bytes 65536
+  --max-task-stderr-tail-bytes 65536 \
+  --profile-artifact-root /var/lib/taskcage/artifacts \
+  --profile-artifact-max-bytes 104857600
 ```
 
 상위 디렉터리와 서비스 계정은 배포 환경이 준비한다. 데몬은 소켓을 owner-only `0600`으로 생성한다. 위 값은 예시이며 프로토콜 기본값이 아니다.
+
+### Opt-in Local Profile daemon 설정
+
+v0.2의 Local Profile은 기본적으로 꺼져 있다. 위의 두 Profile 옵션을 **함께** 지정한 daemon만 정적
+`file-copy@1.0.0` Profile과 Protocol v2 capability를 공개한다. 이 Profile은 Runtime Package, Bundle,
+임의 executable 또는 caller-provided argv를 허용하지 않는다.
+
+Artifact root는 daemon service UID 소유의 기존 absolute directory여야 하며, symlink가 아니고
+group/other writable이면 안 된다. daemon은 시작 시 이 조건과 descriptor-relative staging/publish 권한을
+검증한다. 두 옵션 중 하나가 빠지거나 검증에 실패하면 Profile capability를 광고하지 않고 daemon 시작을
+거부한다. wire 계약은 [Local Profile Core API v2](docs/api-profile-v2.md), Artifact의 경계는
+[Local Artifact 계약](docs/local-artifact-contract.md)을 따른다.
 
 `check-environment`는 현재 process의 cgroup 실행 조건을 검사한다. 실행 중인 daemon 자체의 준비 상태는
 socket owner와 같은 UID에서 live status로 확인한다. 기본 timeout은 2초다.
@@ -230,9 +244,9 @@ bash integration-tests/release-artifact-smoke.sh \
 다음 목표는 외부 사용자의 설치 시간, 실제 workload와 운영 피드백을 수집하고 호환되는 결함은 patch
 버전으로 수정하는 것이다.
 
-Execution Profile과 Artifact 계약은 Public Alpha를 최소 3명의 외부 사용자가 사용하고,
-Profile·Package·Artifact로 일반화할 반복 요구가 2개 이상 확인되면 Local Product Alpha에서 도입한다.
-재현 가능한 실행은 버전 관리되는 Execution Profile과 digest로 고정한 Runtime Package를 사용한다.
+v0.2는 opt-in `file-copy@1.0.0` Local Profile과 Artifact 계약을 제한적으로 검증한다. Profile·Package·Artifact를
+일반화하거나 Profile을 늘리기 전에는 이 경로를 Public Alpha의 외부 사용자와 반복 요구로 검증한다. 재현 가능한
+실행은 버전 관리되는 Execution Profile과 digest로 고정한 Runtime Package를 사용한다.
 Bundle은 Package binary가 아니라 Profile, Runtime Package ref + digest, 플랫폼·정책·무결성 정보를
 담으며, 여러 Bundle이 같은 Package digest를 공유할 수 있다.
 

@@ -67,6 +67,11 @@ impl DeploymentResourcePolicy {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn maximum(&self) -> &ResourceBudget {
+        &self.maximum
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test() -> Self {
         Self::try_new(

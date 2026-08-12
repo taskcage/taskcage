@@ -114,23 +114,39 @@ impl ResourceBudget {
         CaptureLimits::new(self.stdout_tail_max_bytes, self.stderr_tail_max_bytes)
     }
 
+    pub(crate) fn protocol_limits(&self) -> ResourceLimits {
+        let limits = self.cgroup_limits;
+        ResourceLimits {
+            cpu_max: crate::protocol::CpuMax {
+                quota_micros: limits.cpu.quota_micros.get(),
+                period_micros: limits.cpu.period_micros.get(),
+            },
+            memory_max_bytes: limits.memory_max_bytes.get(),
+            pids_max: limits.max_processes.get(),
+            wall_time_limit_ms: self.wall_time_limit_ms.get(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn protocol_output(&self) -> OutputLimits {
+        OutputLimits {
+            stdout_tail_max_bytes: self.stdout_tail_max_bytes.get() as u32,
+            stderr_tail_max_bytes: self.stderr_tail_max_bytes.get() as u32,
+        }
+    }
+
     #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
     pub(crate) fn verified_effective_limits(
         &self,
         verified: VerifiedCgroupLimits,
     ) -> VerifiedEffectiveLimits {
         let limits = verified.limits();
-        VerifiedEffectiveLimits {
-            limits: ResourceLimits {
-                cpu_max: crate::protocol::CpuMax {
-                    quota_micros: limits.cpu.quota_micros.get(),
-                    period_micros: limits.cpu.period_micros.get(),
-                },
-                memory_max_bytes: limits.memory_max_bytes.get(),
-                pids_max: limits.max_processes.get(),
-                wall_time_limit_ms: self.wall_time_limit_ms.get(),
-            },
-        }
+        let mut effective = self.protocol_limits();
+        effective.cpu_max.quota_micros = limits.cpu.quota_micros.get();
+        effective.cpu_max.period_micros = limits.cpu.period_micros.get();
+        effective.memory_max_bytes = limits.memory_max_bytes.get();
+        effective.pids_max = limits.max_processes.get();
+        VerifiedEffectiveLimits { limits: effective }
     }
 
     #[cfg(test)]

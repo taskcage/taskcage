@@ -9,9 +9,15 @@ use crate::capacity::TaskCapacitySettings;
 use crate::deployment_policy::DeploymentResourcePolicy;
 use crate::fail_stop::FailStopCoordinator;
 use crate::preflight::{PreflightError, VerifiedEnvironment};
+#[cfg(target_os = "linux")]
+use crate::profile::{LocalProfileRuntime, ProfileReservation, ProfileTaskRecord};
 use crate::protocol::{
     ErrorCode, ErrorPayload, PROTOCOL_VERSION, Request, Response, TaskAcceptedPayload,
     TaskCancelledPayload, TaskPayload, TaskState, TerminationReason,
+};
+#[cfg(target_os = "linux")]
+use crate::protocol::{
+    PROFILE_PROTOCOL_VERSION, ProfileAcceptedPayload, ProfileEffectiveResources,
 };
 #[cfg(target_os = "linux")]
 use crate::submit::SubmitCoordinator;
@@ -38,6 +44,11 @@ impl SubmitContext {
             metadata,
             finished_time,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn preallocate_task_id(&mut self) -> String {
+        self.metadata.preallocate_task_id()
     }
 }
 
@@ -97,7 +108,7 @@ impl ProtocolTaskCore for SubmitCoordinator {
 enum HandlerState<C> {
     Ready {
         capabilities: CapabilityAdapter,
-        core: C,
+        core: Arc<C>,
     },
     Unavailable {
         capabilities: CapabilityAdapter,
@@ -109,6 +120,8 @@ pub(crate) struct ProtocolHandlers<C> {
     state: HandlerState<C>,
     deployment_policy: DeploymentResourcePolicy,
     fail_stop: Arc<FailStopCoordinator>,
+    #[cfg(target_os = "linux")]
+    profile: Option<Arc<LocalProfileRuntime>>,
 }
 
 impl<C> ProtocolHandlers<C> {
@@ -129,10 +142,12 @@ impl<C> ProtocolHandlers<C> {
             } => Ok(Self {
                 state: HandlerState::Ready {
                     capabilities: adapter,
-                    core: build_core(environment, capacity_settings)?,
+                    core: Arc::new(build_core(environment, capacity_settings)?),
                 },
                 deployment_policy,
                 fail_stop,
+                #[cfg(target_os = "linux")]
+                profile: None,
             }),
             CapabilityInitialization::Unavailable { adapter } => Ok(Self {
                 state: HandlerState::Unavailable {
@@ -140,6 +155,8 @@ impl<C> ProtocolHandlers<C> {
                 },
                 deployment_policy,
                 fail_stop,
+                #[cfg(target_os = "linux")]
+                profile: None,
             }),
         }
     }
@@ -184,9 +201,10 @@ impl ProtocolHandlers<SubmitCoordinator> {
         registry_settings: TaskRegistrySettings,
         deployment_policy: DeploymentResourcePolicy,
         fail_stop: Arc<FailStopCoordinator>,
+        profile: Option<LocalProfileRuntime>,
     ) -> crate::Result<Self> {
         let core_fail_stop = Arc::clone(&fail_stop);
-        Self::initialize_with(
+        let mut handlers = Self::initialize_with(
             preflight,
             capacity_settings,
             deployment_policy,
@@ -199,7 +217,9 @@ impl ProtocolHandlers<SubmitCoordinator> {
                     core_fail_stop,
                 )
             },
-        )
+        )?;
+        handlers.profile = profile.map(Arc::new);
+        Ok(handlers)
     }
 
     pub(crate) async fn wait_idle(&self) {
@@ -210,6 +230,427 @@ impl ProtocolHandlers<SubmitCoordinator> {
 
     pub(crate) fn fail_stop(&self) -> &Arc<FailStopCoordinator> {
         &self.fail_stop
+    }
+
+    /// daemon production dispatcher다. Protocol v1 handler를 보존하면서 additive v2 Profile 요청만
+    /// 별도 경계에서 받는다.
+    pub(crate) async fn handle_daemon_request<F>(
+        &self,
+        request: Request,
+        make_context: F,
+    ) -> Response
+    where
+        F: FnOnce() -> SubmitContext,
+    {
+        match request {
+            request @ Request::GetCapabilities {
+                protocol_version: PROTOCOL_VERSION,
+                ..
+            } => self.profile_capabilities_response(request),
+            request @ Request::SubmitProfile { .. } => {
+                self.handle_submit_profile(request, make_context).await
+            }
+            request @ Request::GetProfileResult { .. } => {
+                self.handle_get_profile_result(request).await
+            }
+            request @ Request::GetCapabilities { .. }
+            | request @ Request::SubmitTask { .. }
+            | request @ Request::GetTask { .. }
+            | request @ Request::CancelTask { .. } => {
+                if request.protocol_version() == PROFILE_PROTOCOL_VERSION {
+                    error_response_for(
+                        PROFILE_PROTOCOL_VERSION,
+                        request.request_id().to_owned(),
+                        ErrorCode::InvalidRequest,
+                        "protocol v2 only supports submitProfile and getProfileResult",
+                    )
+                } else {
+                    self.handle_request(request, make_context).await
+                }
+            }
+        }
+    }
+
+    fn profile_capabilities_response(&self, request: Request) -> Response {
+        let mut response = match self.handle_get_capabilities(request) {
+            RequestHandling::Handled(response) => response,
+            RequestHandling::Unhandled(_) => unreachable!("capabilities request must be handled"),
+        };
+        if self.profile.is_some()
+            && !self.fail_stop.is_fail_stopping()
+            && let Response::Capabilities { payload, .. } = &mut response
+        {
+            payload.protocol_versions.push(PROFILE_PROTOCOL_VERSION);
+        }
+        response
+    }
+
+    async fn handle_submit_profile<F>(&self, request: Request, make_context: F) -> Response
+    where
+        F: FnOnce() -> SubmitContext,
+    {
+        let Request::SubmitProfile {
+            protocol_version,
+            request_id,
+            payload,
+        } = request
+        else {
+            unreachable!("profile submit dispatcher must preserve request kind")
+        };
+        if let Some(response) = validate_profile_envelope(protocol_version, &request_id) {
+            return response;
+        }
+        let Some(runtime) = &self.profile else {
+            return error_response_for(
+                PROFILE_PROTOCOL_VERSION,
+                request_id,
+                ErrorCode::InvalidRequest,
+                "protocol v2 local profiles are not enabled",
+            );
+        };
+        let prepared = match runtime.validate(&payload) {
+            Ok(prepared) => prepared,
+            Err(error) => return profile_error_response(request_id, error),
+        };
+        if let Err(error) = self.deployment_policy.validate(prepared.budget()) {
+            return error_response_for(
+                PROFILE_PROTOCOL_VERSION,
+                request_id,
+                ErrorCode::LimitExceedsPolicy,
+                error.to_string(),
+            );
+        }
+        let core = match &self.state {
+            HandlerState::Ready { core, .. } => Arc::clone(core),
+            HandlerState::Unavailable { .. } => {
+                return error_response_for(
+                    PROFILE_PROTOCOL_VERSION,
+                    request_id,
+                    ErrorCode::EnvironmentUnavailable,
+                    "cgroup v2 execution environment is unavailable",
+                );
+            }
+        };
+        if let Err(error) = runtime.prune_missing_tasks(|task_id| {
+            core.snapshot(task_id)
+                .map(|snapshot| snapshot.is_some())
+                .map_err(|error| error.to_string())
+        }) {
+            return profile_error_response(request_id, error);
+        }
+        let reservation = match runtime.reserve(payload).await {
+            Ok(ProfileReservation::Existing(task)) => {
+                return existing_profile_response(&core, runtime, request_id, task).await;
+            }
+            Ok(reservation) => reservation,
+            Err(error) => return profile_error_response(request_id, error),
+        };
+        match core.has_client_request_id(reservation_client_request_id(&reservation)) {
+            Ok(true) => {
+                runtime.release(reservation);
+                return error_response_for(
+                    PROFILE_PROTOCOL_VERSION,
+                    request_id,
+                    ErrorCode::IdempotencyConflict,
+                    "clientRequestId was already used for a Raw Command request",
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                runtime.release(reservation);
+                return error_response_for(
+                    PROFILE_PROTOCOL_VERSION,
+                    request_id,
+                    ErrorCode::InternalError,
+                    error.to_string(),
+                );
+            }
+        }
+        let mut context = make_context();
+        let task_id = context.preallocate_task_id();
+        let staged = match runtime.stage(&task_id, prepared) {
+            Ok(staged) => staged,
+            Err(error) => {
+                runtime.release(reservation);
+                return profile_error_response(request_id, error);
+            }
+        };
+        let (profile_request, budget, staged_artifacts, plan) = staged.into_plan();
+        let profile_task = runtime.new_task(&task_id, &profile_request, budget);
+        let outcome = core
+            .submit_profile_validated(
+                request_id.clone(),
+                ValidatedSubmit::from_profile(profile_request, plan),
+                context.metadata,
+                context.finished_time,
+                Arc::clone(&profile_task),
+                staged_artifacts,
+            )
+            .await;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                runtime.release(reservation);
+                return error_response_for(
+                    PROFILE_PROTOCOL_VERSION,
+                    request_id,
+                    submit_error_code(&error),
+                    error.to_string(),
+                );
+            }
+        };
+        let SubmitOutcome {
+            task_id,
+            effective_limits,
+            observation,
+            ..
+        } = outcome;
+        match observation {
+            SubmitObservation::Task(TaskPayload::Running { .. }) => {
+                let task = match runtime.accept(reservation, Arc::clone(&profile_task)) {
+                    Ok(task) => task,
+                    Err(error) => {
+                        return profile_error_response(request_id, error);
+                    }
+                };
+                let limits = effective_limits
+                    .expect("RUNNING profile response requires verified effective limits")
+                    .into_protocol();
+                Response::ProfileAccepted {
+                    protocol_version: PROFILE_PROTOCOL_VERSION,
+                    request_id,
+                    payload: ProfileAcceptedPayload {
+                        task_id,
+                        state: TaskState::Running,
+                        profile: task.profile().clone(),
+                        effective_resources: ProfileEffectiveResources {
+                            limits,
+                            output: task.budget().protocol_output(),
+                        },
+                    },
+                }
+            }
+            SubmitObservation::Task(payload @ TaskPayload::Finished { .. }) => {
+                let task = match runtime.accept(reservation, Arc::clone(&profile_task)) {
+                    Ok(task) => task,
+                    Err(error) => {
+                        return profile_error_response(request_id, error);
+                    }
+                };
+                Response::ProfileResult {
+                    protocol_version: PROFILE_PROTOCOL_VERSION,
+                    request_id,
+                    payload: task.snapshot(payload).await,
+                }
+            }
+            SubmitObservation::Failed(failure) => {
+                runtime.release(reservation);
+                error_response_for(
+                    PROFILE_PROTOCOL_VERSION,
+                    request_id,
+                    failure.code,
+                    failure.message,
+                )
+            }
+        }
+    }
+
+    async fn handle_get_profile_result(&self, request: Request) -> Response {
+        let Request::GetProfileResult {
+            protocol_version,
+            request_id,
+            payload,
+        } = request
+        else {
+            unreachable!("profile result dispatcher must preserve request kind")
+        };
+        if let Some(response) = validate_profile_envelope(protocol_version, &request_id) {
+            return response;
+        }
+        let Some(runtime) = &self.profile else {
+            return error_response_for(
+                PROFILE_PROTOCOL_VERSION,
+                request_id,
+                ErrorCode::TaskNotFound,
+                format!("task was not found: {}", payload.task_id),
+            );
+        };
+        let task = match runtime.task(&payload.task_id) {
+            Ok(Some(task)) => task,
+            Ok(None) => match &self.state {
+                HandlerState::Ready { core, .. } => match core.snapshot(&payload.task_id) {
+                    Ok(Some(_)) => {
+                        return error_response_for(
+                            PROFILE_PROTOCOL_VERSION,
+                            request_id,
+                            ErrorCode::TaskKindMismatch,
+                            format!("task is not a Profile Task: {}", payload.task_id),
+                        );
+                    }
+                    Ok(None) => {
+                        return error_response_for(
+                            PROFILE_PROTOCOL_VERSION,
+                            request_id,
+                            ErrorCode::TaskNotFound,
+                            format!("task was not found: {}", payload.task_id),
+                        );
+                    }
+                    Err(error) => {
+                        return error_response_for(
+                            PROFILE_PROTOCOL_VERSION,
+                            request_id,
+                            ErrorCode::InternalError,
+                            error.to_string(),
+                        );
+                    }
+                },
+                HandlerState::Unavailable { .. } => {
+                    return error_response_for(
+                        PROFILE_PROTOCOL_VERSION,
+                        request_id,
+                        ErrorCode::TaskNotFound,
+                        format!("task was not found: {}", payload.task_id),
+                    );
+                }
+            },
+            Err(error) => return profile_error_response(request_id, error),
+        };
+        let raw = match &self.state {
+            HandlerState::Ready { core, .. } => core.snapshot(&payload.task_id),
+            HandlerState::Unavailable { .. } => Ok(None),
+        };
+        match raw {
+            Ok(Some(raw)) => Response::ProfileResult {
+                protocol_version: PROFILE_PROTOCOL_VERSION,
+                request_id,
+                payload: task.snapshot(raw).await,
+            },
+            Ok(None) => match runtime.discard_task(&payload.task_id) {
+                Ok(()) => error_response_for(
+                    PROFILE_PROTOCOL_VERSION,
+                    request_id,
+                    ErrorCode::TaskNotFound,
+                    format!("task was not found: {}", payload.task_id),
+                ),
+                Err(error) => profile_error_response(request_id, error),
+            },
+            Err(error) => error_response_for(
+                PROFILE_PROTOCOL_VERSION,
+                request_id,
+                ErrorCode::InternalError,
+                error.to_string(),
+            ),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_profile_envelope(protocol_version: u32, request_id: &str) -> Option<Response> {
+    if protocol_version != PROFILE_PROTOCOL_VERSION {
+        let code = if protocol_version == PROTOCOL_VERSION {
+            ErrorCode::InvalidRequest
+        } else {
+            ErrorCode::UnsupportedProtocolVersion
+        };
+        return Some(error_response_for(
+            PROFILE_PROTOCOL_VERSION,
+            request_id.to_owned(),
+            code,
+            format!("unsupported protocolVersion: {protocol_version}"),
+        ));
+    }
+    if !is_uuid(request_id) {
+        return Some(error_response_for(
+            PROFILE_PROTOCOL_VERSION,
+            request_id.to_owned(),
+            ErrorCode::InvalidRequest,
+            "requestId must be a UUID",
+        ));
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn profile_error_response(request_id: String, error: crate::profile::ProfileError) -> Response {
+    error_response_for(
+        PROFILE_PROTOCOL_VERSION,
+        request_id,
+        error.code(),
+        error.to_string(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn error_response_for(
+    protocol_version: u32,
+    request_id: String,
+    code: ErrorCode,
+    message: impl Into<String>,
+) -> Response {
+    Response::Error {
+        protocol_version,
+        request_id,
+        payload: ErrorPayload {
+            code,
+            message: message.into(),
+            retryable: matches!(code, ErrorCode::CapacityExhausted),
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reservation_client_request_id(reservation: &ProfileReservation) -> &str {
+    match reservation {
+        ProfileReservation::Owner {
+            client_request_id, ..
+        } => client_request_id,
+        ProfileReservation::Existing(_) => {
+            unreachable!("existing profile reservation is handled before staging")
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn existing_profile_response(
+    core: &Arc<SubmitCoordinator>,
+    runtime: &LocalProfileRuntime,
+    request_id: String,
+    task: Arc<ProfileTaskRecord>,
+) -> Response {
+    let raw = core.snapshot(task.task_id());
+    match raw {
+        Ok(Some(raw)) => Response::ProfileResult {
+            protocol_version: PROFILE_PROTOCOL_VERSION,
+            request_id,
+            payload: task.snapshot(raw).await,
+        },
+        Ok(None) => match runtime.discard_task(task.task_id()) {
+            Ok(()) => error_response_for(
+                PROFILE_PROTOCOL_VERSION,
+                request_id,
+                ErrorCode::TaskNotFound,
+                format!("task was not found: {}", task.task_id()),
+            ),
+            Err(error) => profile_error_response(request_id, error),
+        },
+        Err(error) => error_response_for(
+            PROFILE_PROTOCOL_VERSION,
+            request_id,
+            ErrorCode::InternalError,
+            error.to_string(),
+        ),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn submit_error_code(error: &SubmitError) -> ErrorCode {
+    match error {
+        SubmitError::Validation(SubmitValidationError::UnsupportedProtocolVersion(_)) => {
+            ErrorCode::UnsupportedProtocolVersion
+        }
+        SubmitError::Validation(_) => ErrorCode::InvalidRequest,
+        SubmitError::Registry(error) => registry_error_code(error),
+        SubmitError::CoordinatorStopped => ErrorCode::InternalError,
     }
 }
 
@@ -227,6 +668,14 @@ where
             request @ Request::SubmitTask { .. } => self.handle_submit(request, make_context).await,
             request @ Request::GetTask { .. } => self.handle_get_task(request),
             request @ Request::CancelTask { .. } => self.handle_cancel(request).await,
+            Request::SubmitProfile { request_id, .. }
+            | Request::GetProfileResult { request_id, .. } => {
+                RequestHandling::Handled(error_response(
+                    request_id,
+                    ErrorCode::InvalidRequest,
+                    "Profile requests require the daemon v2 dispatcher",
+                ))
+            }
         };
         match handling {
             RequestHandling::Handled(response) => response,
@@ -468,11 +917,15 @@ mod tests {
     use std::convert::Infallible;
     #[cfg(target_os = "linux")]
     use std::fs;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use serde_json::Value;
+    #[cfg(target_os = "linux")]
+    use sha2::{Digest, Sha256};
     #[cfg(target_os = "linux")]
     use tokio::time::{Duration as TokioDuration, timeout};
 
@@ -481,14 +934,20 @@ mod tests {
     use crate::cgroup::CgroupCreateFaults;
     #[cfg(target_os = "linux")]
     use crate::preflight::{CapabilityProbe, SystemProbe};
+    #[cfg(target_os = "linux")]
+    use crate::profile::{FILE_COPY_PROFILE_NAME, FILE_COPY_PROFILE_VERSION};
     use crate::protocol::{
         CommandSpec, CpuMax, EmptyPayload, OutputLimits, ProcessResult, ResourceLimits,
         SubmitTaskPayload, TaskIdPayload, TaskOutput, TaskTiming, TaskUsage, TerminationReason,
     };
+    #[cfg(target_os = "linux")]
+    use crate::resource_budget::ResourceBudget;
 
     const REQUEST_ID: &str = "11111111-1111-1111-1111-111111111111";
     const OTHER_REQUEST_ID: &str = "77777777-7777-7777-7777-777777777777";
     const CLIENT_REQUEST_ID: &str = "22222222-2222-2222-2222-222222222222";
+    #[cfg(target_os = "linux")]
+    const INVALID_PROFILE_CLIENT_REQUEST_ID: &str = "33333333-3333-3333-3333-333333333333";
     const TASK_ID: &str = "33333333-3333-3333-3333-333333333333";
     #[cfg(target_os = "linux")]
     const EXEC_FAILURE_CLIENT_REQUEST_ID: &str = "88888888-8888-8888-8888-888888888888";
@@ -747,6 +1206,71 @@ mod tests {
         )
     }
 
+    #[cfg(target_os = "linux")]
+    fn profile_request(
+        request_id: &str,
+        client_request_id: &str,
+        digest: String,
+        size_bytes: u64,
+    ) -> Request {
+        Request::SubmitProfile {
+            protocol_version: PROFILE_PROTOCOL_VERSION,
+            request_id: request_id.to_owned(),
+            payload: crate::protocol::ProfileRequestPayload {
+                client_request_id: client_request_id.to_owned(),
+                profile: crate::protocol::ProfileIdentity {
+                    name: FILE_COPY_PROFILE_NAME.to_owned(),
+                    version: FILE_COPY_PROFILE_VERSION.to_owned(),
+                },
+                inputs: BTreeMap::from([
+                    (
+                        "source".to_owned(),
+                        crate::protocol::ProfileInputValue::LocalInput {
+                            path: "jobs/42/source.txt".to_owned(),
+                            digest,
+                            size_bytes,
+                        },
+                    ),
+                    (
+                        "label".to_owned(),
+                        crate::protocol::ProfileInputValue::String {
+                            value: "archive".to_owned(),
+                        },
+                    ),
+                    (
+                        "retainMetadata".to_owned(),
+                        crate::protocol::ProfileInputValue::Boolean { value: true },
+                    ),
+                    (
+                        "priority".to_owned(),
+                        crate::protocol::ProfileInputValue::Int64 { value: 3 },
+                    ),
+                ]),
+                resource_overrides: None,
+            },
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn profile_budget() -> ResourceBudget {
+        ResourceBudget::try_from_protocol(
+            ResourceLimits {
+                cpu_max: CpuMax {
+                    quota_micros: 50_000,
+                    period_micros: 100_000,
+                },
+                memory_max_bytes: 64 * 1024 * 1024,
+                pids_max: 8,
+                wall_time_limit_ms: 5_000,
+            },
+            OutputLimits {
+                stdout_tail_max_bytes: 1_024,
+                stderr_tail_max_bytes: 1_024,
+            },
+        )
+        .expect("file-copy Profile test budget")
+    }
+
     fn running() -> TaskPayload {
         running_for(TASK_ID)
     }
@@ -816,6 +1340,22 @@ mod tests {
             response,
             Response::Error {
                 protocol_version: PROTOCOL_VERSION,
+                payload: ErrorPayload {
+                    code: actual,
+                    retryable: actual_retryable,
+                    ..
+                },
+                ..
+            } if actual == code && actual_retryable == retryable
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_profile_error(response: Response, code: ErrorCode, retryable: bool) {
+        assert!(matches!(
+            response,
+            Response::Error {
+                protocol_version: PROFILE_PROTOCOL_VERSION,
                 payload: ErrorPayload {
                     code: actual,
                     retryable: actual_retryable,
@@ -1370,6 +1910,7 @@ mod tests {
             TaskRegistrySettings::new(16).unwrap(),
             DeploymentResourcePolicy::for_test(),
             test_fail_stop(),
+            None,
         )
         .unwrap();
 
@@ -1486,6 +2027,201 @@ mod tests {
             remaining_jobs, 0,
             "handler 실행 뒤 작업 cgroup이 남아 있습니다"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn actual_profile_handler_snapshots_runs_and_publishes_after_cleanup() {
+        if std::env::var_os("TASKCAGE_RUN_LINUX_PROFILE_INTEGRATION").is_none() {
+            eprintln!("NOT EXECUTED: 실제 cgroup v2 위임 환경이 필요합니다");
+            return;
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("taskcage-profile-artifacts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(root.join("jobs")).unwrap();
+        fs::create_dir(root.join("jobs/42")).unwrap();
+        let source_bytes = b"TaskCage profile input\n";
+        fs::write(root.join("jobs/42/source.txt"), source_bytes).unwrap();
+        let digest = crate::digest::Sha256Digest::from_bytes(Sha256::digest(source_bytes).into());
+
+        let environment = SystemProbe::from_environment().check().unwrap();
+        let jobs_path = environment.report().delegated_root.join("jobs");
+        let profile_runtime = LocalProfileRuntime::open(&root, 1_024 * 1_024, profile_budget())
+            .expect("safe local Artifact root enables file-copy");
+        let handlers = ProtocolHandlers::initialize(
+            Ok(environment),
+            TaskCapacitySettings::new(1).unwrap(),
+            TaskRegistrySettings::new(16).unwrap(),
+            DeploymentResourcePolicy::for_test(),
+            test_fail_stop(),
+            Some(profile_runtime),
+        )
+        .unwrap();
+
+        let capabilities = handlers
+            .handle_daemon_request(
+                Request::GetCapabilities {
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id: REQUEST_ID.to_owned(),
+                    payload: EmptyPayload {},
+                },
+                context,
+            )
+            .await;
+        assert!(matches!(
+            capabilities,
+            Response::Capabilities { payload, .. }
+                if payload.cgroup_v2_ready && payload.protocol_versions == vec![1, 2]
+        ));
+
+        let mut invalid = profile_request(
+            REQUEST_ID,
+            INVALID_PROFILE_CLIENT_REQUEST_ID,
+            digest.to_string(),
+            source_bytes.len() as u64,
+        );
+        let Request::SubmitProfile { payload, .. } = &mut invalid else {
+            unreachable!("test helper must build a Profile request")
+        };
+        payload.inputs.insert(
+            "priority".to_owned(),
+            crate::protocol::ProfileInputValue::String {
+                value: "not-an-int64".to_owned(),
+            },
+        );
+        let rejected = handlers
+            .handle_daemon_request(invalid, || {
+                panic!("invalid Profile input must not allocate a task context")
+            })
+            .await;
+        assert_profile_error(rejected, ErrorCode::InvalidProfileInput, false);
+        let HandlerState::Ready { core, .. } = &handlers.state else {
+            panic!("Profile integration requires a ready daemon")
+        };
+        assert!(
+            core.snapshot_by_client_request_id(INVALID_PROFILE_CLIENT_REQUEST_ID)
+                .unwrap()
+                .is_none(),
+            "invalid Profile input must not reserve a Raw Task"
+        );
+        assert_eq!(
+            fs::read_dir(&jobs_path)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("job-"))
+                .count(),
+            0,
+            "invalid Profile input must not create a task cgroup"
+        );
+
+        let submitted = handlers
+            .handle_daemon_request(
+                profile_request(
+                    REQUEST_ID,
+                    CLIENT_REQUEST_ID,
+                    digest.to_string(),
+                    source_bytes.len() as u64,
+                ),
+                || context_for(TASK_ID),
+            )
+            .await;
+        match submitted {
+            Response::ProfileAccepted {
+                protocol_version: PROFILE_PROTOCOL_VERSION,
+                payload:
+                    ProfileAcceptedPayload {
+                        task_id,
+                        state: TaskState::Running,
+                        profile,
+                        ..
+                    },
+                ..
+            }
+            | Response::ProfileResult {
+                protocol_version: PROFILE_PROTOCOL_VERSION,
+                payload:
+                    crate::protocol::ProfileTaskPayload::Finished {
+                        task_id, profile, ..
+                    },
+                ..
+            } if task_id == TASK_ID
+                && profile.name == FILE_COPY_PROFILE_NAME
+                && profile.version == FILE_COPY_PROFILE_VERSION => {}
+            response => panic!("unexpected file-copy submit response: {response:#?}"),
+        }
+
+        let finished = timeout(TokioDuration::from_secs(5), async {
+            loop {
+                let response = handlers
+                    .handle_daemon_request(
+                        Request::GetProfileResult {
+                            protocol_version: PROFILE_PROTOCOL_VERSION,
+                            request_id: OTHER_REQUEST_ID.to_owned(),
+                            payload: TaskIdPayload {
+                                task_id: TASK_ID.to_owned(),
+                            },
+                        },
+                        context,
+                    )
+                    .await;
+                if let Response::ProfileResult {
+                    payload: payload @ crate::protocol::ProfileTaskPayload::Finished { .. },
+                    ..
+                } = response
+                {
+                    break payload;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("profile result must finish after runner cleanup");
+        assert!(matches!(
+            finished,
+            crate::protocol::ProfileTaskPayload::Finished {
+                profile_outcome: crate::protocol::ProfileOutcome::Succeeded,
+                termination_reason: TerminationReason::Exited,
+                ref artifacts,
+                failure: None,
+                ..
+            } if artifacts.len() == 1
+        ));
+        assert_eq!(
+            fs::read(root.join(format!("tasks/{TASK_ID}/result.txt"))).unwrap(),
+            source_bytes
+        );
+        assert!(
+            !root.join(format!(".taskcage/staging/{TASK_ID}")).exists(),
+            "published Profile result must remove staging"
+        );
+        let raw_snapshot = handled(handlers.handle_get_task(Request::GetTask {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: OTHER_REQUEST_ID.to_owned(),
+            payload: TaskIdPayload {
+                task_id: TASK_ID.to_owned(),
+            },
+        }));
+        assert!(matches!(
+            raw_snapshot,
+            Response::Task {
+                payload: TaskPayload::Finished {
+                    termination_reason: TerminationReason::Exited,
+                    ..
+                },
+                ..
+            }
+        ));
+        let remaining_jobs = fs::read_dir(jobs_path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("job-"))
+            .count();
+        assert_eq!(remaining_jobs, 0, "Profile 뒤 작업 cgroup이 남아 있습니다");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "linux")]
@@ -1760,6 +2496,7 @@ mod tests {
             TaskRegistrySettings::new(16).unwrap(),
             DeploymentResourcePolicy::for_test(),
             test_fail_stop(),
+            None,
         )
         .unwrap();
 

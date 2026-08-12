@@ -30,6 +30,8 @@ mod handlers;
 mod lifecycle;
 pub mod output;
 pub mod preflight;
+#[cfg(target_os = "linux")]
+mod profile;
 pub mod protocol;
 pub mod resource_budget;
 #[cfg(target_os = "linux")]
@@ -158,6 +160,15 @@ pub struct DaemonConfig {
     cleanup_timeout: Duration,
     fail_stop_timeout: Duration,
     deployment_policy: deployment_policy::DeploymentResourcePolicy,
+    local_profile: Option<LocalProfileConfig>,
+}
+
+/// 명시적으로 활성화한 v0.2 test Profile의 daemon-owned Artifact root 설정이다.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub struct LocalProfileConfig {
+    artifact_root: PathBuf,
+    maximum_artifact_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -236,7 +247,39 @@ impl DaemonConfig {
             cleanup_timeout,
             fail_stop_timeout,
             deployment_policy,
+            local_profile: None,
         })
+    }
+
+    /// immutable `file-copy@1.0.0` test Profile을 enable한다.
+    ///
+    /// Artifact root의 owner, mode, symlink/mount safety는 daemon startup에서 descriptor-relative로
+    /// 다시 검증한다. 이 builder는 Raw Command Protocol v1의 기본 행동을 바꾸지 않는다.
+    pub fn with_file_copy_profile(
+        mut self,
+        artifact_root: PathBuf,
+        maximum_artifact_bytes: u64,
+    ) -> Result<Self> {
+        if !artifact_root.is_absolute() {
+            return Err(Error::InvalidArgument(
+                "artifact-root 경로는 절대 경로여야 합니다".to_owned(),
+            ));
+        }
+        if artifact_root.to_str().is_none() {
+            return Err(Error::InvalidArgument(
+                "artifact-root 경로는 UTF-8이어야 합니다".to_owned(),
+            ));
+        }
+        if maximum_artifact_bytes == 0 {
+            return Err(Error::InvalidArgument(
+                "artifact-max-bytes 값은 0보다 커야 합니다".to_owned(),
+            ));
+        }
+        self.local_profile = Some(LocalProfileConfig {
+            artifact_root,
+            maximum_artifact_bytes,
+        });
+        Ok(self)
     }
 }
 
@@ -298,12 +341,27 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         cgroup_v2_ready = true,
         "cgroup 사전 검사를 통과했습니다"
     );
+    let local_profile = config
+        .local_profile
+        .as_ref()
+        .map(|settings| {
+            profile::LocalProfileRuntime::open(
+                &settings.artifact_root,
+                settings.maximum_artifact_bytes,
+                config.deployment_policy.maximum().clone(),
+            )
+            .map_err(|error| {
+                Error::InvalidArgument(format!("local profile 설정이 안전하지 않습니다: {error}"))
+            })
+        })
+        .transpose()?;
     let handlers = Arc::new(ProtocolHandlers::initialize(
         Ok(environment),
         capacity_settings,
         registry_settings,
         config.deployment_policy,
         fail_stop,
+        local_profile,
     )?);
     tracing::info!(event = "daemon_started", "TaskCage daemon started");
     let result = server::serve_protocol_until(

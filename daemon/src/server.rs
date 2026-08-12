@@ -214,7 +214,7 @@ where
         let handlers = Arc::clone(&dispatch_handlers);
         Box::pin(async move {
             handlers
-                .handle_request(request, || submit_context(cleanup_timeout))
+                .handle_daemon_request(request, || submit_context(cleanup_timeout))
                 .await
         })
     });
@@ -1743,6 +1743,7 @@ mod tests {
                 FailStopCoordinator::new(
                     crate::fail_stop::FailStopSettings::new(Duration::from_secs(5)).unwrap(),
                 ),
+                None,
             )
             .unwrap(),
         );
