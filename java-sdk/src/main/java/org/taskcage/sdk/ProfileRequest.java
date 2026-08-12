@@ -11,8 +11,7 @@ public record ProfileRequest(
         ProfileIdentity profile,
         Map<String, ProfileInputValue> inputs,
         ProfileResourceOverrides resourceOverrides) {
-    // The approved v2 fixture uses retainMetadata; names remain case-sensitive.
-    private static final Pattern SLOT_NAME = Pattern.compile("[a-z][A-Za-z0-9_-]{0,63}");
+    private static final Pattern SLOT_NAME = Pattern.compile("[a-z][a-z0-9_-]{0,63}");
 
     public ProfileRequest(ProfileIdentity profile, Map<String, ProfileInputValue> inputs) {
         this(profile, inputs, ProfileResourceOverrides.none());
@@ -30,7 +29,7 @@ public record ProfileRequest(
             Objects.requireNonNull(name, "input slot name");
             Objects.requireNonNull(value, "input value");
             if (!SLOT_NAME.matcher(name).matches()) {
-                throw new IllegalArgumentException("input slot name must match [a-z][A-Za-z0-9_-]{0,63}");
+                throw new IllegalArgumentException("input slot name must match [a-z][a-z0-9_-]{0,63}");
             }
             copy.put(name, value);
         });

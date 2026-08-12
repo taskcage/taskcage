@@ -212,7 +212,7 @@ class ProfileProtocolFixtureCompatibilityTest {
                                 12),
                         "label",
                         new StringProfileInput("archive"),
-                        "retainMetadata",
+                        "retain_metadata",
                         new BooleanProfileInput(true),
                         "priority",
                         new Int64ProfileInput(3)),

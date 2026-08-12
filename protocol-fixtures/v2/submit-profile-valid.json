@@ -19,7 +19,7 @@
         "kind": "STRING",
         "value": "archive"
       },
-      "retainMetadata": {
+      "retain_metadata": {
         "kind": "BOOLEAN",
         "value": true
       },

@@ -29,6 +29,8 @@ class ProfileApiTest {
         assertThrows(IllegalArgumentException.class, () -> new Sha256Digest("sha256:ABCDEF"));
         assertThrows(IllegalArgumentException.class,
                 () -> new LocalInputArtifact(new ArtifactPath("jobs/source.txt"), DIGEST, -1));
+        assertThrows(IllegalArgumentException.class,
+                () -> new ProfileRequest(PROFILE, Map.of("retainMetadata", new BooleanProfileInput(true))));
     }
 
     @Test

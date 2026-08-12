@@ -66,7 +66,7 @@ ProfileRequest request = new ProfileRequest(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             12),
         "label", new StringProfileInput("archive"),
-        "retainMetadata", new BooleanProfileInput(true),
+        "retain_metadata", new BooleanProfileInput(true),
         "priority", new Int64ProfileInput(3)),
     ProfileResourceOverrides.builder()
         .wallTimeLimit(Duration.ofMinutes(5))
