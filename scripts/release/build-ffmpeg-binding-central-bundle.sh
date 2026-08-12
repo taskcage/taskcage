@@ -12,12 +12,12 @@ fail() {
 }
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
-  fail "usage: build-central-bundle.sh VERSION [OUTPUT_DIRECTORY]"
+  fail "usage: build-ffmpeg-binding-central-bundle.sh VERSION [OUTPUT_DIRECTORY]"
 fi
 
 readonly release_version="$1"
 readonly requested_output_directory="${2:-${repository_root}/dist}"
-"${script_directory}/verify-version.sh" java-sdk "${release_version}" >/dev/null
+"${script_directory}/verify-version.sh" ffmpeg-binding "${release_version}" >/dev/null
 
 [[ -n "${MAVEN_SIGNING_KEY:-}" ]] || fail "MAVEN_SIGNING_KEY is required"
 [[ -n "${MAVEN_SIGNING_PASSWORD:-}" ]] || fail "MAVEN_SIGNING_PASSWORD is required"
@@ -28,15 +28,15 @@ done
 mkdir -p -- "${requested_output_directory}"
 output_directory="$(cd -- "${requested_output_directory}" && pwd)"
 readonly output_directory
-readonly bundle_path="${output_directory}/taskcage-java-sdk-${release_version}-central.zip"
+readonly bundle_path="${output_directory}/taskcage-ffmpeg-binding-${release_version}-central.zip"
 [[ ! -e "${bundle_path}" ]] || fail "Central bundle already exists: ${bundle_path}"
 
-bundle_staging_directory="$(mktemp -d /tmp/taskcage-central-bundle.XXXXXX)"
+bundle_staging_directory="$(mktemp -d /tmp/taskcage-ffmpeg-binding-central-bundle.XXXXXX)"
 resolved_bundle_staging_directory="$(readlink -f "${bundle_staging_directory}")"
 cleanup() {
   if [[ -n "${resolved_bundle_staging_directory}" && -d "${resolved_bundle_staging_directory}" ]]; then
     case "${resolved_bundle_staging_directory}" in
-      /tmp/taskcage-central-bundle.*|/private/tmp/taskcage-central-bundle.*) rm -rf -- "${resolved_bundle_staging_directory}" ;;
+      /tmp/taskcage-ffmpeg-binding-central-bundle.*|/private/tmp/taskcage-ffmpeg-binding-central-bundle.*) rm -rf -- "${resolved_bundle_staging_directory}" ;;
       *) echo "WARN: refusing to remove unexpected bundle path: ${resolved_bundle_staging_directory}" >&2 ;;
     esac
   fi
@@ -45,16 +45,16 @@ trap cleanup EXIT
 
 cd "${repository_root}"
 java-sdk/gradlew \
-  -p java-sdk \
+  -p java-bindings/ffmpeg \
   clean \
   publishMavenJavaPublicationToCentralBundleRepository \
   --no-daemon \
   --no-problems-report
 
-readonly repository_directory="${repository_root}/java-sdk/build/central-repository"
-readonly component_directory="${repository_directory}/org/taskcage/taskcage-java-sdk/${release_version}"
-readonly artifact_prefix="${component_directory}/taskcage-java-sdk-${release_version}"
-readonly staged_component_directory="${bundle_staging_directory}/org/taskcage/taskcage-java-sdk/${release_version}"
+readonly repository_directory="${repository_root}/java-bindings/ffmpeg/build/central-repository"
+readonly component_directory="${repository_directory}/org/taskcage/taskcage-ffmpeg-binding/${release_version}"
+readonly artifact_prefix="${component_directory}/taskcage-ffmpeg-binding-${release_version}"
+readonly staged_component_directory="${bundle_staging_directory}/org/taskcage/taskcage-ffmpeg-binding/${release_version}"
 
 for artifact in \
   "${artifact_prefix}.jar" \
