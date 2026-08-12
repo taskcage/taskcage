@@ -6,6 +6,8 @@
 use std::fmt;
 use std::io::{self, Read};
 #[cfg(target_os = "linux")]
+use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
@@ -313,12 +315,12 @@ impl LocalArtifactStore {
     ///
     /// 이 메서드는 Registry reservation, cgroup, target보다 먼저 호출되어야 한다. 실패하면 target이
     /// 시작되지 않은 상태에서 preflight staging을 정리한다.
-    pub fn stage_input<'store>(
-        &'store self,
+    pub fn stage_input(
+        self: &Arc<Self>,
         task_id: &str,
         input: &LocalInputArtifact,
         output: DeclaredOutputArtifact,
-    ) -> Result<StagedArtifactTask<'store>, ArtifactStoreError> {
+    ) -> Result<StagedArtifactTask, ArtifactStoreError> {
         validate_task_id(task_id)?;
         let layout = self.open_layout()?;
         let preflight_name = self.next_preflight_name(task_id);
@@ -345,7 +347,7 @@ impl LocalArtifactStore {
             layout.preflight.sync_all()?;
 
             Ok(StagedArtifactTask {
-                store: self,
+                store: Arc::clone(self),
                 task_id: task_id.to_owned(),
                 task_directory,
                 output_directory,
@@ -397,8 +399,8 @@ impl LocalArtifactStore {
 /// Profile 실행 전에 만든 daemon-owned input/output staging directory다.
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
-pub struct StagedArtifactTask<'store> {
-    store: &'store LocalArtifactStore,
+pub struct StagedArtifactTask {
+    store: Arc<LocalArtifactStore>,
     task_id: String,
     task_directory: ArtifactDirectory,
     output_directory: ArtifactDirectory,
@@ -407,7 +409,12 @@ pub struct StagedArtifactTask<'store> {
 }
 
 #[cfg(target_os = "linux")]
-impl StagedArtifactTask<'_> {
+impl StagedArtifactTask {
+    /// Profile target의 relative path 해석을 막기 위한 daemon-owned absolute working directory다.
+    pub fn working_directory(&self) -> PathBuf {
+        self.task_directory.path.clone()
+    }
+
     /// Target이 읽기 전용 snapshot을 받는 absolute path다.
     pub fn input_path(&self) -> PathBuf {
         self.task_directory
@@ -423,7 +430,39 @@ impl StagedArtifactTask<'_> {
     }
 
     /// target 성공·whole-task cleanup 뒤 output을 검증하고 no-overwrite atomic rename으로 공개한다.
-    pub fn publish(mut self) -> Result<PublishedArtifact, ArtifactStoreError> {
+    pub fn publish(self) -> Result<PublishedArtifact, ArtifactStoreError> {
+        match self.publish_for_profile()? {
+            Ok(artifact) => Ok(artifact),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Profile terminal state를 만들기 위해 publish rejection과 cleanup uncertainty를 분리한다.
+    ///
+    /// outer `Err`는 staging cleanup 자체가 확인되지 않은 경우이며, caller는 FINISHED를 공개하지
+    /// 않고 fail-stop 해야 한다. inner `Err`는 cleanup을 확인한 output contract/publish rejection이다.
+    pub(crate) fn publish_for_profile(
+        mut self,
+    ) -> Result<Result<PublishedArtifact, ArtifactStoreError>, ArtifactStoreError> {
+        let result = self.publish_inner();
+        match result {
+            Ok(artifact) => {
+                self.terminal = true;
+                Ok(Ok(artifact))
+            }
+            Err(error) => {
+                // profile failure도 staging cleanup이 끝난 뒤에만 공개할 수 있다. 오류가 난 지점이
+                // rename 전이든 후 rollback 뒤이든, task directory가 남지 않았음을 동기적으로 확인한다.
+                if self.task_directory.path.exists() {
+                    self.cleanup_staging()?;
+                }
+                self.terminal = true;
+                Ok(Err(error))
+            }
+        }
+    }
+
+    fn publish_inner(&self) -> Result<PublishedArtifact, ArtifactStoreError> {
         self.validate_declared_staging()?;
         let output = self.output_directory.open_regular_file("result.part")?;
         let (size_bytes, digest) = verify_output(
@@ -474,7 +513,6 @@ impl StagedArtifactTask<'_> {
             self.output.file_name()
         ))
         .expect("Task id와 output file name은 이미 검증됐습니다");
-        self.terminal = true;
         Ok(PublishedArtifact {
             path: relative,
             digest,
@@ -513,7 +551,7 @@ impl StagedArtifactTask<'_> {
 }
 
 #[cfg(target_os = "linux")]
-impl Drop for StagedArtifactTask<'_> {
+impl Drop for StagedArtifactTask {
     fn drop(&mut self) {
         if !self.terminal {
             let _ = self.cleanup_staging();
@@ -1327,7 +1365,8 @@ mod linux_store_tests {
         fs::create_dir(root.path().join("inputs")).expect("inputs directory 생성");
         fs::write(root.path().join("inputs/source.bin"), b"source bytes").expect("input 생성");
         let input = input_descriptor(root.path(), "inputs/source.bin");
-        let store = LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비");
+        let store =
+            Arc::new(LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비"));
 
         let staged = store
             .stage_input(TASK_ID, &input, output_contract())
@@ -1367,7 +1406,8 @@ mod linux_store_tests {
         fs::create_dir(root.path().join("inputs")).expect("inputs directory 생성");
         fs::write(root.path().join("inputs/source.bin"), b"source bytes").expect("input 생성");
         let input = input_descriptor(root.path(), "inputs/source.bin");
-        let store = LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비");
+        let store =
+            Arc::new(LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비"));
 
         let staged = store
             .stage_input(TASK_ID, &input, output_contract())
@@ -1413,7 +1453,8 @@ mod linux_store_tests {
             Sha256Digest::from_bytes(Sha256::digest(b"outside").into()),
             7,
         );
-        let store = LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비");
+        let store =
+            Arc::new(LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비"));
 
         assert!(
             store
@@ -1436,7 +1477,8 @@ mod linux_store_tests {
             Sha256Digest::from_bytes(Sha256::digest(b"original source").into()),
             14,
         );
-        let store = LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비");
+        let store =
+            Arc::new(LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비"));
 
         assert!(matches!(
             store.stage_input(TASK_ID, &input, output_contract()),
@@ -1455,7 +1497,8 @@ mod linux_store_tests {
         fs::create_dir(root.path().join("inputs")).expect("inputs directory 생성");
         fs::write(root.path().join("inputs/source.bin"), b"source bytes").expect("input 생성");
         let input = input_descriptor(root.path(), "inputs/source.bin");
-        let store = LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비");
+        let store =
+            Arc::new(LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비"));
 
         let staged = store
             .stage_input(TASK_ID, &input, output_contract())
@@ -1480,7 +1523,8 @@ mod linux_store_tests {
         )
         .expect("existing output 생성");
         let input = input_descriptor(root.path(), "inputs/source.bin");
-        let store = LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비");
+        let store =
+            Arc::new(LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비"));
 
         let staged = store
             .stage_input(TASK_ID, &input, output_contract())
@@ -1503,7 +1547,8 @@ mod linux_store_tests {
         fs::create_dir(root.path().join("inputs")).expect("inputs directory 생성");
         fs::write(root.path().join("inputs/source.bin"), b"source bytes").expect("input 생성");
         let input = input_descriptor(root.path(), "inputs/source.bin");
-        let store = LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비");
+        let store =
+            Arc::new(LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비"));
 
         let staged = store
             .stage_input(TASK_ID, &input, output_contract())

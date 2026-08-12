@@ -11,9 +11,9 @@ use tokio::sync::Notify;
 #[cfg(test)]
 use crate::cancellation::cancellation_channel;
 use crate::cancellation::{CancellationWaiter, RunningCancellation};
-use crate::protocol::{ErrorCode, SubmitTaskPayload, TaskPayload};
+use crate::protocol::{ErrorCode, TaskPayload};
 use crate::resource_budget::VerifiedEffectiveLimits;
-use crate::submit::ValidatedSubmit;
+use crate::submit::{SubmissionIdentity, ValidatedSubmit};
 
 pub(crate) const MIN_FINISHED_RETENTION: Duration = Duration::from_secs(10 * 60);
 
@@ -105,7 +105,7 @@ struct TaskRecord {
 #[derive(Debug)]
 struct RequestRecord {
     task_id: String,
-    payload: SubmitTaskPayload,
+    identity: SubmissionIdentity,
     reservation: Arc<SubmitSignal>,
 }
 
@@ -215,13 +215,13 @@ where
     where
         F: FnOnce() -> String,
     {
-        let payload = request.payload().clone();
-        let client_request_id = payload.client_request_id.clone();
+        let identity = request.identity().clone();
+        let client_request_id = request.client_request_id().to_owned();
         let mut state = self.lock_state()?;
         state.purge_expired();
 
         if let Some(existing) = state.requests.get(&client_request_id) {
-            if existing.payload != payload {
+            if existing.identity != identity {
                 return Err(RegistryError::IdempotencyConflict(client_request_id));
             }
             return Ok(SubmitReservation::Existing(SubmitWaiter {
@@ -246,7 +246,7 @@ where
             client_request_id.clone(),
             RequestRecord {
                 task_id: candidate_task_id.clone(),
-                payload,
+                identity,
                 reservation: Arc::clone(&signal),
             },
         );
@@ -267,15 +267,16 @@ where
         &self,
         request: &ValidatedSubmit,
     ) -> Result<Option<SubmitWaiter>, RegistryError> {
-        let payload = request.payload();
+        let identity = request.identity();
+        let client_request_id = request.client_request_id();
         let mut state = self.lock_state()?;
         state.purge_expired();
-        let Some(existing) = state.requests.get(&payload.client_request_id) else {
+        let Some(existing) = state.requests.get(client_request_id) else {
             return Ok(None);
         };
-        if existing.payload != *payload {
+        if existing.identity != *identity {
             return Err(RegistryError::IdempotencyConflict(
-                payload.client_request_id.clone(),
+                client_request_id.to_owned(),
             ));
         }
         Ok(Some(SubmitWaiter {
@@ -310,6 +311,16 @@ where
             .tasks
             .get(task_id)
             .map(|record| record.snapshot.clone()))
+    }
+
+    /// Profile preflight가 snapshot을 만들기 전에 Raw Command의 동일 clientRequestId가 있는지 확인한다.
+    pub(crate) fn has_client_request_id(
+        &self,
+        client_request_id: &str,
+    ) -> Result<bool, RegistryError> {
+        let mut state = self.lock_state()?;
+        state.purge_expired();
+        Ok(state.requests.contains_key(client_request_id))
     }
 
     pub(crate) fn effective_limits_for(
@@ -646,11 +657,11 @@ where
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn finish(
+    pub(crate) fn finish_payload(
         mut self,
-        completed: crate::runner::CompletedTask,
+        payload: TaskPayload,
     ) -> Result<FinishedTaskPublication, RegistryError> {
-        self.finish_inner(completed.into_payload())
+        self.finish_inner(payload)
     }
 
     #[cfg(test)]
@@ -792,8 +803,8 @@ mod tests {
 
     use super::*;
     use crate::protocol::{
-        CommandSpec, CpuMax, OutputLimits, ProcessResult, Request, ResourceLimits, TaskOutput,
-        TaskTiming, TaskUsage, TerminationReason,
+        CommandSpec, CpuMax, OutputLimits, ProcessResult, Request, ResourceLimits,
+        SubmitTaskPayload, TaskOutput, TaskTiming, TaskUsage, TerminationReason,
     };
 
     const TASK_ID: &str = "33333333-3333-3333-3333-333333333333";

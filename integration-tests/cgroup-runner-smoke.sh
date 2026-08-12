@@ -279,6 +279,23 @@ unit_sequence=$((unit_sequence + 1))
   --exact \
   --nocapture
 
+# Local Profile은 daemon-owned input snapshot을 만든 뒤 cgroup에서 고정 argv를 실행하고,
+# cleanup-confirmed result에서만 immutable Artifact를 publish한다.
+unit_sequence=$((unit_sequence + 1))
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-local-profile-$$-${unit_sequence}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --setenv=TASKCAGE_RUN_LINUX_PROFILE_INTEGRATION=1 \
+  "${submit_test}" \
+  'handlers::tests::actual_profile_handler_snapshots_runs_and_publishes_after_cleanup' \
+  --exact \
+  --nocapture
+
 # read-back 불일치의 공개 오류, rollback, capacity와 fail-stop 계약을 실제 cgroup에서 확인한다.
 unit_sequence=$((unit_sequence + 1))
 "${taskcage_systemd[@]}" \

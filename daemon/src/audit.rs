@@ -39,6 +39,8 @@ pub(crate) fn request_operation(request: &Request) -> &'static str {
         Request::SubmitTask { .. } => "submitTask",
         Request::GetTask { .. } => "getTask",
         Request::CancelTask { .. } => "cancelTask",
+        Request::SubmitProfile { .. } => "submitProfile",
+        Request::GetProfileResult { .. } => "getProfileResult",
     }
 }
 
@@ -218,6 +220,54 @@ fn response_audit<'a>(operation: &'static str, response: &'a Response) -> Respon
             exit_code: None,
             signal: None,
         },
+        Response::ProfileAccepted { payload, .. } => ResponseAudit {
+            event: "task_admitted",
+            request_id,
+            operation,
+            outcome: "RUNNING",
+            task_id: Some(&payload.task_id),
+            error_code: None,
+            termination_reason: None,
+            cleanup_complete: None,
+            exit_code: None,
+            signal: None,
+        },
+        Response::ProfileResult {
+            payload: crate::protocol::ProfileTaskPayload::Running { task_id, .. },
+            ..
+        } => ResponseAudit {
+            event: "task_observed",
+            request_id,
+            operation,
+            outcome: "RUNNING",
+            task_id: Some(task_id),
+            error_code: None,
+            termination_reason: None,
+            cleanup_complete: None,
+            exit_code: None,
+            signal: None,
+        },
+        Response::ProfileResult {
+            payload:
+                crate::protocol::ProfileTaskPayload::Finished {
+                    task_id,
+                    termination_reason,
+                    process,
+                    ..
+                },
+            ..
+        } => ResponseAudit {
+            event: "task_finished",
+            request_id,
+            operation,
+            outcome: "FINISHED",
+            task_id: Some(task_id),
+            error_code: None,
+            termination_reason: Some(termination_reason_name(*termination_reason)),
+            cleanup_complete: Some(true),
+            exit_code: process.exit_code,
+            signal: process.signal.as_deref(),
+        },
         Response::Error { payload, .. } => ResponseAudit {
             event: "request_rejected",
             request_id,
@@ -257,6 +307,11 @@ fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::IdempotencyConflict => "IDEMPOTENCY_CONFLICT",
         ErrorCode::LimitExceedsPolicy => "LIMIT_EXCEEDS_POLICY",
         ErrorCode::InternalError => "INTERNAL_ERROR",
+        ErrorCode::ProfileNotFound => "PROFILE_NOT_FOUND",
+        ErrorCode::InvalidProfileInput => "INVALID_PROFILE_INPUT",
+        ErrorCode::InvalidArtifactPath => "INVALID_ARTIFACT_PATH",
+        ErrorCode::ArtifactDigestMismatch => "ARTIFACT_DIGEST_MISMATCH",
+        ErrorCode::TaskKindMismatch => "TASK_KIND_MISMATCH",
     }
 }
 

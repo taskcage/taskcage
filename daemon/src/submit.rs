@@ -29,6 +29,7 @@ pub(crate) use self::registry::{RegistryError, SubmitFailure, SubmitObservation}
 use crate::cancellation::{CancellationRuntime, RunningCancellation, cancellation_channel};
 #[cfg(any(target_os = "linux", test))]
 use crate::capacity::{TaskCapacity, TaskCapacityPermit, TaskCapacitySettings};
+use crate::execution_plan::ResolvedExecutionPlan;
 #[cfg(any(target_os = "linux", test))]
 use crate::fail_stop::{
     ActiveExecution, CleanupFailureReport, FailStopCoordinator, FailStopSettings,
@@ -37,12 +38,14 @@ use crate::fail_stop::{
 use crate::preflight::VerifiedEnvironment;
 #[cfg(any(target_os = "linux", test))]
 use crate::protocol::{ErrorCode, TaskPayload};
-use crate::protocol::{PROTOCOL_VERSION, Request, SubmitTaskPayload};
+use crate::protocol::{PROTOCOL_VERSION, ProfileRequestPayload, Request, SubmitTaskPayload};
 #[cfg(any(target_os = "linux", test))]
 use crate::resource_budget::VerifiedEffectiveLimits;
 use crate::resource_budget::{ResourceBudget, ResourceBudgetError};
 #[cfg(target_os = "linux")]
-use crate::runner::{CompletedTask, TaskRunConfig, TaskRunFailureKind, TaskRunner};
+use crate::runner::{TaskRunConfig, TaskRunFailureKind, TaskRunner};
+#[cfg(target_os = "linux")]
+use crate::{artifact::StagedArtifactTask, profile::ProfileTaskRecord};
 
 #[cfg(any(target_os = "linux", test))]
 const CAPACITY_EXHAUSTED_MESSAGE: &str = "all task execution slots are in use";
@@ -60,7 +63,6 @@ impl RunnerPermit {
 
 #[cfg(any(target_os = "linux", test))]
 pub(crate) enum TaskIdSource {
-    #[cfg(test)]
     Fixed(String),
     Lazy(Box<dyn FnOnce() -> String + Send + 'static>),
 }
@@ -69,7 +71,6 @@ pub(crate) enum TaskIdSource {
 impl std::fmt::Debug for TaskIdSource {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            #[cfg(test)]
             Self::Fixed(task_id) => formatter.debug_tuple("Fixed").field(task_id).finish(),
             Self::Lazy(_) => formatter.write_str("Lazy(<task id factory>)"),
         }
@@ -170,10 +171,17 @@ impl SubmitMetadata {
 
     fn make_task_id(&mut self) -> String {
         match self.task_id.take().expect("task ID source가 있어야 합니다") {
-            #[cfg(test)]
             TaskIdSource::Fixed(task_id) => task_id,
             TaskIdSource::Lazy(make_task_id) => make_task_id(),
         }
+    }
+
+    /// Artifact preflight가 task-owned staging directory를 만들기 전에 daemon task ID를 고정한다.
+    /// 이후 Registry reservation은 이 값만 사용해 Artifact publish path와 raw Task ID를 일치시킨다.
+    pub(crate) fn preallocate_task_id(&mut self) -> String {
+        let task_id = self.make_task_id();
+        self.task_id = Some(TaskIdSource::Fixed(task_id.clone()));
+        task_id
     }
 }
 
@@ -225,15 +233,14 @@ struct SubmitExecutionConfig {
     submitted_at: String,
     start_time: TaskStartTimeSource,
     cleanup_timeout: Duration,
-    command: crate::protocol::CommandSpec,
-    budget: ResourceBudget,
+    plan: ResolvedExecutionPlan,
 }
 
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug)]
 enum ExecutionCompletion {
     #[cfg(target_os = "linux")]
-    Real(CompletedTask),
+    Real(TaskPayload),
     #[cfg(test)]
     Test(TaskPayload),
 }
@@ -379,36 +386,68 @@ impl SubmitCoordinator {
                             submitted_at: config.submitted_at,
                             start_time: config.start_time,
                             cleanup_timeout: config.cleanup_timeout,
-                            command: config.command,
-                            budget: config.budget,
+                            plan: config.plan,
                         },
                         running_sender,
                         cancellation,
                         finished_time,
                     )
                     .await
-                    .map(ExecutionCompletion::Real)
+                    .map(|completed| ExecutionCompletion::Real(completed.into_payload()))
+                    .map_err(runner_execution_failure)
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn submit_profile_validated<F>(
+        &self,
+        request_id: String,
+        validated: ValidatedSubmit,
+        metadata: SubmitMetadata,
+        finished_time: F,
+        profile_task: Arc<ProfileTaskRecord>,
+        staged_artifacts: StagedArtifactTask,
+    ) -> Result<SubmitOutcome, SubmitError>
+    where
+        F: FnOnce() -> (String, Instant) + Send + 'static,
+    {
+        let runner = Arc::clone(&self.runner);
+        coordinate_validated_submit(
+            self.registry.clone(),
+            Arc::clone(&self.capacity),
+            Arc::clone(&self.fail_stop),
+            request_id,
+            validated,
+            metadata,
+            move |config, running_sender, cancellation| async move {
+                let completed = runner
+                    .run_task(
+                        RunnerPermit::new(),
+                        TaskRunConfig {
+                            task_id: config.task_id,
+                            submitted_at: config.submitted_at,
+                            start_time: config.start_time,
+                            cleanup_timeout: config.cleanup_timeout,
+                            plan: config.plan,
+                        },
+                        running_sender,
+                        cancellation,
+                        finished_time,
+                    )
+                    .await
+                    .map_err(runner_execution_failure)?;
+                let payload = completed.into_payload();
+                profile_task
+                    .finalize(&payload, staged_artifacts)
                     .map_err(|error| {
-                        let capacity_reusable = error.capacity_reusable();
-                        let cleanup_complete = error.cleanup_complete();
-                        let failure = match error.kind() {
-                            TaskRunFailureKind::CgroupReadBackMismatch => SubmitFailure::new(
-                                ErrorCode::InternalError,
-                                "cgroup limit read-back verification failed",
-                            ),
-                            TaskRunFailureKind::CgroupReadBackRollbackUncertain => {
-                                SubmitFailure::new(
-                                    ErrorCode::EnvironmentUnavailable,
-                                    "cgroup v2 execution environment is unavailable",
-                                )
-                            }
-                            TaskRunFailureKind::Other => SubmitFailure::new(
-                                ErrorCode::InternalError,
-                                error.into_error().to_string(),
-                            ),
-                        };
-                        ExecutionFailure::new(failure, capacity_reusable, cleanup_complete)
-                    })
+                        ExecutionFailure::new(
+                            SubmitFailure::new(ErrorCode::InternalError, error.to_string()),
+                            false,
+                            false,
+                        )
+                    })?;
+                Ok(ExecutionCompletion::Real(payload))
             },
         )
         .await
@@ -429,9 +468,9 @@ impl SubmitCoordinator {
 
     #[cfg_attr(
         not(test),
-        expect(
+        allow(
             dead_code,
-            reason = "동일 submit 응답과 진단 경로가 다음 단계에서 사용합니다"
+            reason = "diagnostic profile boundary keeps this test-only lookup"
         )
     )]
     pub(crate) fn snapshot_by_client_request_id(
@@ -440,6 +479,13 @@ impl SubmitCoordinator {
     ) -> Result<Option<TaskPayload>, RegistryError> {
         self.registry
             .snapshot_by_client_request_id(client_request_id)
+    }
+
+    pub(crate) fn has_client_request_id(
+        &self,
+        client_request_id: &str,
+    ) -> Result<bool, RegistryError> {
+        self.registry.has_client_request_id(client_request_id)
     }
 
     #[cfg(test)]
@@ -575,8 +621,7 @@ where
                 submitted_at: metadata.submitted_at,
                 start_time: metadata.start_time,
                 cleanup_timeout: metadata.cleanup_timeout,
-                command: owner.request().payload().command.clone(),
-                budget: owner.request().budget().clone(),
+                plan: owner.request().plan().clone(),
             };
             let (initial_sender, initial_receiver) = oneshot::channel();
             tokio::spawn(run_owner(
@@ -886,16 +931,45 @@ where
 {
     match completion {
         #[cfg(target_os = "linux")]
-        ExecutionCompletion::Real(completed) => owner.finish(completed),
+        ExecutionCompletion::Real(payload) => owner.finish_payload(payload),
         #[cfg(test)]
         ExecutionCompletion::Test(finished) => owner.prepare_finish_for_test(finished),
     }
 }
 
+#[cfg(target_os = "linux")]
+fn runner_execution_failure(error: crate::runner::TaskRunFailure) -> ExecutionFailure {
+    let capacity_reusable = error.capacity_reusable();
+    let cleanup_complete = error.cleanup_complete();
+    let failure = match error.kind() {
+        TaskRunFailureKind::CgroupReadBackMismatch => SubmitFailure::new(
+            ErrorCode::InternalError,
+            "cgroup limit read-back verification failed",
+        ),
+        TaskRunFailureKind::CgroupReadBackRollbackUncertain => SubmitFailure::new(
+            ErrorCode::EnvironmentUnavailable,
+            "cgroup v2 execution environment is unavailable",
+        ),
+        TaskRunFailureKind::Other => {
+            SubmitFailure::new(ErrorCode::InternalError, error.into_error().to_string())
+        }
+    };
+    ExecutionFailure::new(failure, capacity_reusable, cleanup_complete)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ValidatedSubmit {
-    payload: SubmitTaskPayload,
-    budget: ResourceBudget,
+    identity: SubmissionIdentity,
+    plan: ResolvedExecutionPlan,
+}
+
+/// Raw Command와 Profile request가 공유하는 clientRequestId 비교 기준이다.
+///
+/// 실행 plan에는 staging 절대 path처럼 caller request가 아닌 값이 들어가므로 여기에 포함하지 않는다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SubmissionIdentity {
+    Raw(SubmitTaskPayload),
+    Profile(ProfileRequestPayload),
 }
 
 impl ValidatedSubmit {
@@ -927,15 +1001,50 @@ impl ValidatedSubmit {
         validate_command(&payload)?;
         let budget =
             ResourceBudget::try_from_protocol(payload.limits.clone(), payload.output.clone())?;
-        Ok(Self { payload, budget })
+        let plan = ResolvedExecutionPlan::from_validated_raw(&payload.command, budget);
+        Ok(Self {
+            identity: SubmissionIdentity::Raw(payload),
+            plan,
+        })
     }
 
+    pub(crate) fn from_profile(
+        payload: ProfileRequestPayload,
+        plan: ResolvedExecutionPlan,
+    ) -> Self {
+        Self {
+            identity: SubmissionIdentity::Profile(payload),
+            plan,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn payload(&self) -> &SubmitTaskPayload {
-        &self.payload
+        match &self.identity {
+            SubmissionIdentity::Raw(payload) => payload,
+            SubmissionIdentity::Profile(_) => {
+                panic!("Profile request에는 Raw Command payload가 없습니다")
+            }
+        }
+    }
+
+    pub(crate) fn identity(&self) -> &SubmissionIdentity {
+        &self.identity
+    }
+
+    pub(crate) fn client_request_id(&self) -> &str {
+        match &self.identity {
+            SubmissionIdentity::Raw(payload) => &payload.client_request_id,
+            SubmissionIdentity::Profile(payload) => &payload.client_request_id,
+        }
     }
 
     pub(crate) fn budget(&self) -> &ResourceBudget {
-        &self.budget
+        self.plan.budget()
+    }
+
+    fn plan(&self) -> &ResolvedExecutionPlan {
+        &self.plan
     }
 }
 
@@ -1225,7 +1334,7 @@ mod tests {
     fn verified_running(config: &SubmitExecutionConfig) -> VerifiedRunningTask {
         VerifiedRunningTask::new(
             running(&config.task_id),
-            config.budget.verified_effective_limits_for_test(),
+            config.plan.budget().verified_effective_limits_for_test(),
         )
     }
 
