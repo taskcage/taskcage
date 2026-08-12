@@ -2,12 +2,16 @@
 
 use std::future::Future;
 use std::io;
+use std::mem::{MaybeUninit, offset_of};
 use std::num::NonZeroUsize;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::net::UnixListener as StdUnixListener;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -29,7 +33,6 @@ use crate::submit::{SubmitCoordinator, SubmitMetadata, TaskStartTime};
 type DispatchFuture = Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
 type Dispatch = Arc<dyn Fn(Request) -> DispatchFuture + Send + Sync + 'static>;
 static TASK_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-static SOCKET_BIND_UMASK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Error)]
 pub(crate) enum ServerError {
@@ -147,6 +150,16 @@ impl BoundSocket {
                 links,
             });
         }
+        let listener = match UnixListener::from_std(listener) {
+            Ok(listener) => listener,
+            Err(source) => {
+                let _ = remove_owned_path(path, identity);
+                return Err(ServerError::Bind {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
 
         Ok(Self {
             listener: Some(listener),
@@ -167,16 +180,74 @@ impl BoundSocket {
     }
 }
 
-fn bind_owner_only(path: &Path) -> io::Result<UnixListener> {
-    let _guard = SOCKET_BIND_UMASK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    // umask는 process-wide이므로 bind 직전의 짧은 동기 구간에서만 바꾸고 즉시 복원한다.
-    let previous = unsafe { libc::umask(0o177) };
-    let listener = UnixListener::bind(path);
-    // 앞의 umask 호출이 반환한 기존 값을 그대로 복원한다.
-    unsafe { libc::umask(previous) };
-    listener
+fn bind_owner_only(path: &Path) -> io::Result<StdUnixListener> {
+    let (address, address_length) = unix_address(path)?;
+    let descriptor = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if descriptor == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let socket = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let bound = unsafe {
+        libc::bind(
+            socket.as_raw_fd(),
+            (&address as *const libc::sockaddr_un).cast::<libc::sockaddr>(),
+            address_length,
+        )
+    };
+    if bound == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let metadata = std::fs::symlink_metadata(path)?;
+    let identity = SocketIdentity::from_metadata(&metadata);
+    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        drop(socket);
+        let _ = remove_owned_path(path, identity);
+        return Err(error);
+    }
+
+    // mode를 고정하기 전에는 listen하지 않아 다른 UID가 연결을 대기열에 넣을 수 없다.
+    if unsafe { libc::listen(socket.as_raw_fd(), libc::SOMAXCONN) } == -1 {
+        let error = io::Error::last_os_error();
+        drop(socket);
+        let _ = remove_owned_path(path, identity);
+        return Err(error);
+    }
+    Ok(socket.into())
+}
+
+fn unix_address(path: &Path) -> io::Result<(libc::sockaddr_un, libc::socklen_t)> {
+    let bytes = path.as_os_str().as_bytes();
+    let mut address = unsafe { MaybeUninit::<libc::sockaddr_un>::zeroed().assume_init() };
+    if bytes.is_empty() || bytes.contains(&0) || bytes.len() + 1 > address.sun_path.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "daemon socket 경로를 sockaddr_un으로 표현할 수 없습니다",
+        ));
+    }
+    address.sun_family = libc::sa_family_t::try_from(libc::AF_UNIX)
+        .expect("AF_UNIX 값은 sa_family_t로 표현할 수 있습니다");
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            address.sun_path.as_mut_ptr().cast::<u8>(),
+            bytes.len(),
+        );
+    }
+    let length = offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+    let length = libc::socklen_t::try_from(length).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "daemon socket 경로 길이를 socklen_t로 표현할 수 없습니다",
+        )
+    })?;
+    Ok((address, length))
 }
 
 fn remove_owned_path(path: &Path, identity: SocketIdentity) -> Result<(), ServerError> {
@@ -656,7 +727,8 @@ fn new_task_id() -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
+    use std::sync::Barrier;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1559,6 +1631,52 @@ mod tests {
         assert!(!path.socket.exists());
         assert!(path.lock().exists());
         StartupOwnership::acquire(&path.socket).unwrap();
+    }
+
+    #[test]
+    fn owner_only_binding_does_not_change_parallel_directory_modes() {
+        const ITERATIONS: usize = 1024;
+
+        let path = TestSocketPath::new("umask-race");
+        let barrier = Arc::new(Barrier::new(2));
+        std::thread::scope(|scope| {
+            let bind_directory = path.directory.clone();
+            let bind_barrier = Arc::clone(&barrier);
+            let binder = scope.spawn(move || {
+                bind_barrier.wait();
+                for index in 0..ITERATIONS {
+                    let socket_path = bind_directory.join(format!("s-{index}"));
+                    let listener = bind_owner_only(&socket_path).unwrap();
+                    assert_eq!(
+                        std::fs::symlink_metadata(&socket_path).unwrap().mode() & 0o777,
+                        0o600
+                    );
+                    drop(listener);
+                    std::fs::remove_file(socket_path).unwrap();
+                }
+            });
+
+            let create_directory = path.directory.clone();
+            let create_barrier = Arc::clone(&barrier);
+            let creator = scope.spawn(move || {
+                create_barrier.wait();
+                for index in 0..ITERATIONS {
+                    let directory = create_directory.join(format!("d-{index}"));
+                    std::fs::DirBuilder::new()
+                        .mode(0o700)
+                        .create(&directory)
+                        .unwrap();
+                    assert_eq!(
+                        std::fs::symlink_metadata(&directory).unwrap().mode() & 0o777,
+                        0o700
+                    );
+                    std::fs::remove_dir(directory).unwrap();
+                }
+            });
+
+            binder.join().unwrap();
+            creator.join().unwrap();
+        });
     }
 
     #[test]

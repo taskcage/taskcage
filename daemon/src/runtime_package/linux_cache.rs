@@ -202,6 +202,11 @@ impl RuntimePackageCache {
                 &declared.path,
             )?;
             destination
+                .set_permissions(fs::Permissions::from_mode(declared.mode_bits()))
+                .map_err(|error| {
+                    io_error("staging file mode 설정", destination_path.clone(), error)
+                })?;
+            destination
                 .sync_all()
                 .map_err(|error| io_error("staging file fsync", destination_path, error))?;
         }
@@ -216,6 +221,11 @@ impl RuntimePackageCache {
         manifest
             .write_all(&source.validated.canonical_json)
             .map_err(|error| io_error("staging manifest 쓰기", manifest_path.clone(), error))?;
+        manifest
+            .set_permissions(fs::Permissions::from_mode(0o444))
+            .map_err(|error| {
+                io_error("staging manifest mode 설정", manifest_path.clone(), error)
+            })?;
         manifest
             .sync_all()
             .map_err(|error| io_error("staging manifest fsync", manifest_path, error))?;
@@ -777,7 +787,9 @@ fn create_directory(path: &Path, mode: u32) -> RuntimePackageResult<()> {
     fs::DirBuilder::new()
         .mode(mode)
         .create(path)
-        .map_err(|error| io_error("directory 생성", path.to_path_buf(), error))
+        .map_err(|error| io_error("directory 생성", path.to_path_buf(), error))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|error| io_error("directory mode 설정", path.to_path_buf(), error))
 }
 
 fn open_directory_absolute(path: &Path, expected_device: u64) -> RuntimePackageResult<File> {
@@ -1025,10 +1037,13 @@ fn io_error(operation: &'static str, path: PathBuf, source: io::Error) -> Runtim
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::process::Command;
     use std::sync::{Arc, Barrier};
     use std::thread;
 
     use super::*;
+
+    const RESTRICTIVE_UMASK_HELPER_ENV: &str = "TASKCAGE_RESTRICTIVE_UMASK_IMPORT_HELPER";
 
     struct TestDirectory(PathBuf);
 
@@ -1156,6 +1171,39 @@ mod tests {
         pinned.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"executable");
         fs::rename(moved_entry, original_entry).unwrap();
+    }
+
+    #[test]
+    fn import_is_independent_of_a_restrictive_process_umask() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("runtime_package::linux_cache::tests::restrictive_umask_import_helper")
+            .arg("--nocapture")
+            .env(RESTRICTIVE_UMASK_HELPER_ENV, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn restrictive_umask_import_helper() {
+        if std::env::var_os(RESTRICTIVE_UMASK_HELPER_ENV).is_none() {
+            return;
+        }
+
+        let fixture = TestDirectory::new("restrictive-umask");
+        let source = create_source(fixture.path(), b"executable");
+        let cache_root = create_cache(fixture.path());
+        let cache = RuntimePackageCache::open(&cache_root).unwrap();
+
+        unsafe { libc::umask(0o177) };
+        let report = cache.import(&source).unwrap();
+        let resolved = cache.resolve(report.digest).unwrap();
+        assert_eq!(resolved.manifest().id, "org.taskcage.tool");
+        assert_eq!(
+            resolved.entrypoint().metadata().unwrap().mode() & 0o777,
+            0o555
+        );
     }
 
     #[test]
