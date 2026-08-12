@@ -52,7 +52,8 @@ Java application
 
 Profile API는 daemon capability의 `protocolVersions`에 `2`가 있을 때만 요청을 보내며 Raw Command로
 fallback하지 않는다. 현재 E2E는 opt-in `file-copy@1.0.0` Profile 하나로 Core 계약을 검증하며 FFmpeg 같은
-도구별 Binding은 포함하지 않는다.
+도구별 Binding은 포함하지 않는다. 첫 별도 Binding의 승인된 경계는
+[FFmpeg Audio-to-WAV Profile Binding 계획](../docs/ffmpeg-profile-binding.md)에서 정의한다.
 
 ## 개발 중인 Local Profile API
 
