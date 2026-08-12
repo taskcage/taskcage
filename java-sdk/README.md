@@ -4,14 +4,15 @@ TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`�
 
 > **상태:** `0.1.0` Local Public Alpha prerelease가
 > [Maven Central](https://repo1.maven.org/maven2/org/taskcage/taskcage-java-sdk/0.1.0/)에 공개됐다.
+> 현재 source의 다음 release version은 `0.2.0`이며 공개 전까지 Maven Central에서는 `0.1.0`을 사용한다.
 > `0.x`는 초기 개발 버전이며 SDK는 Spring Boot에 의존하지 않는다.
 
-공개된 `0.1.0`은 Local UDS transport와 Raw Command 모델을 구현한다. 현재 개발 소스에는 승인된
+공개된 `0.1.0`은 Local UDS transport와 Raw Command 모델을 구현한다. `0.2.0` release candidate에는 승인된
 [Local Profile Core API v2](../docs/api-profile-v2.md)의 Java 모델과 client가 추가됐고, opt-in
 `file-copy@1.0.0` Profile을 사용하는 실제 Linux daemon E2E까지 검증한다. 인증된 Remote transport는 아직
 구현된 SDK 기능이 아니다.
 
-## 역할과 v0.1 결과
+## Core SDK 역할
 
 이 모듈은 특정 외부 도구를 위한 Binding이 아니라 **TaskCage Java Core SDK**다. Java 객체와
 Protocol v1 사이를 변환하고, `taskcaged` 연결과 Task 생명주기를 공통 API로 제공한다.
@@ -19,7 +20,7 @@ Protocol v1 사이를 변환하고, `taskcaged` 연결과 Task 생명주기를 �
 ```text
 Java application
     │
-    ├─ 향후 FFmpeg·Chromium Profile Binding
+    ├─ FFmpeg Profile Binding / 향후 Chromium Binding
     │             │
     └──── TaskCage Java Core SDK
                   │ UDS / Protocol v1 + Local Profile v2
@@ -51,11 +52,12 @@ Java application
 - 실제 daemon의 Profile 실행·Artifact publish·조회·멱등성과 사전 실행 오류를 검증하는 Linux E2E
 
 Profile API는 daemon capability의 `protocolVersions`에 `2`가 있을 때만 요청을 보내며 Raw Command로
-fallback하지 않는다. 현재 E2E는 opt-in `file-copy@1.0.0` Profile 하나로 Core 계약을 검증하며 FFmpeg 같은
-도구별 Binding은 포함하지 않는다. 첫 별도 Binding의 승인된 경계는
-[FFmpeg Audio-to-WAV Profile Binding 계획](../docs/ffmpeg-profile-binding.md)에서 정의한다.
+fallback하지 않는다. Core E2E는 opt-in `file-copy@1.0.0` Profile로 범용 계약을 검증한다. 별도
+`taskcage-ffmpeg-binding` module은 Core SDK를 사용해 `ffmpeg-audio-to-wav@1.0.0`을 typed API로 제공하며
+실제 container daemon E2E로 검증한다. 계약은
+[FFmpeg Audio-to-WAV Profile Binding](../docs/ffmpeg-profile-binding.md)에서 정의한다.
 
-## 개발 중인 Local Profile API
+## Local Profile API
 
 generic Core API는 실행 파일 경로나 argv 대신 설치된 Profile identity와 typed input을 전달한다.
 
@@ -168,10 +170,10 @@ daemon과 Java Core SDK는 독립적으로 버전을 관리하고 배포한다. 
 버전 문자열이 아니라 양쪽이 지원하는 Protocol 버전으로 판단한다.
 
 ```text
-Daemon tag:     taskcaged-v0.1.0
-Java SDK tag:   java-sdk-v0.1.0
-Java Core SDK:  0.1.0
-Protocol:       v1
+Daemon tag:     taskcaged-v0.2.0
+Java SDK tag:   java-sdk-v0.2.0
+Java Core SDK:  0.2.0
+Protocol:       v1, v2
 ```
 
 Maven Central에는 다음 좌표로 main, sources와 javadoc artifact가 서명되어 공개됐다.
@@ -182,7 +184,7 @@ dependencies {
 }
 ```
 
-### FFmpeg 예제
+### FFmpeg Raw Command reference
 
 [FFmpeg Local Raw Command reference](../docs/reference-ffmpeg.md)는 Core SDK와 Ubuntu FFmpeg package만
 사용한다. 별도 FFmpeg Profile Binding을 만들지 않으며, 설치부터 변환 결과 확인까지 하나의 반복 가능한
@@ -206,8 +208,8 @@ workflow로 검증한다.
    계약을 구현하고 가짜 daemon 단위 테스트와 실제 daemon reference E2E를 추가했다.
 3. **동기 실행 — 구현됨:** `run()`을 `TaskHandle` 계약 위에 구현하고 실제 daemon·FFmpeg E2E로 정상
    종료·Task wall-time timeout·출력 결과를 검증했다. 명시적 취소는 `TaskHandle.cancel()`을 사용한다.
-4. **배포 — 완료:** Maven Central publishing, 서명, POM metadata, sources/javadoc artifact와 독립
-   `java-sdk-v0.1.0` 검증 pipeline을 구성하고 첫 공개를 완료했다.
+4. **배포 — 0.2.0 준비 완료:** Maven Central publishing, 서명, POM metadata, sources/javadoc artifact와
+   독립 `java-sdk-v0.2.0` 검증 pipeline을 구성했다. 공개 tag와 Central publish는 검증된 `main`에서 수행한다.
 5. **첫 사용자 경로 — 구현됨:** FFmpeg reference workflow와 설치·daemon 연결·실행·문제 해결 문서를
    제공한다.
 
@@ -220,16 +222,14 @@ workflow로 검증한다.
 - 새 사용자가 문서만 보고 10분 안에 FFmpeg 변환을 실행할 수 있다.
 - Alpha 버전과 Protocol v1 호환 범위가 문서에 명시된다.
 
-## v0.1 공개 릴리스 범위 밖
+## v0.2 이후 범위 밖
 
-- 공개된 `0.1.0` artifact의 Execution Profile API
-- FFmpeg·Chromium Profile Binding
-- TaskCage Bundle과 Runtime Package cache
+- Chromium 등 추가 Profile Binding
 - TaskCage Hub 연동
 - Remote TCP/TLS와 Artifact upload/download
 - Spring Boot starter와 다른 언어 SDK
 
-이 기능들은 Raw Command 기반 v0.1 사용 경험을 외부 사용자가 검증한 뒤 v0.2 후보로 다룬다.
+이 기능들은 Local Product Alpha의 실제 사용 경험을 확인한 뒤 별도 범위로 다룬다.
 
 ## 빌드
 
@@ -237,7 +237,8 @@ workflow로 검증한다.
 ./gradlew build
 ```
 
-일반 빌드 결과는 `build/libs/`에 생성된다. 공개된 Public Alpha는 다음 좌표로 설치한다.
+일반 빌드 결과는 `build/libs/`에 생성된다. 현재 공개된 Public Alpha는 다음 좌표로 설치한다. `0.2.0`은
+Maven Central 공개가 확인된 뒤 이 값을 갱신한다.
 
 ```kotlin
 dependencies {

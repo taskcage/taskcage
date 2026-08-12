@@ -38,7 +38,8 @@ prerelease로 표시한다.
 | 컴포넌트 | tag 예시 | 내부 버전 위치 | 배포처 |
 |---|---|---|---|
 | TaskCage daemon | `taskcaged-v0.1.0` | `daemon/Cargo.toml` | GitHub Release |
-| Java SDK | `java-sdk-v0.1.0` | `java-sdk/build.gradle.kts` | Maven Central, GitHub Release |
+| Java SDK | `java-sdk-v0.2.0` | `java-sdk/build.gradle.kts` | Maven Central, GitHub Release |
+| FFmpeg Java Binding | `ffmpeg-binding-v0.1.0` | `java-bindings/ffmpeg/build.gradle.kts` | Maven Central, GitHub Release |
 | Python SDK | `python-sdk-v0.1.0` | 해당 package manifest | PyPI, GitHub Release |
 | JavaScript SDK | `javascript-sdk-v0.1.0` | 해당 package manifest | npm, GitHub Release |
 | Go SDK | `go-sdk-v0.1.0` | Go module release metadata | Go Modules, GitHub Release |
@@ -80,11 +81,15 @@ daemon과 SDK는 제품 버전 문자열이 아니라 서로 지원하는 Protoc
 각 SDK는 해당 언어의 표준 package registry에 독립적으로 배포한다. GitHub Release는 변경 내역, 지원
 Protocol과 source tag를 제공하고, 실제 dependency 설치는 표준 registry를 사용한다.
 
-Java SDK의 Maven 좌표는 다음 형식을 유지한다.
+Java Core SDK와 공식 Binding의 Maven 좌표는 다음 형식을 유지한다.
 
 ```text
 org.taskcage:taskcage-java-sdk:<version>
+org.taskcage:taskcage-ffmpeg-binding:<version>
 ```
+
+Binding은 사용하는 Core SDK가 Maven Central에 공개되고, 요구하는 Profile을 제공하는 최소 daemon release가
+공개된 뒤에 배포한다. Core와 Binding version은 독립 관리하며 Binding POM이 정확한 Core version을 선언한다.
 
 Maven Central에 공개된 component는 덮어쓰지 않는다. Central deployment가 `PUBLISHED`가 된 것을 확인한
 뒤 같은 tag의 GitHub Release를 공개한다.

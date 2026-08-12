@@ -20,3 +20,12 @@ this Compose setup in production or on an untrusted machine.
 
 The application entry point is
 [`FfmpegExample.java`](src/main/java/org/taskcage/example/ffmpeg/FfmpegExample.java).
+
+The repository build uses Gradle composite builds so it can validate unreleased source. After the Java releases are
+public, an external application only needs the Binding dependency; its Core SDK dependency is transitive.
+
+```kotlin
+dependencies {
+    implementation("org.taskcage:taskcage-ffmpeg-binding:0.1.0")
+}
+```
