@@ -53,7 +53,8 @@ Task staging output path만 보며 caller input이나 이전에 published된 fil
 
 ## Output publish와 완료 의미
 
-output은 Task staging의 `artifacts/out/<slot>.part`에 쓴다. `terminationReason=EXITED`와 `exitCode=0`일 때만
+output은 Task staging의 `artifacts/out/<Profile fixed output fileName>`에 쓴다. 이 이름은 daemon이
+Profile 계약에서 결정하며 caller가 지정할 수 없다. `terminationReason=EXITED`와 `exitCode=0`일 때만
 daemon이 required output을 검사한다: symlink가 아닌 regular file, size limit, SHA-256, `fsync`, no-overwrite
 atomic rename, final parent directory `fsync` 순서다.
 
@@ -83,7 +84,7 @@ success result는 cgroup, process, output reader **그리고 Artifact staging**�
 final output을 만들지 않고 staging input/output/task directory를 제거한다. cleanup을 확인할 수 없으면 기존
 fail-stop 계약을 적용한다. 기존 input과 기존 published output은 모든 실패 경로에서 변경하지 않는다.
 
-daemon은 output staging에서 Profile이 선언한 `result.part` 외의 file, directory, symlink를 발견하면
+daemon은 output staging에서 Profile이 선언한 fixed output file 외의 file, directory, symlink를 발견하면
 `OUTPUT_CONTRACT_VIOLATION`으로 종료하고 아무 output도 publish하지 않는다.
 
 ## v0.2 이외의 비목표

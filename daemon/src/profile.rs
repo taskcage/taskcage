@@ -1281,7 +1281,7 @@ mod tests {
         let input =
             Path::new("/var/lib/taskcage/artifacts/.taskcage/staging/task/artifacts/in/source");
         let output = Path::new(
-            "/var/lib/taskcage/artifacts/.taskcage/staging/task/artifacts/out/result.part",
+            "/var/lib/taskcage/artifacts/.taskcage/staging/task/artifacts/out/result.wav",
         );
         assert_eq!(
             ffmpeg_arguments(input, 16_000, 1, output),

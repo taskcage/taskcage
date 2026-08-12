@@ -124,7 +124,7 @@ mod tests {
             "16000",
             "-ac",
             "1",
-            "/tmp/result.part",
+            "/tmp/result.wav",
         ];
         assert!(parse_profile_argv(values.into_iter().map(OsString::from)).is_ok());
 
