@@ -1,0 +1,8 @@
+{
+  "stagingEntries": [
+    "result.part",
+    "unexpected.bin"
+  ],
+  "expectedFailure": "OUTPUT_CONTRACT_VIOLATION",
+  "resultMustPublish": false
+}

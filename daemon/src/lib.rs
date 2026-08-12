@@ -1,5 +1,6 @@
 //! TaskCage Rust 데몬의 사전 검사와 작업 실행 생명주기를 제공한다.
 
+pub mod artifact;
 #[cfg(any(target_os = "linux", test))]
 mod audit;
 #[cfg_attr(
@@ -15,6 +16,7 @@ mod cleanup_fault;
 pub mod codec;
 mod deadline;
 mod deployment_policy;
+pub mod digest;
 #[cfg(target_os = "linux")]
 mod executor;
 mod fail_stop;

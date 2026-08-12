@@ -1,0 +1,10 @@
+{
+  "descriptor": {
+    "kind": "LOCAL_INPUT",
+    "path": "jobs/42/../secret.mov",
+    "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "sizeBytes": 1048576
+  },
+  "expectedError": "INVALID_ARTIFACT_PATH",
+  "targetMustStart": false
+}

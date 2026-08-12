@@ -1,0 +1,6 @@
+{
+  "kind": "LOCAL_INPUT",
+  "path": "jobs/42/source.mov",
+  "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "sizeBytes": 1048576
+}
