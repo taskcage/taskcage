@@ -7,3 +7,4 @@ Artifact descriptor와 거절 조건만 고정한다. `submitProfile`과 `profil
 - `artifact-input-valid.json`: canonical local input descriptor
 - `artifact-input-invalid-path.json`: traversal path는 target 시작 전 거절한다
 - `artifact-input-digest-mismatch.json`: changed source는 target 시작 전 거절한다
+- `artifact-output-undeclared.json`: 실행 뒤 undeclared output은 publish하지 않는다

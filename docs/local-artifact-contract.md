@@ -16,8 +16,9 @@ URL, URI, Artifact service, retention API와 여러 output transaction은 이 �
 ## Root와 path
 
 배포자는 canonical absolute directory 하나를 Artifact root로 설정한다. daemon은 시작 시 그 root가 symlink가
-아닌 existing directory이며 read, staging, publish, cleanup 가능한지 검증한다. root 안에서 `.taskcage/`는
-daemon 전용 staging subtree이고 `tasks/`는 published output subtree다.
+아닌 existing directory, daemon effective UID 소유, group/other non-writable이며 read, staging, publish,
+cleanup 가능한지 검증한다. root 안에서 `.taskcage/`는 daemon 전용 staging subtree이고 `tasks/`는
+published output subtree다.
 
 wire path는 root 기준 상대 UTF-8 path다. 1~4,096 bytes, `/` separator만 허용하며 빈 segment, `.`, `..`,
 leading/trailing slash, `\\`, NUL, ASCII control character와 첫 segment `.taskcage`를 거부한다. percent decoding,
@@ -46,7 +47,7 @@ Task, cgroup, Registry reservation 또는 target을 만들기 전에 daemon은 d
 `ARTIFACT_DIGEST_MISMATCH`로 거절하고 preflight copy를 제거한다. source는 daemon이 수정하거나 제거하지
 않는다.
 
-검증된 snapshot만 `.taskcage/staging/<taskId>/task/artifacts/in/<slot>`으로 이동한다. target은 snapshot과
+검증된 snapshot만 `.taskcage/staging/<taskId>/artifacts/in/<slot>`으로 이동한다. target은 snapshot과
 Task staging output path만 보며 caller input이나 이전에 published된 file을 write 대상으로 받지 않는다.
 
 ## Output publish와 완료 의미
@@ -80,6 +81,9 @@ success result는 cgroup, process, output reader **그리고 Artifact staging**�
 `FINISHED`로 공개된다. non-zero exit, timeout, cancel, exec failure, output contract violation, publish failure는
 final output을 만들지 않고 staging input/output/task directory를 제거한다. cleanup을 확인할 수 없으면 기존
 fail-stop 계약을 적용한다. 기존 input과 기존 published output은 모든 실패 경로에서 변경하지 않는다.
+
+daemon은 output staging에서 Profile이 선언한 `result.part` 외의 file, directory, symlink를 발견하면
+`OUTPUT_CONTRACT_VIOLATION`으로 종료하고 아무 output도 publish하지 않는다.
 
 ## v0.2 이외의 비목표
 
