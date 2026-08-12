@@ -31,7 +31,8 @@ docker compose -f dev/container/compose.yml logs taskcaged
 daemon은 외부 TCP port를 열지 않는다. owner-only UDS는 Compose volume의
 `/run/taskcage/taskcaged.sock`에 있으며 같은 구성의 테스트 컨테이너만 사용한다. 개발 구성은
 `/taskcage-work/artifacts`를 owner-only Local Artifact root로 준비하고 opt-in `file-copy@1.0.0` Profile과
-Protocol v2도 활성화한다.
+Protocol v2도 활성화한다. 컨테이너의 Ubuntu FFmpeg는 시작할 때 검증 가능한 Runtime Package로 import되고
+그 digest가 `ffmpeg-audio-to-wav@1.0.0` Profile에 등록된다.
 
 ## Java SDK E2E
 
@@ -48,7 +49,22 @@ snapshot·실행·결과 publish를 검증할 수 있다. 테스트가 끝나면
 cgroup이 없는지도 검사한다. 최종 cgroup·systemd·릴리스 검증은 계속 Ubuntu 24.04 VM 또는 host 통합
 테스트가 담당한다.
 
+## FFmpeg Binding 예제
+
+다음 명령은 실제 FFmpeg Binding 예제 하나만 실행하고 결과 Artifact 경로를 출력한다.
+
+```bash
+bash dev/container/run-ffmpeg-example.sh
+```
+
+예제 코드는 [`examples/ffmpeg-java`](../../examples/ffmpeg-java/README.md)에 있다. 애플리케이션은 FFmpeg
+실행 파일이나 argv를 전달하지 않고 typed request만 Binding에 전달한다.
+
 ## 권한과 제한
+
+현재 Runtime Package는 `linux/x86_64/gnu`만 지원하므로 이 Compose 환경도 x86-64 Docker host가
+필요하다. ARM Mac에서 `linux/amd64` emulation을 사용하면 Runtime Package의 fail-closed `openat2`
+검증을 제공하지 못해 daemon 시작이 거부될 수 있다.
 
 `taskcaged` 컨테이너는 자신의 private cgroup namespace 안에서 cgroup을 생성하고 프로세스를 이동해야
 하므로 `privileged: true`를 사용한다. 후손 PID 정리를 Java E2E에서 직접 검증하기 위해 daemon과 Java

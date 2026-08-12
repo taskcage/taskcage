@@ -1,8 +1,7 @@
-# FFmpeg Audio-to-WAV Profile Binding 계획
+# FFmpeg Audio-to-WAV Profile Binding
 
-> 상태: Java Binding과 daemon FFmpeg Profile registration의 **승인된 계약**이다. daemon 변경 뒤에도
-> Java-to-daemon 실제 FFmpeg E2E와 복사 가능한 예제가 별도 Java PR에서 통과하기 전에는 Binding 완료로
-> 간주하지 않는다.
+> 상태: Java Binding, Runtime Package cache와 daemon FFmpeg Profile이 구현됐다. 실제 사용자 경로는
+> container Java-to-daemon E2E와 [`examples/ffmpeg-java`](../examples/ffmpeg-java/)로 검증한다.
 
 ## 목적
 
@@ -33,7 +32,7 @@ type은 기존 TaskCage Core SDK가 계속 소유한다.
 - 자원 override는 Core SDK의 `ProfileResourceOverrides`를 그대로 사용하며 Binding이 daemon 정책을
   추측하지 않는다.
 - Binding은 Java Core SDK artifact에 포함하지 않고 별도 artifact와 package로 제공한다.
-- Runtime Package import/cache와 FFmpeg Package digest 확정은 #151의 책임이다.
+- Runtime Package import/cache와 FFmpeg Package digest 등록은 daemon이 소유한다.
 - Hub, Remote transport, URL input, 여러 input/output, 전체 FFmpeg option 노출은 포함하지 않는다.
 
 ## 실행 계약
@@ -105,15 +104,10 @@ Binding `close()`나 별도 connection pool을 추가하지 않는다.
 
 ## 구현과 협업 순서
 
-1. Java 작업은 별도 Binding module, 순수 request mapping과 result validation 단위 테스트를 구현한다.
-2. Runtime Package import/cache와 verified executable resolution은 daemon이 소유한다.
-3. 별도 daemon PR은 승인된 FFmpeg Profile을 하나의 configured Package digest에 등록하고 같은 identity와
-   slot을 resolve한다.
-4. 두 변경이 병합된 뒤 container 개발 환경에서 Java-to-daemon 실제 FFmpeg E2E와 복사 가능한 예제를
-   추가한다.
-
-1번은 Runtime Package 구현과 병렬로 진행할 수 있다. 실제 FFmpeg 실행과 #154 완료 처리는 #151과 daemon
-Profile 설치가 끝난 뒤에만 가능하다.
+1. Java Binding module이 typed request mapping과 result validation을 제공한다.
+2. daemon이 Runtime Package import/cache, verified executable resolution과 고정 Profile 계약을 소유한다.
+3. container 개발 환경이 FFmpeg Package를 import하고 Java-to-daemon 실제 FFmpeg E2E와 복사 가능한
+   예제를 실행한다.
 
 ## 완료 기준
 

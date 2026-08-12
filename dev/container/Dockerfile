@@ -10,10 +10,15 @@ RUN cargo build --workspace --release --locked
 
 FROM ubuntu:24.04 AS daemon
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=rust-builder /workspace/target/release/taskcaged /usr/local/bin/taskcaged
 COPY --from=rust-builder /workspace/target/release/ghost-tree /usr/local/libexec/taskcage/ghost-tree
 COPY --from=rust-builder /workspace/target/release/output-flood /usr/local/libexec/taskcage/output-flood
 COPY --chmod=0755 dev/container/entrypoint.sh /usr/local/bin/taskcage-container-entrypoint
+COPY --chmod=0755 dev/container/prepare-ffmpeg-package.sh /usr/local/bin/taskcage-container-prepare-ffmpeg-package
 COPY --chmod=0755 dev/container/verify-cleanup.sh /usr/local/bin/taskcage-container-verify-cleanup
 
 ENV RUST_LOG=taskcaged=info \
@@ -41,8 +46,20 @@ FROM eclipse-temurin:17-jdk-jammy AS java-e2e
 
 WORKDIR /workspace
 COPY java-sdk ./java-sdk
+COPY java-bindings ./java-bindings
 COPY protocol-fixtures ./protocol-fixtures
-RUN ./java-sdk/gradlew -p ./java-sdk test e2eTestClasses --no-daemon
+RUN ./java-sdk/gradlew -p ./java-sdk test e2eTestClasses --no-daemon \
+    && ./java-sdk/gradlew -p ./java-bindings/ffmpeg test bindingE2eTestClasses --no-daemon
 
-WORKDIR /workspace/java-sdk
-CMD ["./gradlew", "test", "e2eTest", "--rerun-tasks", "--no-daemon", "--offline"]
+WORKDIR /workspace
+CMD ["/bin/bash", "-c", "./java-sdk/gradlew -p ./java-sdk test e2eTest --rerun-tasks --no-daemon --offline && ./java-sdk/gradlew -p ./java-bindings/ffmpeg test bindingE2eTest --rerun-tasks --no-daemon --offline"]
+
+FROM eclipse-temurin:17-jdk-jammy AS ffmpeg-example
+
+WORKDIR /workspace
+COPY java-sdk ./java-sdk
+COPY java-bindings ./java-bindings
+COPY examples/ffmpeg-java ./examples/ffmpeg-java
+RUN ./java-sdk/gradlew -p ./examples/ffmpeg-java installDist --no-daemon
+
+CMD ["/bin/bash", "-c", "java -cp '/workspace/examples/ffmpeg-java/build/install/taskcage-ffmpeg-java-example/lib/*' org.taskcage.example.ffmpeg.GenerateInput /taskcage-work/artifacts/example/source.wav && exec /workspace/examples/ffmpeg-java/build/install/taskcage-ffmpeg-java-example/bin/taskcage-ffmpeg-java-example /run/taskcage/taskcaged.sock /taskcage-work/artifacts example/source.wav"]
