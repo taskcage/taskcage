@@ -5,6 +5,17 @@ TaskCage는 daemon과 SDK의 버전을 독립적으로 관리한다. 이 문서�
 
 ## Unreleased
 
+### taskcaged 0.2.0 release candidate
+
+- Protocol v1 Raw Command 동작을 유지하면서 Protocol v2 Local Execution Profile 제출과 결과 조회를 추가한다.
+- owner-controlled Local Artifact root에서 입력 snapshot을 검증하고, Task 정리 뒤에만 선언된 출력 Artifact를
+  원자적으로 공개한다.
+- digest-addressed Runtime Package를 관리자 명령으로 import하고 플랫폼·manifest·파일 무결성을 실행 전과
+  매 Task마다 검증한다.
+- `file-copy@1.0.0`과 opt-in `ffmpeg-audio-to-wav@1.0.0` Profile을 제공한다.
+- Runtime Package 실행은 검증된 entrypoint descriptor를 사용하며 shell과 `PATH` lookup을 거치지 않는다.
+- Local UDS, Ubuntu 24.04 x86-64와 Protocol v1·v2를 지원한다. Hub와 Remote transport는 포함하지 않는다.
+
 ### TaskCage Java SDK 0.2.0 release candidate
 
 - Protocol v1 Raw Command API를 유지하면서 Protocol v2 Local Profile 제출·조회·대기·취소 API를 추가한다.
