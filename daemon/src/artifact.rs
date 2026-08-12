@@ -4,7 +4,9 @@
 //! Raw Command Protocol v1은 이 모듈을 사용하지 않는다.
 
 use std::fmt;
+use std::io::{self, Read};
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::digest::Sha256Digest;
@@ -84,6 +86,58 @@ impl LocalInputArtifact {
     }
 }
 
+/// Source bytes가 descriptor와 배포 상한에 맞는지 target 시작 전에 검증한다.
+pub fn verify_input<R>(
+    artifact: &LocalInputArtifact,
+    maximum_bytes: u64,
+    reader: &mut R,
+) -> Result<(), ArtifactVerificationError>
+where
+    R: Read,
+{
+    if artifact.size_bytes() > maximum_bytes {
+        return Err(ArtifactVerificationError::TooLarge {
+            actual: artifact.size_bytes(),
+            maximum: maximum_bytes,
+        });
+    }
+
+    let mut actual_size = 0_u64;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(ArtifactVerificationError::Read)?;
+        if read == 0 {
+            break;
+        }
+        actual_size = actual_size
+            .checked_add(u64::try_from(read).expect("read length fits in u64"))
+            .ok_or(ArtifactVerificationError::SizeOverflow)?;
+        if actual_size > maximum_bytes {
+            return Err(ArtifactVerificationError::TooLarge {
+                actual: actual_size,
+                maximum: maximum_bytes,
+            });
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    if actual_size != artifact.size_bytes() {
+        return Err(ArtifactVerificationError::SizeMismatch {
+            expected: artifact.size_bytes(),
+            actual: actual_size,
+        });
+    }
+    let actual = Sha256Digest::from_bytes(hasher.finalize().into());
+    if actual != artifact.digest() {
+        return Err(ArtifactVerificationError::DigestMismatch);
+    }
+
+    Ok(())
+}
+
 /// Artifact path가 Local Product Alpha 경계를 벗어났다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum ArtifactPathError {
@@ -97,10 +151,26 @@ pub enum ArtifactPathError {
     ReservedPath,
 }
 
+/// Input snapshot 검증이 target 시작 전에 실패했다.
+#[derive(Debug, Error)]
+pub enum ArtifactVerificationError {
+    #[error("artifact가 maximum {maximum} bytes를 넘습니다: {actual} bytes")]
+    TooLarge { actual: u64, maximum: u64 },
+    #[error("artifact size가 descriptor와 다릅니다: expected={expected}, actual={actual}")]
+    SizeMismatch { expected: u64, actual: u64 },
+    #[error("artifact size를 누적하는 중 overflow가 발생했습니다")]
+    SizeOverflow,
+    #[error("artifact digest가 descriptor와 다릅니다")]
+    DigestMismatch,
+    #[error("artifact source를 읽지 못했습니다: {0}")]
+    Read(#[source] io::Error),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::io::Cursor;
 
     const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -175,6 +245,50 @@ mod tests {
         assert_eq!(artifact.path().as_str(), "jobs/42/source.mov");
         assert_eq!(artifact.digest().to_string(), DIGEST);
         assert_eq!(artifact.size_bytes(), 1_048_576);
+    }
+
+    fn descriptor_for(bytes: &[u8]) -> LocalInputArtifact {
+        let digest = Sha256Digest::from_bytes(Sha256::digest(bytes).into());
+        LocalInputArtifact::new(
+            ArtifactPath::parse("jobs/42/source.mov").unwrap(),
+            digest,
+            u64::try_from(bytes.len()).unwrap(),
+        )
+    }
+
+    #[test]
+    fn verifies_size_and_digest_before_execution() {
+        let bytes = b"TaskCage input snapshot";
+        let artifact = descriptor_for(bytes);
+
+        verify_input(&artifact, 1_024, &mut Cursor::new(bytes)).expect("matching input");
+    }
+
+    #[test]
+    fn rejects_changed_source_bytes_before_execution() {
+        let artifact = descriptor_for(b"original source");
+
+        let error = verify_input(&artifact, 1_024, &mut Cursor::new(b"changed! source"))
+            .expect_err("changed bytes must not be accepted");
+
+        assert!(matches!(error, ArtifactVerificationError::DigestMismatch));
+    }
+
+    #[test]
+    fn rejects_source_larger_than_the_deployment_limit_before_execution() {
+        let bytes = b"too large";
+        let artifact = descriptor_for(bytes);
+
+        let error = verify_input(&artifact, 8, &mut Cursor::new(bytes))
+            .expect_err("deployment maximum must apply before target start");
+
+        assert!(matches!(
+            error,
+            ArtifactVerificationError::TooLarge {
+                actual: 9,
+                maximum: 8
+            }
+        ));
     }
 
     #[test]
