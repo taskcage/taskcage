@@ -28,6 +28,68 @@ public interface TaskCageClient extends AutoCloseable {
     TaskSubmission submit(UUID clientRequestId, TaskSpec task);
 
     /**
+     * Submits an installed Local Execution Profile.
+     *
+     * <p>The default preserves compatibility for custom Protocol v1 client implementations.
+     * Built-in clients override it when Protocol v2 is supported by the daemon.
+     */
+    default ProfileTaskSubmission submitProfile(ProfileRequest request) {
+        Objects.requireNonNull(request, "request");
+        return submitProfile(UUID.randomUUID(), request);
+    }
+
+    /** Submits a Profile Task with a caller-owned idempotency key. */
+    default ProfileTaskSubmission submitProfile(UUID clientRequestId, ProfileRequest request) {
+        Objects.requireNonNull(clientRequestId, "clientRequestId");
+        Objects.requireNonNull(request, "request");
+        throw new UnsupportedOperationException("this TaskCageClient does not support Local Profile Protocol v2");
+    }
+
+    /** Submits a Profile Task and returns a handle for observation, waiting, and cancellation. */
+    default ProfileTaskHandle submitProfileHandle(ProfileRequest request) {
+        return ProfileTaskHandle.from(this, submitProfile(request));
+    }
+
+    /** Submits a handled Profile Task with a caller-owned idempotency key. */
+    default ProfileTaskHandle submitProfileHandle(UUID clientRequestId, ProfileRequest request) {
+        return ProfileTaskHandle.from(this, submitProfile(clientRequestId, request));
+    }
+
+    /**
+     * Submits a Profile Task and waits for cleanup-confirmed completion.
+     *
+     * <p>A wait timeout never cancels the daemon Task.
+     */
+    default FinishedProfileTaskSnapshot run(ProfileRequest request, Duration waitTimeout)
+            throws InterruptedException, TimeoutException {
+        Objects.requireNonNull(request, "request");
+        TaskHandle.requirePositiveNanos(waitTimeout, "waitTimeout");
+        TaskHandle.throwIfInterrupted(null);
+        try {
+            return submitProfileHandle(request).await(waitTimeout);
+        } catch (TaskCageConnectionException exception) {
+            TaskHandle.throwIfInterrupted(exception);
+            throw exception;
+        }
+    }
+
+    /** Submits a Profile Task with a caller-owned idempotency key and waits for completion. */
+    default FinishedProfileTaskSnapshot run(
+            UUID clientRequestId, ProfileRequest request, Duration waitTimeout)
+            throws InterruptedException, TimeoutException {
+        Objects.requireNonNull(clientRequestId, "clientRequestId");
+        Objects.requireNonNull(request, "request");
+        TaskHandle.requirePositiveNanos(waitTimeout, "waitTimeout");
+        TaskHandle.throwIfInterrupted(null);
+        try {
+            return submitProfileHandle(clientRequestId, request).await(waitTimeout);
+        } catch (TaskCageConnectionException exception) {
+            TaskHandle.throwIfInterrupted(exception);
+            throw exception;
+        }
+    }
+
+    /**
      * Submits a task and returns a handle that can query, await, or cancel it.
      *
      * @param task task contract to submit
@@ -126,6 +188,23 @@ public interface TaskCageClient extends AutoCloseable {
             throw new IllegalArgumentException("requestTimeout must be representable in nanoseconds", exception);
         }
         return getTask(taskId);
+    }
+
+    /** Returns the Profile-specific current snapshot for a Profile Task. */
+    default ProfileTaskSnapshot getProfileResult(UUID taskId) {
+        Objects.requireNonNull(taskId, "taskId");
+        throw new UnsupportedOperationException("this TaskCageClient does not support Local Profile Protocol v2");
+    }
+
+    /**
+     * Requests a Profile snapshot with a caller-supplied transport timeout.
+     *
+     * <p>Custom clients remain compatible through this default implementation.
+     */
+    default ProfileTaskSnapshot getProfileResult(UUID taskId, Duration requestTimeout) {
+        Objects.requireNonNull(taskId, "taskId");
+        TaskHandle.requirePositiveNanos(requestTimeout, "requestTimeout");
+        return getProfileResult(taskId);
     }
 
     /** Cancels a running task and returns after daemon cleanup has completed. */
