@@ -20,12 +20,19 @@ if (result instanceof FfmpegAudioToWavSuccess success) {
 }
 ```
 
-The Binding request mapping and result validation are available independently of the daemon
-Runtime Package work. A real FFmpeg execution requires a daemon with the matching Profile and its
-verified Runtime Package installed; that integration remains tracked by issues #151 and #154.
+The Binding requires a daemon with the matching Profile and a verified FFmpeg Runtime Package.
+The repository's development container prepares that package and runs the Java-to-daemon E2E.
 
 Run the local unit tests from the repository root:
 
 ```bash
 ./java-sdk/gradlew -p java-bindings/ffmpeg test
 ```
+
+Run the real Binding workflow on an x86-64 Docker host with cgroup v2:
+
+```bash
+bash dev/container/run-e2e.sh
+```
+
+A copyable application is available in [`examples/ffmpeg-java`](../../examples/ffmpeg-java/README.md).

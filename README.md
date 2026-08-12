@@ -254,6 +254,7 @@ bash integration-tests/release-artifact-smoke.sh \
 - [릴리스 운영](docs/releasing.md)
 - [FFmpeg Local Raw Command reference](docs/reference-ffmpeg.md)
 - [첫 FFmpeg Profile Binding 계약](docs/ffmpeg-profile-binding.md)
+- [Java FFmpeg Binding 예제](examples/ffmpeg-java/README.md)
 - [Linux 통합 시험](integration-tests/README.md)
 - [Protocol fixture](protocol-fixtures/v1/README.md)
 - [기여 가이드](CONTRIBUTING.md)
