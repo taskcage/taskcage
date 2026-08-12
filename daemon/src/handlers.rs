@@ -1238,7 +1238,7 @@ mod tests {
                         },
                     ),
                     (
-                        "retainMetadata".to_owned(),
+                        "retain_metadata".to_owned(),
                         crate::protocol::ProfileInputValue::Boolean { value: true },
                     ),
                     (

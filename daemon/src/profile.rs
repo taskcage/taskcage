@@ -254,7 +254,7 @@ impl LocalProfileRuntime {
         if request.inputs.len() != 4 {
             return Err(ProfileError::new(
                 ErrorCode::InvalidProfileInput,
-                "file-copy requires exactly source, label, retainMetadata, and priority inputs",
+                "file-copy requires exactly source, label, retain_metadata, and priority inputs",
             ));
         }
 
@@ -302,12 +302,12 @@ impl LocalProfileRuntime {
             }
         }
         if !matches!(
-            request.inputs.get("retainMetadata"),
+            request.inputs.get("retain_metadata"),
             Some(ProfileInputValue::Boolean { .. })
         ) {
             return Err(ProfileError::new(
                 ErrorCode::InvalidProfileInput,
-                "inputs.retainMetadata must be BOOLEAN",
+                "inputs.retain_metadata must be BOOLEAN",
             ));
         }
         match request.inputs.get("priority") {
@@ -780,13 +780,13 @@ fn validate_slot_name(value: &str) -> Result<(), ProfileError> {
     if bytes.is_empty()
         || bytes.len() > 64
         || !bytes[0].is_ascii_lowercase()
-        || !bytes[1..]
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-'))
+        || !bytes[1..].iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(*byte, b'_' | b'-')
+        })
     {
         return Err(ProfileError::new(
             ErrorCode::InvalidProfileInput,
-            "profile input slot names must match [a-z][A-Za-z0-9_-]{0,63}",
+            "profile input slot names must match [a-z][a-z0-9_-]{0,63}",
         ));
     }
     Ok(())
@@ -809,5 +809,18 @@ fn validate_uuid(field: &'static str, value: &str) -> Result<(), ProfileError> {
             ErrorCode::InvalidProfileInput,
             format!("{field} must be a UUID"),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_slot_name;
+
+    #[test]
+    fn profile_slot_names_follow_the_lowercase_wire_contract() {
+        assert!(validate_slot_name("retain_metadata").is_ok());
+        assert!(validate_slot_name("output-2").is_ok());
+        assert!(validate_slot_name("retainMetadata").is_err());
+        assert!(validate_slot_name("Output").is_err());
     }
 }
