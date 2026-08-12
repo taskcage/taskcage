@@ -20,6 +20,7 @@ jobs:
           java-version: "17"
       - run: ./gradlew test --rerun-tasks --no-daemon --no-problems-report
         working-directory: java-sdk
+      - run: ./java-sdk/gradlew -p java-bindings/ffmpeg test --rerun-tasks --no-daemon --no-problems-report
 
   container-e2e:
     name: Containerized Java E2E

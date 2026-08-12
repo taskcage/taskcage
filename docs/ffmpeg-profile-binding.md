@@ -94,9 +94,10 @@ Binding request는 `LocalInputArtifact`, `AudioSampleRate`, `AudioChannels`와 �
 - `source`, `sample_rate_hz`, `channels` slot 이름과 Core input value 변환
 - 성공 result의 `audio` output slot 존재와 `audio/wav` media type 검증
 
-result는 최소한 `PublishedArtifact audio()`와 `FinishedProfileTaskSnapshot task()`를 제공한다. 따라서 일반
-사용자는 타입 안전한 output을 받고, 고급 사용자는 종료 원인·사용량·출력 tail 같은 Core 결과도 잃지
-않는다.
+result는 `FfmpegAudioToWavSuccess`와 `FfmpegAudioToWavFailure`의 sealed union이다. 성공 result만
+`PublishedArtifact audio()`를 제공하고, 두 result 모두 `FinishedProfileTaskSnapshot task()`를 제공한다.
+따라서 외부 프로세스 실패를 SDK 통신 예외로 바꾸지 않으면서 일반 사용자는 타입 안전한 output을 받고,
+고급 사용자는 종료 원인·사용량·출력 tail 같은 Core 결과도 잃지 않는다.
 
 Binding은 Core client를 소유하지 않는다. caller가 전달한 `TaskCageClient`의 lifecycle은 caller 책임이며,
 Binding `close()`나 별도 connection pool을 추가하지 않는다.
