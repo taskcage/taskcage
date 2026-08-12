@@ -37,6 +37,7 @@ type CleanupFaultHandle = Option<Arc<CleanupFaults>>;
 struct CleanupFaultHandle;
 
 const CLONE_INTO_CGROUP: u64 = 0x0002_0000_0000;
+const EMPTY_EXEC_PATH: &[u8] = b"\0";
 
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -119,10 +120,16 @@ pub enum ExecutorError {
 #[derive(Debug)]
 /// clone3 뒤의 자식이 추가 준비 없이 바로 execve를 호출할 수 있게 만든 명령이다.
 pub struct PreparedCommand {
-    executable: CString,
+    executable: PreparedExecutable,
     argv: Vec<CString>,
     environment: Vec<CString>,
     working_directory: CString,
+}
+
+#[derive(Debug)]
+enum PreparedExecutable {
+    Path(CString),
+    Descriptor(Arc<File>),
 }
 
 impl PreparedCommand {
@@ -137,14 +144,42 @@ impl PreparedCommand {
                 original_executable.to_owned(),
             ));
         }
+        // 셸 문자열로 다시 해석하지 않고 실행 파일과 각 인자를 그대로 보존한다.
+        // API의 program은 절대 경로이므로 daemon PATH 검색이나 사전 canonicalize를 하지 않는다.
+        let executable =
+            PreparedExecutable::Path(os_string_to_cstring(original_executable.to_owned())?);
+        Self::prepare(executable, command, working_directory, environment)
+    }
+
+    /// 검증된 Runtime Package entrypoint descriptor를 PATH 재해석 없이 준비한다.
+    pub(crate) fn new_pinned(
+        descriptor: Arc<File>,
+        command: Vec<OsString>,
+        working_directory: &Path,
+        environment: BTreeMap<OsString, OsString>,
+    ) -> Result<Self, ExecutorError> {
+        if command.is_empty() {
+            return Err(ExecutorError::EmptyCommand);
+        }
+        Self::prepare(
+            PreparedExecutable::Descriptor(descriptor),
+            command,
+            working_directory,
+            environment,
+        )
+    }
+
+    fn prepare(
+        executable: PreparedExecutable,
+        command: Vec<OsString>,
+        working_directory: &Path,
+        environment: BTreeMap<OsString, OsString>,
+    ) -> Result<Self, ExecutorError> {
         if !working_directory.is_absolute() {
             return Err(ExecutorError::WorkingDirectoryNotAbsolute(
                 working_directory.as_os_str().to_owned(),
             ));
         }
-        // 셸 문자열로 다시 해석하지 않고 실행 파일과 각 인자를 그대로 보존한다.
-        // API의 program은 절대 경로이므로 daemon PATH 검색이나 사전 canonicalize를 하지 않는다.
-        let executable = os_string_to_cstring(original_executable.to_owned())?;
         let argv: Vec<_> = command
             .into_iter()
             .map(os_string_to_cstring)
@@ -832,11 +867,21 @@ fn child_exec(
         if libc::chdir(command.working_directory.as_ptr()) == -1 {
             write_errno_and_exit(write_fd, current_errno_or(libc::ENOENT));
         }
-        libc::execve(
-            command.executable.as_ptr(),
-            argv_pointers,
-            environment_pointers,
-        );
+        match &command.executable {
+            PreparedExecutable::Path(executable) => {
+                libc::execve(executable.as_ptr(), argv_pointers, environment_pointers);
+            }
+            PreparedExecutable::Descriptor(descriptor) => {
+                libc::syscall(
+                    libc::SYS_execveat,
+                    descriptor.as_raw_fd(),
+                    EMPTY_EXEC_PATH.as_ptr().cast::<libc::c_char>(),
+                    argv_pointers,
+                    environment_pointers,
+                    libc::AT_EMPTY_PATH,
+                );
+            }
+        }
         write_errno_and_exit(write_fd, current_errno_or(libc::ENOEXEC));
     }
 }

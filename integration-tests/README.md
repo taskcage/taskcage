@@ -79,6 +79,10 @@ owner-only UDS를 사용한다. Java Core SDK가 FFmpeg를 shell 없이 직접 �
 경로는 `TIMED_OUT`, descendant PID 소멸, task cgroup 원상 복구와 `cleanup_complete=true`를 확인한다.
 출력하는 FFmpeg package version과 전체 소요 시간은 CI evidence이며 Docker 대비 성능 측정은 아니다.
 
+같은 workflow는 실제 FFmpeg binary를 Runtime Package로 `taskcage` service UID에서 import하고, 같은 UID의
+daemon 실행 경계가 `ffmpeg-audio-to-wav@1.0.0`을 고정 entrypoint descriptor로 실행해 `audio/result.wav`를
+publish하는지도 확인한다. Java Binding E2E는 이 daemon gate와 별도의 후속 Java PR 범위다.
+
 ## Public Alpha release artifact smoke test
 
 ```bash

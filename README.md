@@ -134,9 +134,27 @@ target/debug/taskcaged serve \
 
 ### Opt-in Local Profile daemon 설정
 
-v0.2의 Local Profile은 기본적으로 꺼져 있다. 위의 두 Profile 옵션을 **함께** 지정한 daemon만 정적
+v0.2의 Local Profile은 기본적으로 꺼져 있다. 위의 두 Artifact 옵션을 **함께** 지정한 daemon만 정적
 `file-copy@1.0.0` Profile과 Protocol v2 capability를 공개한다. 이 Profile은 Runtime Package, Bundle,
 임의 executable 또는 caller-provided argv를 허용하지 않는다.
+
+`ffmpeg-audio-to-wav@1.0.0`을 추가로 등록하려면 daemon과 같은 service UID로 Package를 먼저 import하고
+Artifact 설정에 cache root와 digest를 함께 지정한다.
+
+```bash
+sudo -u taskcage taskcaged import-package \
+  --source /srv/taskcage-import/ffmpeg-7.1.1 \
+  --cache-root /var/lib/taskcage
+
+taskcaged serve \
+  <필수 serve 옵션과 Artifact 옵션> \
+  --runtime-package-cache-root /var/lib/taskcage \
+  --ffmpeg-audio-to-wav-package-digest sha256:<64-lowercase-hex>
+```
+
+daemon은 등록된 Package가 없거나 손상됐거나 host와 호환되지 않거나 manifest의 `id`가
+`org.taskcage.ffmpeg`, `entrypoint`가 `bin/ffmpeg`가 아니면 시작을 거부한다. 새 FFmpeg Task마다 Package를
+다시 검증하고 entrypoint descriptor를 고정한 채 shell과 PATH lookup 없이 실행한다.
 
 Artifact root는 daemon service UID 소유의 기존 absolute directory여야 하며, symlink가 아니고
 group/other writable이면 안 된다. daemon은 시작 시 이 조건과 descriptor-relative staging/publish 권한을
@@ -246,9 +264,10 @@ bash integration-tests/release-artifact-smoke.sh \
 다음 목표는 외부 사용자의 설치 시간, 실제 workload와 운영 피드백을 수집하고 호환되는 결함은 patch
 버전으로 수정하는 것이다.
 
-v0.2는 opt-in `file-copy@1.0.0` Local Profile과 Artifact 계약을 제한적으로 검증한다. Profile·Package·Artifact를
-일반화하거나 Profile을 늘리기 전에는 이 경로를 Public Alpha의 외부 사용자와 반복 요구로 검증한다. 재현 가능한
-실행은 버전 관리되는 Execution Profile과 digest로 고정한 Runtime Package를 사용한다.
+v0.2는 opt-in `file-copy@1.0.0`, 정적으로 Package digest를 등록하는 `ffmpeg-audio-to-wav@1.0.0`과 Local
+Artifact 계약을 제한적으로 검증한다. Profile·Package·Artifact를 일반화하거나 Profile을 더 늘리기 전에는
+이 경로를 Public Alpha의 외부 사용자와 반복 요구로 검증한다. 재현 가능한 실행은 버전 관리되는 Execution
+Profile과 digest로 고정한 Runtime Package를 사용한다.
 Bundle은 Package binary가 아니라 Profile, Runtime Package ref + digest, 플랫폼·정책·무결성 정보를
 담으며, 여러 Bundle이 같은 Package digest를 공유할 수 있다.
 

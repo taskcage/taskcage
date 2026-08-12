@@ -30,6 +30,7 @@ cargo build --workspace
 taskcage_bin="$(pwd)/target/debug/taskcaged"
 ghost_bin="$(pwd)/target/debug/ghost-tree"
 output_flood_bin="$(pwd)/target/debug/output-flood"
+fake_ffmpeg_bin="$(pwd)/target/debug/fake-ffmpeg"
 true_bin="$(type -P true)"
 false_bin="$(type -P false)"
 env_bin="$(type -P env)"
@@ -293,6 +294,24 @@ unit_sequence=$((unit_sequence + 1))
   --setenv=TASKCAGE_RUN_LINUX_PROFILE_INTEGRATION=1 \
   "${submit_test}" \
   'handlers::tests::actual_profile_handler_snapshots_runs_and_publishes_after_cleanup' \
+  --exact \
+  --nocapture
+
+# FFmpeg Profile은 service UID cache의 digest를 시작 시와 Task마다 검증하고, 고정 entrypoint FD로
+# daemon-owned argv를 실행한다. 성공 외에는 Artifact를 publish하지 않고 timeout/cancel 후손을 정리한다.
+unit_sequence=$((unit_sequence + 1))
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-ffmpeg-profile-$$-${unit_sequence}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --setenv=TASKCAGE_RUN_LINUX_FFMPEG_PROFILE_INTEGRATION=1 \
+  --setenv=TASKCAGE_FAKE_FFMPEG_BIN="${fake_ffmpeg_bin}" \
+  "${submit_test}" \
+  'handlers::tests::actual_ffmpeg_profile_uses_pinned_package_and_cleans_failure_timeout_and_cancel' \
   --exact \
   --nocapture
 

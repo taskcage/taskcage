@@ -426,7 +426,7 @@ impl StagedArtifactTask {
 
     /// Target이 output을 쓸 유일한 staging path다.
     pub fn output_path(&self) -> PathBuf {
-        self.output_directory.path.join("result.part")
+        self.output_directory.path.join(self.output.file_name())
     }
 
     /// target 성공·whole-task cleanup 뒤 output을 검증하고 no-overwrite atomic rename으로 공개한다.
@@ -464,7 +464,9 @@ impl StagedArtifactTask {
 
     fn publish_inner(&self) -> Result<PublishedArtifact, ArtifactStoreError> {
         self.validate_declared_staging()?;
-        let output = self.output_directory.open_regular_file("result.part")?;
+        let output = self
+            .output_directory
+            .open_regular_file(self.output.file_name())?;
         let (size_bytes, digest) = verify_output(
             &output,
             self.output.maximum_bytes().min(self.store.maximum_bytes),
@@ -489,7 +491,7 @@ impl StagedArtifactTask {
         };
         if let Err(error) = rename_no_replace(
             &self.output_directory,
-            "result.part",
+            self.output.file_name(),
             &destination,
             self.output.file_name(),
         ) {
@@ -544,9 +546,9 @@ impl StagedArtifactTask {
         require_directory(&input)?;
         require_directory(&output)?;
         require_exact_children(&input, &["source"])?;
-        require_exact_children(&output, &["result.part"])?;
+        require_exact_children(&output, &[self.output.file_name()])?;
         require_regular_file(&input.join("source"))?;
-        require_regular_file(&output.join("result.part"))
+        require_regular_file(&output.join(self.output.file_name()))
     }
 }
 
@@ -1371,6 +1373,11 @@ mod linux_store_tests {
         let staged = store
             .stage_input(TASK_ID, &input, output_contract())
             .expect("input snapshot staging");
+        assert_eq!(
+            staged.output_path().file_name().and_then(OsStr::to_str),
+            Some("result.bin"),
+            "staging output은 Profile이 선언한 확장자를 유지해야 합니다"
+        );
         assert_eq!(fs::read(staged.input_path()).unwrap(), b"source bytes");
         assert!(
             !root

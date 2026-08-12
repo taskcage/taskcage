@@ -39,8 +39,6 @@ pub enum RuntimePackageError {
     Integrity(String),
     #[error("Runtime Package cache root가 안전하지 않습니다: {0}")]
     UnsafeCacheRoot(PathBuf),
-    #[error("Runtime Package import command는 root 권한이 필요합니다")]
-    RootRequired,
     #[error("현재 platform은 Runtime Package cache를 지원하지 않습니다")]
     UnsupportedPlatform,
     #[error("Runtime Package filesystem 작업 {operation}에 실패했습니다: {path}")]
@@ -114,16 +112,13 @@ impl RuntimePackageCache {
     }
 }
 
-/// Administrative CLI만 호출하는 root 권한 경계다.
-pub fn import_as_administrator(
+/// daemon과 같은 service UID로 cache에 import하는 CLI 경계다.
+pub fn import_for_service_uid(
     cache_root: &Path,
     source: &Path,
 ) -> RuntimePackageResult<ImportReport> {
     #[cfg(target_os = "linux")]
     {
-        if unsafe { libc::geteuid() } != 0 {
-            return Err(RuntimePackageError::RootRequired);
-        }
         RuntimePackageCache::open(cache_root)?.import(source)
     }
     #[cfg(not(target_os = "linux"))]

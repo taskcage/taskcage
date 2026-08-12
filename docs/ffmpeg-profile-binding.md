@@ -1,7 +1,8 @@
 # FFmpeg Audio-to-WAV Profile Binding 계획
 
-> 상태: #154의 Java Binding 구현을 위한 **승인된 계약**이다. Runtime Package와 daemon FFmpeg Profile은
-> #151 및 후속 daemon 변경이 병합되기 전까지 구현된 기능으로 간주하지 않는다.
+> 상태: Java Binding과 daemon FFmpeg Profile registration의 **승인된 계약**이다. daemon 변경 뒤에도
+> Java-to-daemon 실제 FFmpeg E2E와 복사 가능한 예제가 별도 Java PR에서 통과하기 전에는 Binding 완료로
+> 간주하지 않는다.
 
 ## 목적
 
@@ -105,8 +106,9 @@ Binding `close()`나 별도 connection pool을 추가하지 않는다.
 ## 구현과 협업 순서
 
 1. Java 작업은 별도 Binding module, 순수 request mapping과 result validation 단위 테스트를 구현한다.
-2. #151은 별도 daemon PR에서 Runtime Package import/cache와 verified executable resolution을 구현한다.
-3. daemon 작업은 승인된 FFmpeg Profile을 설치하고 같은 identity와 slot을 resolve한다.
+2. Runtime Package import/cache와 verified executable resolution은 daemon이 소유한다.
+3. 별도 daemon PR은 승인된 FFmpeg Profile을 하나의 configured Package digest에 등록하고 같은 identity와
+   slot을 resolve한다.
 4. 두 변경이 병합된 뒤 container 개발 환경에서 Java-to-daemon 실제 FFmpeg E2E와 복사 가능한 예제를
    추가한다.
 

@@ -5,6 +5,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use taskcaged::cgroup::{CgroupLimits, CpuLimit};
@@ -65,7 +66,7 @@ async fn main() -> taskcaged::Result<()> {
         }
         Some(command) if command == OsStr::new("import-package") => {
             let config = parse_import_package(args.collect())?;
-            let report = taskcaged::runtime_package::import_as_administrator(
+            let report = taskcaged::runtime_package::import_for_service_uid(
                 &config.cache_root,
                 &config.source,
             )?;
@@ -217,6 +218,8 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
     let mut max_task_stderr_tail_bytes = None;
     let mut profile_artifact_root = None;
     let mut profile_artifact_max_bytes = None;
+    let mut runtime_package_cache_root = None;
+    let mut ffmpeg_audio_to_wav_package_digest = None;
     let mut index = 0;
     while index < args.len() {
         let name = args[index].to_str().ok_or_else(|| {
@@ -269,6 +272,25 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             "--profile-artifact-max-bytes" if profile_artifact_max_bytes.is_none() => {
                 profile_artifact_max_bytes = Some(parse_number(name, value)?);
             }
+            "--runtime-package-cache-root" if runtime_package_cache_root.is_none() => {
+                runtime_package_cache_root = Some(PathBuf::from(value));
+            }
+            "--ffmpeg-audio-to-wav-package-digest"
+                if ffmpeg_audio_to_wav_package_digest.is_none() =>
+            {
+                let value = value.to_str().ok_or_else(|| {
+                    Error::InvalidArgument(
+                        "FFmpeg Runtime Package digest는 UTF-8이어야 합니다".to_owned(),
+                    )
+                })?;
+                ffmpeg_audio_to_wav_package_digest = Some(
+                    taskcaged::digest::Sha256Digest::from_str(value).map_err(|error| {
+                        Error::InvalidArgument(format!(
+                            "잘못된 --ffmpeg-audio-to-wav-package-digest 값입니다: {error}"
+                        ))
+                    })?,
+                );
+            }
             "--socket"
             | "--max-concurrent-tasks"
             | "--max-registry-tasks"
@@ -283,7 +305,9 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             | "--max-task-stdout-tail-bytes"
             | "--max-task-stderr-tail-bytes"
             | "--profile-artifact-root"
-            | "--profile-artifact-max-bytes" => {
+            | "--profile-artifact-max-bytes"
+            | "--runtime-package-cache-root"
+            | "--ffmpeg-audio-to-wav-package-digest" => {
                 return Err(Error::InvalidArgument(format!(
                     "serve 옵션이 중복되었습니다: {name}"
                 )));
@@ -335,11 +359,26 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             },
         ),
     )?;
-    match (profile_artifact_root, profile_artifact_max_bytes) {
-        (None, None) => Ok(config),
-        (Some(root), Some(maximum_bytes)) => config.with_file_copy_profile(root, maximum_bytes),
+    let config = match (profile_artifact_root, profile_artifact_max_bytes) {
+        (None, None) => config,
+        (Some(root), Some(maximum_bytes)) => {
+            config.with_file_copy_profile(root, maximum_bytes)?
+        }
         _ => Err(Error::InvalidArgument(
             "file-copy Profile에는 --profile-artifact-root와 --profile-artifact-max-bytes를 함께 지정해야 합니다"
+                .to_owned(),
+        ))?,
+    };
+    match (
+        runtime_package_cache_root,
+        ffmpeg_audio_to_wav_package_digest,
+    ) {
+        (None, None) => Ok(config),
+        (Some(cache_root), Some(digest)) => {
+            config.with_ffmpeg_audio_to_wav_profile(cache_root, digest)
+        }
+        _ => Err(Error::InvalidArgument(
+            "FFmpeg Profile 등록에는 --runtime-package-cache-root와 --ffmpeg-audio-to-wav-package-digest를 함께 지정해야 합니다"
                 .to_owned(),
         )),
     }
@@ -964,6 +1003,111 @@ mod tests {
         let config = super::parse_serve(with_deployment_policy(complete))
             .expect("complete Profile configuration");
         assert!(format!("{config:?}").contains("local_profile: Some"));
+    }
+
+    #[test]
+    fn serve_requires_complete_ffmpeg_runtime_package_registration() {
+        let base = || {
+            with_deployment_policy(vec![
+                OsString::from("--socket"),
+                std::env::temp_dir()
+                    .join("taskcaged-ffmpeg.sock")
+                    .into_os_string(),
+                OsString::from("--max-concurrent-tasks"),
+                OsString::from("1"),
+                OsString::from("--max-registry-tasks"),
+                OsString::from("1"),
+                OsString::from("--max-concurrent-connections"),
+                OsString::from("1"),
+                OsString::from("--cleanup-timeout-ms"),
+                OsString::from("1"),
+                OsString::from("--fail-stop-timeout-ms"),
+                OsString::from("1"),
+                OsString::from("--profile-artifact-root"),
+                std::env::temp_dir().into_os_string(),
+                OsString::from("--profile-artifact-max-bytes"),
+                OsString::from("1024"),
+            ])
+        };
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let cache_root = std::env::temp_dir().join("taskcage-runtime-package-cache");
+
+        let mut no_artifacts = with_deployment_policy(vec![
+            OsString::from("--socket"),
+            std::env::temp_dir()
+                .join("taskcaged-ffmpeg-no-artifacts.sock")
+                .into_os_string(),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("1"),
+            OsString::from("--max-registry-tasks"),
+            OsString::from("1"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("1"),
+            OsString::from("--cleanup-timeout-ms"),
+            OsString::from("1"),
+            OsString::from("--fail-stop-timeout-ms"),
+            OsString::from("1"),
+        ]);
+        no_artifacts.extend([
+            OsString::from("--runtime-package-cache-root"),
+            cache_root.clone().into_os_string(),
+            OsString::from("--ffmpeg-audio-to-wav-package-digest"),
+            OsString::from(&digest),
+        ]);
+        assert!(
+            super::parse_serve(no_artifacts)
+                .unwrap_err()
+                .to_string()
+                .contains("Artifact 설정")
+        );
+
+        let mut root_only = base();
+        root_only.extend([
+            OsString::from("--runtime-package-cache-root"),
+            cache_root.clone().into_os_string(),
+        ]);
+        assert!(
+            super::parse_serve(root_only)
+                .unwrap_err()
+                .to_string()
+                .contains("함께 지정")
+        );
+
+        let mut digest_only = base();
+        digest_only.extend([
+            OsString::from("--ffmpeg-audio-to-wav-package-digest"),
+            OsString::from(&digest),
+        ]);
+        assert!(
+            super::parse_serve(digest_only)
+                .unwrap_err()
+                .to_string()
+                .contains("함께 지정")
+        );
+
+        let mut invalid_digest = base();
+        invalid_digest.extend([
+            OsString::from("--runtime-package-cache-root"),
+            cache_root.clone().into_os_string(),
+            OsString::from("--ffmpeg-audio-to-wav-package-digest"),
+            OsString::from("sha256:not-canonical"),
+        ]);
+        assert!(
+            super::parse_serve(invalid_digest)
+                .unwrap_err()
+                .to_string()
+                .contains("잘못된 --ffmpeg-audio-to-wav-package-digest")
+        );
+
+        let mut complete = base();
+        complete.extend([
+            OsString::from("--runtime-package-cache-root"),
+            cache_root.into_os_string(),
+            OsString::from("--ffmpeg-audio-to-wav-package-digest"),
+            OsString::from(digest),
+        ]);
+        let config = super::parse_serve(complete).expect("complete FFmpeg registration");
+        assert!(format!("{config:?}").contains("ffmpeg_audio_to_wav: Some"));
     }
 
     #[test]

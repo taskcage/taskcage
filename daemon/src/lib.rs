@@ -172,6 +172,14 @@ pub struct DaemonConfig {
 pub struct LocalProfileConfig {
     artifact_root: PathBuf,
     maximum_artifact_bytes: u64,
+    ffmpeg_audio_to_wav: Option<FfmpegRuntimePackageConfig>,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct FfmpegRuntimePackageConfig {
+    cache_root: PathBuf,
+    digest: digest::Sha256Digest,
 }
 
 #[derive(Debug, Clone)]
@@ -281,7 +289,38 @@ impl DaemonConfig {
         self.local_profile = Some(LocalProfileConfig {
             artifact_root,
             maximum_artifact_bytes,
+            ffmpeg_audio_to_wav: None,
         });
+        Ok(self)
+    }
+
+    /// `ffmpeg-audio-to-wav@1.0.0`을 하나의 검증된 Runtime Package digest에 등록한다.
+    pub fn with_ffmpeg_audio_to_wav_profile(
+        mut self,
+        cache_root: PathBuf,
+        digest: digest::Sha256Digest,
+    ) -> Result<Self> {
+        if !cache_root.is_absolute() {
+            return Err(Error::InvalidArgument(
+                "runtime-package-cache-root 경로는 절대 경로여야 합니다".to_owned(),
+            ));
+        }
+        if cache_root.to_str().is_none() {
+            return Err(Error::InvalidArgument(
+                "runtime-package-cache-root 경로는 UTF-8이어야 합니다".to_owned(),
+            ));
+        }
+        let local_profile = self.local_profile.as_mut().ok_or_else(|| {
+            Error::InvalidArgument(
+                "FFmpeg Profile 등록에는 완전한 Profile Artifact 설정이 필요합니다".to_owned(),
+            )
+        })?;
+        if local_profile.ffmpeg_audio_to_wav.is_some() {
+            return Err(Error::InvalidArgument(
+                "FFmpeg Profile Runtime Package가 이미 등록되었습니다".to_owned(),
+            ));
+        }
+        local_profile.ffmpeg_audio_to_wav = Some(FfmpegRuntimePackageConfig { cache_root, digest });
         Ok(self)
     }
 }
@@ -348,10 +387,15 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         .local_profile
         .as_ref()
         .map(|settings| {
+            let ffmpeg_registration = settings
+                .ffmpeg_audio_to_wav
+                .as_ref()
+                .map(|registration| (registration.cache_root.as_path(), registration.digest));
             profile::LocalProfileRuntime::open(
                 &settings.artifact_root,
                 settings.maximum_artifact_bytes,
                 config.deployment_policy.maximum().clone(),
+                ffmpeg_registration,
             )
             .map_err(|error| {
                 Error::InvalidArgument(format!("local profile 설정이 안전하지 않습니다: {error}"))

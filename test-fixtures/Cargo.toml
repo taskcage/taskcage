@@ -20,3 +20,7 @@ path = "src/bin/output_flood.rs"
 [[bin]]
 name = "ffmpeg-tree"
 path = "src/bin/ffmpeg_tree.rs"
+
+[[bin]]
+name = "fake-ffmpeg"
+path = "src/bin/fake_ffmpeg.rs"
