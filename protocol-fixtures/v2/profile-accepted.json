@@ -1,0 +1,28 @@
+{
+  "protocolVersion": 2,
+  "requestId": "11111111-1111-4111-8111-111111111111",
+  "type": "profileAccepted",
+  "payload": {
+    "taskId": "44444444-4444-4444-8444-444444444444",
+    "state": "RUNNING",
+    "profile": {
+      "name": "file-copy",
+      "version": "1.0.0"
+    },
+    "effectiveResources": {
+      "limits": {
+        "cpuMax": {
+          "quotaMicros": 100000,
+          "periodMicros": 100000
+        },
+        "memoryMaxBytes": 536870912,
+        "pidsMax": 32,
+        "wallTimeLimitMs": 300000
+      },
+      "output": {
+        "stdoutTailMaxBytes": 65536,
+        "stderrTailMaxBytes": 65536
+      }
+    }
+  }
+}

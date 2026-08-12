@@ -1,0 +1,10 @@
+{
+  "protocolVersion": 2,
+  "requestId": "11111111-1111-4111-8111-111111111111",
+  "type": "error",
+  "payload": {
+    "code": "PROFILE_NOT_FOUND",
+    "message": "profile file-copy@1.0.0 is not installed",
+    "retryable": false
+  }
+}

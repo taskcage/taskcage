@@ -1,0 +1,15 @@
+{
+  "protocolVersion": 2,
+  "requestId": "33333333-3333-4333-8333-333333333333",
+  "type": "profileResult",
+  "payload": {
+    "taskId": "44444444-4444-4444-8444-444444444444",
+    "state": "RUNNING",
+    "profile": {
+      "name": "file-copy",
+      "version": "1.0.0"
+    },
+    "submittedAt": "2026-08-12T04:00:00Z",
+    "startedAt": "2026-08-12T04:00:01Z"
+  }
+}
