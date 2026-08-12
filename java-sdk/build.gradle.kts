@@ -125,6 +125,9 @@ tasks.register<Test>("e2eTest") {
         require(!System.getenv("TASKCAGE_OUTPUT_FLOOD").isNullOrBlank()) {
             "e2eTest requires TASKCAGE_OUTPUT_FLOOD to point to the output-flood fixture"
         }
+        require(!System.getenv("TASKCAGE_ARTIFACT_ROOT").isNullOrBlank()) {
+            "e2eTest requires TASKCAGE_ARTIFACT_ROOT to match the daemon Profile Artifact root"
+        }
     }
 }
 

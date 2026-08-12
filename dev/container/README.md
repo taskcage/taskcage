@@ -29,7 +29,9 @@ docker compose -f dev/container/compose.yml logs taskcaged
 ```
 
 daemon은 외부 TCP port를 열지 않는다. owner-only UDS는 Compose volume의
-`/run/taskcage/taskcaged.sock`에 있으며 같은 구성의 테스트 컨테이너만 사용한다.
+`/run/taskcage/taskcaged.sock`에 있으며 같은 구성의 테스트 컨테이너만 사용한다. 개발 구성은
+`/taskcage-work/artifacts`를 owner-only Local Artifact root로 준비하고 opt-in `file-copy@1.0.0` Profile과
+Protocol v2도 활성화한다.
 
 ## Java SDK E2E
 
@@ -41,9 +43,10 @@ bash dev/container/run-e2e.sh
 ```
 
 Java 테스트 컨테이너는 daemon과 UDS·작업 volume 및 Docker Linux host의 PID namespace를 공유한다.
-따라서 기존 Java E2E가 후손 PID 소멸까지 확인할 수 있다. 테스트가 끝나면 daemon 컨테이너 내부에서
-잔여 job cgroup이 없는지도 검사한다. 최종 cgroup·systemd·릴리스 검증은 계속 Ubuntu 24.04 VM 또는
-host 통합 테스트가 담당한다.
+따라서 기존 Java E2E가 후손 PID 소멸까지 확인하고, Profile E2E가 입력 Artifact를 준비해 실제 daemon의
+snapshot·실행·결과 publish를 검증할 수 있다. 테스트가 끝나면 daemon 컨테이너 내부에서 잔여 job
+cgroup이 없는지도 검사한다. 최종 cgroup·systemd·릴리스 검증은 계속 Ubuntu 24.04 VM 또는 host 통합
+테스트가 담당한다.
 
 ## 권한과 제한
 

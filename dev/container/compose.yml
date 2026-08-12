@@ -45,6 +45,7 @@ services:
       TASKCAGE_SOCKET: /run/taskcage/taskcaged.sock
       TASKCAGE_GHOST_TREE: /usr/local/libexec/taskcage/ghost-tree
       TASKCAGE_OUTPUT_FLOOD: /usr/local/libexec/taskcage/output-flood
+      TASKCAGE_ARTIFACT_ROOT: /taskcage-work/artifacts
     volumes:
       - taskcage-runtime:/run/taskcage
       - taskcage-work:/taskcage-work
