@@ -36,6 +36,7 @@ pub mod protocol;
 pub mod resource_budget;
 #[cfg(target_os = "linux")]
 mod runner;
+pub mod runtime_package;
 #[cfg(target_os = "linux")]
 mod server;
 #[cfg(target_os = "linux")]
@@ -102,6 +103,8 @@ pub enum Error {
     UnsupportedPlatform,
     #[error("잘못된 인자입니다: {0}")]
     InvalidArgument(String),
+    #[error(transparent)]
+    RuntimePackage(#[from] runtime_package::RuntimePackageError),
     #[error("실행 결과를 JSON으로 바꾸지 못했습니다")]
     Serialize(#[from] serde_json::Error),
     #[error("운영체제 종료 신호를 처리하지 못했습니다")]

@@ -229,6 +229,7 @@ bash integration-tests/release-artifact-smoke.sh \
 
 - [제품 철학과 용어](docs/product-philosophy.md)
 - [Protocol v1 API 명세](docs/api-mvp.md)
+- [Local Runtime Package cache](docs/runtime-package-cache.md)
 - [Java SDK](java-sdk/README.md)
 - [Ubuntu daemon 설치](docs/install-ubuntu.md)
 - [릴리스 및 버전 정책](docs/release-policy.md)

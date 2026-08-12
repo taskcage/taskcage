@@ -63,8 +63,17 @@ async fn main() -> taskcaged::Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        Some(command) if command == OsStr::new("import-package") => {
+            let config = parse_import_package(args.collect())?;
+            let report = taskcaged::runtime_package::import_as_administrator(
+                &config.cache_root,
+                &config.source,
+            )?;
+            println!("{}", serde_json::to_string(&report)?);
+            Ok(())
+        }
         Some(other) => Err(Error::InvalidArgument(format!(
-            "알 수 없는 명령입니다: {other:?}; serve, check-environment, status 또는 run-once를 사용하세요"
+            "알 수 없는 명령입니다: {other:?}; serve, check-environment, status, run-once 또는 import-package를 사용하세요"
         ))),
     }
 }
@@ -99,6 +108,50 @@ fn configure_logging() -> taskcaged::Result<()> {
 struct StatusConfig {
     socket_path: PathBuf,
     timeout: Duration,
+}
+
+#[derive(Debug)]
+struct ImportPackageConfig {
+    source: PathBuf,
+    cache_root: PathBuf,
+}
+
+fn parse_import_package(args: Vec<OsString>) -> taskcaged::Result<ImportPackageConfig> {
+    let mut source = None;
+    let mut cache_root = None;
+    let mut index = 0;
+    while index < args.len() {
+        let name = args[index].to_str().ok_or_else(|| {
+            Error::InvalidArgument("import-package 옵션 이름은 UTF-8이어야 합니다".to_owned())
+        })?;
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| Error::InvalidArgument(format!("{name} 옵션 값이 없습니다")))?;
+        match name {
+            "--source" if source.is_none() => source = Some(PathBuf::from(value)),
+            "--cache-root" if cache_root.is_none() => cache_root = Some(PathBuf::from(value)),
+            "--source" | "--cache-root" => {
+                return Err(Error::InvalidArgument(format!(
+                    "import-package 옵션이 중복되었습니다: {name}"
+                )));
+            }
+            _ => {
+                return Err(Error::InvalidArgument(format!(
+                    "알 수 없는 import-package 옵션입니다: {name}"
+                )));
+            }
+        }
+        index += 2;
+    }
+
+    let source = required_option("source", source)?;
+    let cache_root = required_option("cache-root", cache_root)?;
+    if !source.is_absolute() || !cache_root.is_absolute() {
+        return Err(Error::InvalidArgument(
+            "import-package source와 cache-root는 절대 경로여야 합니다".to_owned(),
+        ));
+    }
+    Ok(ImportPackageConfig { source, cache_root })
 }
 
 fn parse_status(args: Vec<OsString>) -> taskcaged::Result<StatusConfig> {
@@ -478,6 +531,64 @@ fn generate_job_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_package_requires_two_absolute_paths() {
+        let source = std::env::temp_dir().join("taskcage-package-source");
+        let cache_root = std::env::temp_dir().join("taskcage-package-cache");
+        let config = parse_import_package(vec![
+            OsString::from("--source"),
+            source.clone().into_os_string(),
+            OsString::from("--cache-root"),
+            cache_root.clone().into_os_string(),
+        ])
+        .unwrap();
+        assert_eq!(config.source, source);
+        assert_eq!(config.cache_root, cache_root);
+
+        let error = parse_import_package(vec![
+            OsString::from("--source"),
+            OsString::from("relative"),
+            OsString::from("--cache-root"),
+            cache_root.into_os_string(),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("절대 경로"));
+    }
+
+    #[test]
+    fn import_package_rejects_missing_unknown_and_duplicate_options() {
+        let source = std::env::temp_dir().join("taskcage-package-source");
+        let cache_root = std::env::temp_dir().join("taskcage-package-cache");
+        assert!(
+            parse_import_package(vec![
+                OsString::from("--source"),
+                source.clone().into_os_string(),
+            ])
+            .unwrap_err()
+            .to_string()
+            .contains("cache-root 옵션은 필수")
+        );
+        assert!(
+            parse_import_package(vec![OsString::from("--unknown"), OsString::from("value"),])
+                .unwrap_err()
+                .to_string()
+                .contains("알 수 없는")
+        );
+        assert!(
+            parse_import_package(vec![
+                OsString::from("--source"),
+                source.clone().into_os_string(),
+                OsString::from("--source"),
+                source.into_os_string(),
+                OsString::from("--cache-root"),
+                cache_root.into_os_string(),
+            ])
+            .unwrap_err()
+            .to_string()
+            .contains("중복")
+        );
+    }
 
     fn with_deployment_policy(mut args: Vec<OsString>) -> Vec<OsString> {
         args.extend([
