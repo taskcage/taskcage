@@ -7,9 +7,9 @@ TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`�
 > `0.x`는 초기 개발 버전이며 SDK는 Spring Boot에 의존하지 않는다.
 
 공개된 `0.1.0`은 Local UDS transport와 Raw Command 모델을 구현한다. 현재 개발 소스에는 승인된
-[Local Profile Core API v2](../docs/api-profile-v2.md)의 Java 모델과 client가 추가됐으며, 실제 daemon
-연동 완료 기준은 Rust 구현과 Linux E2E가 끝난 뒤 충족된다. 인증된 Remote transport는 아직 구현된 SDK
-기능이 아니다.
+[Local Profile Core API v2](../docs/api-profile-v2.md)의 Java 모델과 client가 추가됐고, opt-in
+`file-copy@1.0.0` Profile을 사용하는 실제 Linux daemon E2E까지 검증한다. 인증된 Remote transport는 아직
+구현된 SDK 기능이 아니다.
 
 ## 역할과 v0.1 결과
 
@@ -48,9 +48,11 @@ Java application
 - Local Profile v2의 `ProfileRequest`, typed input과 Local Artifact 모델
 - Profile 제출·조회·bounded 대기와 Protocol v1 취소를 연결하는 `ProfileTaskHandle`
 - 공유 `protocol-fixtures/v2`에 대한 Java encoder/decoder 호환성 테스트
+- 실제 daemon의 Profile 실행·Artifact publish·조회·멱등성과 사전 실행 오류를 검증하는 Linux E2E
 
 Profile API는 daemon capability의 `protocolVersions`에 `2`가 있을 때만 요청을 보내며 Raw Command로
-fallback하지 않는다. 현재 실제 daemon Profile 실행과 Java↔daemon E2E는 #150 완료 뒤 검증한다.
+fallback하지 않는다. 현재 E2E는 opt-in `file-copy@1.0.0` Profile 하나로 Core 계약을 검증하며 FFmpeg 같은
+도구별 Binding은 포함하지 않는다.
 
 ## 개발 중인 Local Profile API
 
@@ -219,7 +221,7 @@ workflow로 검증한다.
 
 ## v0.1 공개 릴리스 범위 밖
 
-- Execution Profile daemon 실행과 범용 `ProfileRequest`의 실제 daemon E2E
+- 공개된 `0.1.0` artifact의 Execution Profile API
 - FFmpeg·Chromium Profile Binding
 - TaskCage Bundle과 Runtime Package cache
 - TaskCage Hub 연동

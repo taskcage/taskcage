@@ -33,7 +33,9 @@ CMD ["serve", \
     "--max-task-pids", "128", \
     "--max-task-timeout-ms", "900000", \
     "--max-task-stdout-tail-bytes", "65536", \
-    "--max-task-stderr-tail-bytes", "65536"]
+    "--max-task-stderr-tail-bytes", "65536", \
+    "--profile-artifact-root", "/taskcage-work/artifacts", \
+    "--profile-artifact-max-bytes", "104857600"]
 
 FROM eclipse-temurin:17-jdk-jammy AS java-e2e
 
