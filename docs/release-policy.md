@@ -37,7 +37,7 @@ prerelease로 표시한다.
 
 | 컴포넌트 | tag 예시 | 내부 버전 위치 | 배포처 |
 |---|---|---|---|
-| TaskCage daemon | `taskcaged-v0.1.0` | `daemon/Cargo.toml` | GitHub Release |
+| TaskCage daemon | `taskcaged-v0.2.0` | `daemon/Cargo.toml` | GitHub Release |
 | Java SDK | `java-sdk-v0.2.0` | `java-sdk/build.gradle.kts` | Maven Central, GitHub Release |
 | FFmpeg Java Binding | `ffmpeg-binding-v0.1.0` | `java-bindings/ffmpeg/build.gradle.kts` | Maven Central, GitHub Release |
 | Python SDK | `python-sdk-v0.1.0` | 해당 package manifest | PyPI, GitHub Release |

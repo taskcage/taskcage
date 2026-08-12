@@ -4,14 +4,14 @@
 공개 버전과 tag 규칙은 [릴리스 및 버전 정책](release-policy.md)을 따른다.
 
 첫 컴포넌트 버전 `0.1.0`은 GitHub prerelease와 Maven Central에 공개됐다. 공개된 tag와 artifact는
-수정하거나 재사용하지 않는다. 아래 `0.1.0` 명령은 첫 릴리스 절차를 기록한 예시이며 다시 실행하는 명령이
-아니다. 후속 릴리스는 manifest를 새 patch 또는 minor 버전으로 변경하고 모든 예시의 버전을 함께 바꾼다.
+수정하거나 재사용하지 않는다. 아래 명령은 현재 준비 중인 컴포넌트 버전을 기준으로 하며, 후속 릴리스는
+manifest를 새 patch 또는 minor 버전으로 변경하고 모든 예시의 버전을 함께 바꾼다.
 
 ## 컴포넌트 계약
 
 | 컴포넌트 | tag | 배포 workflow | 공개 위치 |
 |---|---|---|---|
-| daemon | `taskcaged-v0.1.0` | `Release taskcaged` | GitHub Release |
+| daemon | `taskcaged-v0.2.0` | `Release taskcaged` | GitHub Release |
 | Java Core SDK | `java-sdk-v0.2.0` | `Release Java SDK` | Maven Central, GitHub Release |
 | FFmpeg Java Binding | `ffmpeg-binding-v0.1.0` | `Release FFmpeg Binding` | Maven Central, GitHub Release |
 
@@ -24,8 +24,8 @@ daemon `0.2.0`을 요구한다. 연결 호환성은 제품 버전 문자열이 �
 daemon GitHub prerelease에는 다음 파일을 게시한다.
 
 ```text
-taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
-taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+taskcage-v0.2.0-x86_64-unknown-linux-gnu.tar.gz
+taskcage-v0.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 install-taskcaged.sh
 ```
 
@@ -94,9 +94,9 @@ daemon manifest version을 확인하고 모든 필수 CI가 통과한 `main` 커
 ```bash
 git switch main
 git pull --ff-only
-bash scripts/release/verify-version.sh taskcaged 0.1.0
-git tag --sign taskcaged-v0.1.0 -m "TaskCage daemon 0.1.0"
-git push origin taskcaged-v0.1.0
+bash scripts/release/verify-version.sh taskcaged 0.2.0
+git tag --sign taskcaged-v0.2.0 -m "TaskCage daemon 0.2.0"
+git push origin taskcaged-v0.2.0
 ```
 
 tag push는 `.github/workflows/release-daemon.yml`을 시작한다. workflow는 다음을 확인한다.
@@ -121,7 +121,7 @@ tag push는 `.github/workflows/release-daemon.yml`을 시작한다. workflow는 
 - 릴리스 노트에 사용자 변경, 지원 플랫폼, Protocol과 알려진 제한이 포함됨
 - 깨끗한 Ubuntu 24.04 x86-64 환경에서 archive smoke test가 통과함
 
-검토가 끝나면 GitHub Actions의 `Release taskcaged` workflow를 `tag=taskcaged-v0.1.0`으로 수동
+검토가 끝나면 GitHub Actions의 `Release taskcaged` workflow를 `tag=taskcaged-v0.2.0`으로 수동
 실행한다. `taskcaged-release` environment를 승인하면 workflow는 기존 Draft가 prerelease인지
 확인하고 공개한다. Draft 생성 뒤 workflow가 중단돼도 같은 tag로 공개 단계만 다시 실행할 수 있다.
 
