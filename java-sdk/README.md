@@ -6,9 +6,10 @@ TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`�
 > [Maven Central](https://repo1.maven.org/maven2/org/taskcage/taskcage-java-sdk/0.1.0/)에 공개됐다.
 > `0.x`는 초기 개발 버전이며 SDK는 Spring Boot에 의존하지 않는다.
 
-현재 SDK는 Local UDS transport와 Raw Command 모델을 구현한다. Execution Profile과 인증된 Remote
-transport를 포함한 제품 방향은 [제품 철학과 용어](../docs/product-philosophy.md)에서 정의하며 아직 구현된
-SDK 기능이 아니다.
+공개된 `0.1.0`은 Local UDS transport와 Raw Command 모델을 구현한다. 현재 개발 소스에는 승인된
+[Local Profile Core API v2](../docs/api-profile-v2.md)의 Java 모델과 client가 추가됐으며, 실제 daemon
+연동 완료 기준은 Rust 구현과 Linux E2E가 끝난 뒤 충족된다. 인증된 Remote transport는 아직 구현된 SDK
+기능이 아니다.
 
 ## 역할과 v0.1 결과
 
@@ -21,7 +22,7 @@ Java application
     ├─ 향후 FFmpeg·Chromium Profile Binding
     │             │
     └──── TaskCage Java Core SDK
-                  │ UDS / Protocol v1
+                  │ UDS / Protocol v1 + Local Profile v2
                   ▼
               taskcaged
 ```
@@ -44,6 +45,43 @@ Java application
 - 가짜 UDS daemon 단위 테스트와 실제 Linux daemon E2E 테스트
 - `ResourceBudget.safeDefaults()`와 `TaskSpec(command)`의 유한한 요청 기본값
 - 설치된 daemon과 실제 FFmpeg를 사용하는 별도 Local reference E2E
+- Local Profile v2의 `ProfileRequest`, typed input과 Local Artifact 모델
+- Profile 제출·조회·bounded 대기와 Protocol v1 취소를 연결하는 `ProfileTaskHandle`
+- 공유 `protocol-fixtures/v2`에 대한 Java encoder/decoder 호환성 테스트
+
+Profile API는 daemon capability의 `protocolVersions`에 `2`가 있을 때만 요청을 보내며 Raw Command로
+fallback하지 않는다. 현재 실제 daemon Profile 실행과 Java↔daemon E2E는 #150 완료 뒤 검증한다.
+
+## 개발 중인 Local Profile API
+
+generic Core API는 실행 파일 경로나 argv 대신 설치된 Profile identity와 typed input을 전달한다.
+
+```java
+ProfileRequest request = new ProfileRequest(
+    new ProfileIdentity("file-copy", "1.0.0"),
+    Map.of(
+        "source", new LocalInputArtifact(
+            new ArtifactPath("jobs/42/source.txt"),
+            new Sha256Digest(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            12),
+        "label", new StringProfileInput("archive"),
+        "retainMetadata", new BooleanProfileInput(true),
+        "priority", new Int64ProfileInput(3)),
+    ProfileResourceOverrides.builder()
+        .wallTimeLimit(Duration.ofMinutes(5))
+        .build());
+
+try (TaskCageClient client = TaskCageClient.connect(config)) {
+    FinishedProfileTaskSnapshot finished = client.run(request, Duration.ofMinutes(6));
+    PublishedArtifact result = finished.artifacts().get("result");
+}
+```
+
+`ArtifactPath`은 daemon이 설정한 Artifact root 기준 wire path이며 `java.nio.file.Path`가 아니다. SDK는
+Artifact root, 실행 파일, working directory 또는 output file name을 선택하지 않는다. 연결 실패나 응답
+유실 뒤 재시도가 필요하면 `run(UUID clientRequestId, ProfileRequest, Duration)` 또는
+`submitProfileHandle(UUID, ProfileRequest)` overload를 사용한다.
 
 현재 호출자는 필요할 때 자원 예산을 override하고 `run()`으로 동기 실행하거나 `TaskHandle`로 상태
 조회·완료 대기·취소를 수행할 수 있다. SDK는 Maven Central의 공개 좌표로 설치할 수 있다.
@@ -179,9 +217,9 @@ workflow로 검증한다.
 - 새 사용자가 문서만 보고 10분 안에 FFmpeg 변환을 실행할 수 있다.
 - Alpha 버전과 Protocol v1 호환 범위가 문서에 명시된다.
 
-## v0.1 범위 밖
+## v0.1 공개 릴리스 범위 밖
 
-- Execution Profile과 범용 `ProfileRequest`
+- Execution Profile daemon 실행과 범용 `ProfileRequest`의 실제 daemon E2E
 - FFmpeg·Chromium Profile Binding
 - TaskCage Bundle과 Runtime Package cache
 - TaskCage Hub 연동
