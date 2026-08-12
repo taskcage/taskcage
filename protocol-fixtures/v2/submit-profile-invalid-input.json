@@ -1,0 +1,26 @@
+{
+  "protocolVersion": 2,
+  "requestId": "11111111-1111-4111-8111-111111111111",
+  "type": "submitProfile",
+  "payload": {
+    "clientRequestId": "22222222-2222-4222-8222-222222222222",
+    "profile": {
+      "name": "file-copy",
+      "version": "1.0.0"
+    },
+    "inputs": {
+      "source": {
+        "kind": "LOCAL_INPUT",
+        "path": "jobs/42/source.txt",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sizeBytes": 12
+      },
+      "unknown": {
+        "kind": "STRING",
+        "value": "not-declared"
+      }
+    }
+  },
+  "expectedError": "INVALID_PROFILE_INPUT",
+  "targetMustStart": false
+}
