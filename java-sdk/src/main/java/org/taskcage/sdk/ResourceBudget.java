@@ -26,7 +26,7 @@ public record ResourceBudget(CpuQuota cpuMax, long memoryMaxBytes, long pidsMax,
         return requirePositiveWholeMilliseconds(wallTimeLimit);
     }
 
-    private static long requirePositiveWholeMilliseconds(Duration duration) {
+    static long requirePositiveWholeMilliseconds(Duration duration) {
         if (duration.getNano() % 1_000_000 != 0) {
             throw new IllegalArgumentException("wallTimeLimit must be an exact whole number of milliseconds");
         }

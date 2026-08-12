@@ -115,7 +115,7 @@ caller가 profile definition의 program, argv, environment, working directory, o
       "kind": "STRING",
       "value": "archive"
     },
-    "retainMetadata": {
+    "retain_metadata": {
       "kind": "BOOLEAN",
       "value": true
     },
