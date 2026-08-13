@@ -6,11 +6,13 @@ daemon과 언어 SDK가 공유하는 wire compatibility 계약이다. 이 fixtur
 
 - `authenticate-request.json`, `authenticated.json`: TLS 뒤 첫 frame의 service-account 인증
 - `capabilities.json`: 인증 뒤 Remote capability 확인
-- `submit-profile-valid.json`, `profile-accepted.json`: object-storage reference를 이용한 Profile 수락
+- `begin-artifact-upload.json`, `upload-artifact-chunk.json`, `complete-artifact-upload.json`, `artifact-uploaded.json`: managed input upload lifecycle
+- `read-artifact-chunk.json`, `artifact-chunk.json`: managed output download lifecycle
+- `submit-profile-valid.json`, `profile-accepted.json`: managed input Artifact를 이용한 Profile 수락
 - `get-profile-result.json`, `cancel-task.json`: 인증된 principal의 조회·정리 요청
 - `profile-result-success.json`: cleanup-confirmed 원격 output reference
 - `error-authentication-failed.json`, `error-authorization-denied.json`: 안정된 보안 오류 코드
 
-fixture의 `secret`과 digest는 테스트 전용 값이다. 실제 secret, 인증서, private key 또는 production object URI를
+fixture의 `secret`과 digest는 테스트 전용 값이다. 실제 secret, 인증서, private key 또는 production Artifact를
 추가하면 안 된다. frame, field, enum, error 의미를 바꾸면 Remote Protocol 문서, daemon conformance test, SDK
 encoder/decoder test와 real TLS E2E를 같은 변경에서 갱신한다.

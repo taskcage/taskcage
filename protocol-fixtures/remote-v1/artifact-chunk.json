@@ -1,0 +1,12 @@
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "99999999-9999-4999-8999-999999999999",
+  "type": "artifactChunk",
+  "payload": {
+    "artifactId": "88888888-8888-4888-8888-888888888888",
+    "offset": 0,
+    "dataBase64": "dGVzdA==",
+    "nextOffset": 4,
+    "finished": true
+  }
+}
