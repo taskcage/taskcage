@@ -964,11 +964,15 @@ fn sync_directory(path: &Path) -> RuntimePackageResult<()> {
 }
 
 fn check_host_compatibility(validated: &ValidatedManifest) -> RuntimePackageResult<()> {
-    if std::env::consts::OS != "linux" || std::env::consts::ARCH != "x86_64" {
+    if std::env::consts::OS != "linux"
+        || !matches!(std::env::consts::ARCH, "x86_64" | "aarch64")
+        || validated.manifest.platform.architecture != std::env::consts::ARCH
+    {
         return Err(RuntimePackageError::IncompatiblePlatform(format!(
-            "linux/x86_64이 필요하지만 host는 {}/{}입니다",
+            "package는 linux/{}을 요구하지만 host는 {}/{}입니다",
+            validated.manifest.platform.architecture,
             std::env::consts::OS,
-            std::env::consts::ARCH
+            std::env::consts::ARCH,
         )));
     }
     #[cfg(not(target_env = "gnu"))]
@@ -1123,7 +1127,7 @@ mod tests {
             "version": "1.0.0",
             "platform": {
                 "os": "linux",
-                "architecture": "x86_64",
+                "architecture": std::env::consts::ARCH,
                 "abi": "gnu",
                 "libc": {"family": "glibc", "minimumVersion": "2.0"}
             },
@@ -1171,6 +1175,34 @@ mod tests {
         pinned.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"executable");
         fs::rename(moved_entry, original_entry).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_package_for_the_other_supported_architecture() {
+        let fixture = TestDirectory::new("architecture-mismatch");
+        let source = create_source(fixture.path(), b"executable");
+        let cache_root = create_cache(fixture.path());
+        let other_architecture = match std::env::consts::ARCH {
+            "x86_64" => "aarch64",
+            "aarch64" => "x86_64",
+            architecture => panic!("unsupported Linux test architecture: {architecture}"),
+        };
+        let manifest_path = source.join(MANIFEST_NAME);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["platform"]["architecture"] = serde_json::json!(other_architecture);
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            RuntimePackageCache::open(&cache_root)
+                .unwrap()
+                .import(&source),
+            Err(RuntimePackageError::IncompatiblePlatform(_))
+        ));
     }
 
     #[test]

@@ -26,7 +26,7 @@ target process도 이 account로 실행되므로 필요한 binary와 작업 디�
 - unified cgroup v2의 `cpu`, `memory`, `pids` controller
 - `clone3(CLONE_INTO_CGROUP)`와 `cgroup.kill`을 지원하는 kernel
 - root 권한
-- GitHub Release에서 받은 Linux x86-64 archive와 SHA-256 sidecar 또는 신뢰할 수 있는 source checkout
+- GitHub Release에서 받은 host architecture와 일치하는 Linux x86-64 또는 ARM64 archive와 SHA-256 sidecar 또는 신뢰할 수 있는 source checkout
 
 ### WSL2 지원 경계
 
@@ -68,7 +68,13 @@ sudo systemctl enable --now taskcaged.service
 
 ```bash
 VERSION=0.1.0
-ASSET="taskcage-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+case "$(uname -m)" in
+  x86_64) TARGET=x86_64-unknown-linux-gnu ;;
+  aarch64) TARGET=aarch64-unknown-linux-gnu ;;
+  *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+ASSET="taskcage-v${VERSION}-${TARGET}.tar.gz"
+ARCHIVE_ROOT="taskcage-v${VERSION}-${TARGET}"
 RELEASE_URL="https://github.com/taskcage/taskcage/releases/download/taskcaged-v${VERSION}"
 
 curl --fail --location --remote-name "${RELEASE_URL}/${ASSET}"
@@ -96,8 +102,8 @@ installer는 기존 `/etc/taskcage/taskcaged.env`를 덮어쓰지 않는다. 처
 service를 시작하는 경로가 기본이다.
 
 ```bash
-sudo "taskcage-v${VERSION}-x86_64-unknown-linux-gnu/packaging/ubuntu/install-taskcaged.sh" \
-  --binary "taskcage-v${VERSION}-x86_64-unknown-linux-gnu/bin/taskcaged"
+sudo "${ARCHIVE_ROOT}/packaging/ubuntu/install-taskcaged.sh" \
+  --binary "${ARCHIVE_ROOT}/bin/taskcaged"
 
 sudoedit /etc/taskcage/taskcaged.env
 sudo systemctl enable --now taskcaged.service
@@ -106,8 +112,8 @@ sudo systemctl enable --now taskcaged.service
 검토 없이 저장소의 명시적 기본값으로 바로 시작하는 smoke 환경에서는 `--start`를 사용할 수 있다.
 
 ```bash
-sudo "taskcage-v${VERSION}-x86_64-unknown-linux-gnu/packaging/ubuntu/install-taskcaged.sh" \
-  --binary "taskcage-v${VERSION}-x86_64-unknown-linux-gnu/bin/taskcaged" \
+sudo "${ARCHIVE_ROOT}/packaging/ubuntu/install-taskcaged.sh" \
+  --binary "${ARCHIVE_ROOT}/bin/taskcaged" \
   --start
 ```
 

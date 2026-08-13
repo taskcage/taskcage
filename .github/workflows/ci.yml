@@ -30,6 +30,14 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - run: bash dev/container/run-e2e.sh
 
+  container-e2e-arm64:
+    name: Containerized Java E2E (ARM64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: bash dev/container/run-e2e.sh
+
   rust:
     name: Rust daemon
     runs-on: ubuntu-latest
@@ -111,7 +119,7 @@ jobs:
 
   release-candidate:
     name: Public Alpha release candidate
-    needs: ffmpeg-reference
+    needs: [ffmpeg-reference, container-e2e-arm64]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -124,20 +132,20 @@ jobs:
           distribution: temurin
           java-version: "17"
       - name: Build daemon archive and checksum
-        run: bash scripts/release/build-daemon-archive.sh 0.2.0 dist
+        run: bash scripts/release/build-daemon-archive.sh 0.3.0 dist
       - name: Build Java release candidates and verify a clean external consumer
         run: bash integration-tests/java-release-consumer-smoke.sh dist
       - name: Verify component release tags
         run: |
-          bash scripts/release/verify-version.sh taskcaged 0.2.0 taskcaged-v0.2.0
+          bash scripts/release/verify-version.sh taskcaged 0.3.0 taskcaged-v0.3.0
           bash scripts/release/verify-version.sh java-sdk 0.2.0 java-sdk-v0.2.0
           bash scripts/release/verify-version.sh ffmpeg-binding 0.1.0 ffmpeg-binding-v0.1.0
       - name: Install from the release archive
         run: |
           bash integration-tests/release-artifact-smoke.sh \
-            0.2.0 \
-            dist/taskcage-v0.2.0-x86_64-unknown-linux-gnu.tar.gz \
-            dist/taskcage-v0.2.0-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+            0.3.0 \
+            dist/taskcage-v0.3.0-x86_64-unknown-linux-gnu.tar.gz \
+            dist/taskcage-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256 \
             dist/install-taskcaged.sh
       - name: Upload validation-only release candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

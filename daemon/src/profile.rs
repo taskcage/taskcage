@@ -1153,7 +1153,7 @@ mod tests {
             "version": "0.0.0-test.1",
             "platform": {
                 "os": "linux",
-                "architecture": "x86_64",
+                "architecture": std::env::consts::ARCH,
                 "abi": "gnu",
                 "libc": { "family": "glibc", "minimumVersion": "2.17" }
             },

@@ -64,7 +64,12 @@ done
 
 [[ "${EUID}" -eq 0 ]] || fail "run this installer as root"
 [[ "$(uname -s)" == "Linux" ]] || fail "taskcaged release installation requires Linux"
-[[ "$(uname -m)" == "x86_64" ]] || fail "taskcaged Public Alpha releases require x86_64"
+case "$(uname -m)" in
+  x86_64) release_target="x86_64-unknown-linux-gnu" ;;
+  aarch64) release_target="aarch64-unknown-linux-gnu" ;;
+  *) fail "taskcaged releases support Linux x86_64 or aarch64" ;;
+esac
+readonly release_target
 
 for required_command in curl mktemp python3 readlink sha256sum tar; do
   command -v "${required_command}" >/dev/null 2>&1 || fail "required command is missing: ${required_command}"
@@ -114,7 +119,7 @@ if [[ -z "${release_url}" ]]; then
   release_url="${default_release_base_url}/taskcaged-v${release_version}"
 fi
 
-readonly archive_root="taskcage-v${release_version}-x86_64-unknown-linux-gnu"
+readonly archive_root="taskcage-v${release_version}-${release_target}"
 readonly archive_name="${archive_root}.tar.gz"
 readonly checksum_name="${archive_name}.sha256"
 
