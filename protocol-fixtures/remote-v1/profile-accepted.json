@@ -1,0 +1,28 @@
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "33333333-3333-4333-8333-333333333333",
+  "type": "profileAccepted",
+  "payload": {
+    "taskId": "55555555-5555-4555-8555-555555555555",
+    "state": "RUNNING",
+    "profile": {
+      "name": "ffmpeg-audio-to-wav",
+      "version": "1.0.0"
+    },
+    "effectiveResources": {
+      "limits": {
+        "cpuMax": {
+          "quotaMicros": 100000,
+          "periodMicros": 100000
+        },
+        "memoryMaxBytes": 536870912,
+        "pidsMax": 32,
+        "wallTimeLimitMs": 300000
+      },
+      "output": {
+        "stdoutTailMaxBytes": 65536,
+        "stderrTailMaxBytes": 65536
+      }
+    }
+  }
+}

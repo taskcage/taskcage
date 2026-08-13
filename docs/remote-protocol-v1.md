@@ -107,6 +107,8 @@ operation을 처리하지 않으며 daemon은 연결을 닫는다.
 - `secret`은 1~4096 UTF-8 bytes이며 URI, log, error response 또는 metric label에 기록하면 안 된다.
 - daemon은 secret의 salted, memory-hard verifier만 보관한다. 유효하지 않은 ID와 secret은 동일하게
   `AUTHENTICATION_FAILED`로 처리한다.
+- `AUTHENTICATION_FAILED` response를 보낸 daemon은 해당 TLS connection을 닫는다. SDK는 secret을 바꾸지
+  않은 자동 인증 재시도를 하지 않는다.
 - `sessionExpiresAt` 이후 daemon은 새 request를 받지 않고 연결을 닫는다. SDK는 새 TLS connection을 만들고
   다시 인증할 수 있지만 이전 request를 자동 재제출하지 않는다.
 - 인증은 identity를, authorization은 허용된 Profile identity와 resource override 범위를 결정한다. 권한 밖의
@@ -191,13 +193,16 @@ Profile API를 Raw Command로 fallback하지 않는다.
 
 ### `getProfileResult`와 `cancelTask`
 
-두 request와 result shape는 Local Profile Core API v2의 `getProfileResult`, Local Protocol v1의
-`cancelTask` 의미를 따른다. task ID는 authenticated principal의 소유여야 하며, 다른 principal의 task ID는
+두 operation은 Remote envelope 안에서 Local Profile Core API v2의 `getProfileResult`, Local Protocol v1의
+`cancelTask` payload/result 의미를 따른다. task ID는 authenticated principal의 소유여야 하며, 다른 principal의 task ID는
 존재 여부를 밝히지 않고 `TASK_NOT_FOUND`를 반환한다.
 
 finished `profileResult`의 output Artifact는 `OBJECT_REFERENCE`다. URI는 daemon이 허용한 output location을
 가리키고, caller가 output URI나 파일 이름을 지정할 수 없다. daemon은 published output의 digest와 size를
 검증한 뒤 cleanup-confirmed `FINISHED` 결과와 함께 공개한다.
+
+`OBJECT_REFERENCE` descriptor는 input에서 `kind`, `uri`, `digest`, `sizeBytes`를, published output에서
+추가로 `mediaType`을 가진다. `mediaType`은 daemon이 Profile contract에서 정한 값이며 caller가 정하지 않는다.
 
 ## 오류와 연결 장애
 

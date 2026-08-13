@@ -1,0 +1,25 @@
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "33333333-3333-4333-8333-333333333333",
+  "type": "submitProfile",
+  "payload": {
+    "clientRequestId": "44444444-4444-4444-8444-444444444444",
+    "profile": {
+      "name": "ffmpeg-audio-to-wav",
+      "version": "1.0.0"
+    },
+    "inputs": {
+      "source": {
+        "kind": "OBJECT_REFERENCE",
+        "uri": "s3://taskcage-fixtures/jobs/42/input.mp3",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sizeBytes": 1234
+      }
+    },
+    "resourceOverrides": {
+      "limits": {
+        "wallTimeLimitMs": 300000
+      }
+    }
+  }
+}
