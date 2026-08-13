@@ -33,11 +33,12 @@
     },
     "artifacts": {
       "result": {
-        "kind": "OBJECT_REFERENCE",
-        "uri": "s3://taskcage-fixtures/results/55555555-5555-4555-8555-555555555555/output.wav",
+        "kind": "MANAGED_OUTPUT",
+        "artifactId": "88888888-8888-4888-8888-888888888888",
         "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "sizeBytes": 4567,
-        "mediaType": "audio/wav"
+        "mediaType": "audio/wav",
+        "expiresAt": "2026-08-13T12:12:00Z"
       }
     }
   }

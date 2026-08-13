@@ -6,6 +6,9 @@
     "daemonVersion": "0.3.0",
     "remoteProtocolVersions": [1],
     "maxFrameBytes": 1048576,
-    "artifactModes": ["OBJECT_REFERENCE"]
+    "artifactModes": ["MANAGED_TRANSFER"],
+    "maxArtifactBytes": 104857600,
+    "maxArtifactChunkBytes": 780000,
+    "artifactRetentionSeconds": 600
   }
 }

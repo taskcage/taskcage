@@ -15,13 +15,13 @@ authorization, request/response, 오류와 장애 의미를 정한다.
 - TLS server identity 검증과 service-account ID/secret 인증
 - Profile submit, query, cancel과 daemon 생존 기간 내 멱등성
 - Profile별 authorization과 resource override policy
-- 원격 object-storage Artifact **참조**의 최소 descriptor
+- SDK가 관리하는 input Artifact upload와 output Artifact download
 
 범위 밖:
 
 - plaintext TCP, UDS fallback, interactive user login, Remote Raw Command
 - mTLS, OAuth/OIDC, external gateway, HTTP API
-- SDK가 파일을 upload/download하는 streaming Artifact transfer
+- object-storage URI reference와 공유 filesystem path
 - daemon 재시작 뒤 task recovery·exactly-once·durable queue
 
 ## topology와 TLS
@@ -120,8 +120,9 @@ operation을 처리하지 않으며 daemon은 연결을 닫는다.
 
 ## operations
 
-인증 뒤 허용되는 operation은 `getCapabilities`, `submitProfile`, `getProfileResult`, `cancelTask`다.
-`submitTask`와 모든 Raw Command field는 항상 `AUTHORIZATION_DENIED`다.
+인증 뒤 허용되는 operation은 `getCapabilities`, Artifact upload/download operation,
+`submitProfile`, `getProfileResult`, `cancelTask`다. `submitTask`와 모든 Raw Command field는 항상
+`AUTHORIZATION_DENIED`다.
 
 ### `getCapabilities`
 
@@ -143,18 +144,104 @@ operation을 처리하지 않으며 daemon은 연결을 닫는다.
     "daemonVersion": "0.3.0",
     "remoteProtocolVersions": [1],
     "maxFrameBytes": 1048576,
-    "artifactModes": ["OBJECT_REFERENCE"]
+    "artifactModes": ["MANAGED_TRANSFER"],
+    "maxArtifactBytes": 104857600,
+    "maxArtifactChunkBytes": 780000,
+    "artifactRetentionSeconds": 600
   }
 }
 ```
 
-SDK는 인증 성공 뒤 `getCapabilities`를 호출해 `1`과 필요한 Artifact mode를 확인한다. 조건이 없으면
-Profile API를 Raw Command로 fallback하지 않는다.
+SDK는 인증 성공 뒤 `getCapabilities`를 호출해 `1`과 `MANAGED_TRANSFER`를 확인한다. 조건이 없으면 Profile
+API를 Raw Command로 fallback하지 않는다. `maxArtifactChunkBytes`는 raw byte 상한이며 base64 encoding 뒤에도
+1 MiB frame 상한을 넘지 않는 양의 정수여야 한다.
+
+### Managed Artifact transfer
+
+Remote client의 파일 경로는 protocol field가 아니다. SDK는 파일 bytes를 TLS connection으로 업로드하고,
+daemon은 principal 전용 staging area에서 크기와 SHA-256 digest를 검증한다. upload가 완료되기 전에는
+Profile Task, cgroup, target process 또는 output Artifact를 만들지 않는다.
+
+#### `beginArtifactUpload`
+
+```json
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "33333333-3333-4333-8333-333333333333",
+  "type": "beginArtifactUpload",
+  "payload": {
+    "clientArtifactId": "44444444-4444-4444-8444-444444444444",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sizeBytes": 1234,
+    "mediaType": "audio/mpeg"
+  }
+}
+```
+
+`clientArtifactId`는 principal-scoped idempotency key다. 같은 principal과 같은 descriptor는 existing upload의
+`artifactUploadStarted` response를 반환하고, descriptor가 다르면 `IDEMPOTENCY_CONFLICT`다. `sizeBytes`는
+`maxArtifactBytes` 이하의 positive integer이고, digest는 lower-case SHA-256이다. `mediaType`은 optional
+non-empty string이며 daemon은 이를 실행 권한으로 해석하지 않는다.
+
+```json
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "33333333-3333-4333-8333-333333333333",
+  "type": "artifactUploadStarted",
+  "payload": {
+    "artifactId": "55555555-5555-4555-8555-555555555555",
+    "nextOffset": 0
+  }
+}
+```
+
+#### `uploadArtifactChunk`와 `completeArtifactUpload`
+
+SDK는 `nextOffset`부터 `maxArtifactChunkBytes` 이하의 raw bytes를 standard base64로 보낸다. chunk는 순차적이며,
+offset이 다르거나 empty/invalid base64, declared size 초과, complete 뒤 추가 write는 `INVALID_ARTIFACT_UPLOAD`다.
+
+```json
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "66666666-6666-4666-8666-666666666666",
+  "type": "uploadArtifactChunk",
+  "payload": {
+    "artifactId": "55555555-5555-4555-8555-555555555555",
+    "offset": 0,
+    "dataBase64": "dGVzdA=="
+  }
+}
+```
+
+성공 응답 `artifactChunkAccepted`는 같은 `artifactId`와 다음 raw byte offset `nextOffset`을 반환한다. SDK는
+connection loss 뒤 새 TLS connection에서 인증하고 마지막으로 확인된 offset의 chunk부터 재개할 수 있다.
+
+모든 bytes를 보낸 뒤 `completeArtifactUpload`를 호출한다. daemon은 declared size와 digest를 검증하고 성공하면
+`artifactUploaded`를 반환한다. mismatch는 `ARTIFACT_DIGEST_MISMATCH`이며 incomplete staging data는 Profile에
+노출하지 않는다.
+
+```json
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "77777777-7777-4777-8777-777777777777",
+  "type": "artifactUploaded",
+  "payload": {
+    "artifactId": "55555555-5555-4555-8555-555555555555",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sizeBytes": 1234,
+    "expiresAt": "2026-08-13T12:10:00Z"
+  }
+}
+```
+
+`abortArtifactUpload`는 incomplete staging upload를 명시적으로 폐기한다. 연결 단절, expiry, failed Profile
+preflight와 daemon restart도 incomplete upload를 폐기한다. daemon은 `artifactRetentionSeconds` 안에 submit되지
+않은 completed input Artifact를 폐기할 수 있다.
 
 ### `submitProfile`
 
 `submitProfile`은 [Local Profile Core API v2](api-profile-v2.md)의 `ProfileRequest` 의미를 유지하되,
-`LOCAL_INPUT`을 받지 않는다. Remote Artifact input은 `OBJECT_REFERENCE`로만 표현한다.
+`LOCAL_INPUT`을 받지 않는다. Remote Artifact input은 complete된 `MANAGED_INPUT`으로만 표현한다.
 
 ```json
 {
@@ -166,10 +253,8 @@ Profile API를 Raw Command로 fallback하지 않는다.
     "profile": { "name": "ffmpeg-audio-to-wav", "version": "1.0.0" },
     "inputs": {
       "source": {
-        "kind": "OBJECT_REFERENCE",
-        "uri": "s3://taskcage-input/jobs/42/input.mp3",
-        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "sizeBytes": 1234
+        "kind": "MANAGED_INPUT",
+        "artifactId": "55555555-5555-4555-8555-555555555555"
       }
     },
     "resourceOverrides": {
@@ -181,15 +266,15 @@ Profile API를 Raw Command로 fallback하지 않는다.
 
 - scalar inputs와 `resourceOverrides`는 Local Profile Core API v2와 같은 validation 및 canonical identity를
   사용한다.
-- `OBJECT_REFERENCE.uri`는 configured resolver가 허용한 scheme, authority, bucket/path policy를 만족해야 한다.
-  arbitrary `file:`, `http:`, caller-local path와 daemon host path는 거절한다.
-- `digest`는 lower-case SHA-256, `sizeBytes`는 positive integer다. daemon은 실행 전 resolved object의 digest와
-  size를 검증하고 private staging area에 materialize한다.
+- `MANAGED_INPUT.artifactId`는 authenticated principal이 소유한 completed input Artifact여야 한다. caller의
+  local path, daemon host path, URI, digest, size 또는 output file name은 request에 허용하지 않는다.
+- daemon은 private staging area의 completed input만 Profile working area에 materialize한다.
 - accepted response는 Local v2의 `profileAccepted`와 동일한 `taskId`, `profile`, `effectiveResources`를
   반환한다.
 - `clientRequestId` idempotency는 `(authenticated principal, clientRequestId)` namespace로 한정한다. 같은
   principal과 같은 canonical payload만 기존 task를 반환하며, 다른 payload는 `IDEMPOTENCY_CONFLICT`다.
-  daemon restart와 session reconnect를 가로지르는 exactly-once는 보장하지 않는다.
+  같은 실행 중인 daemon으로 재연결한 caller는 같은 ID로 lost response를 복구할 수 있다. daemon restart를
+  가로지르는 exactly-once와 task recovery는 보장하지 않는다.
 
 ### `getProfileResult`와 `cancelTask`
 
@@ -197,12 +282,25 @@ Profile API를 Raw Command로 fallback하지 않는다.
 `cancelTask` payload/result 의미를 따른다. task ID는 authenticated principal의 소유여야 하며, 다른 principal의 task ID는
 존재 여부를 밝히지 않고 `TASK_NOT_FOUND`를 반환한다.
 
-finished `profileResult`의 output Artifact는 `OBJECT_REFERENCE`다. URI는 daemon이 허용한 output location을
-가리키고, caller가 output URI나 파일 이름을 지정할 수 없다. daemon은 published output의 digest와 size를
-검증한 뒤 cleanup-confirmed `FINISHED` 결과와 함께 공개한다.
+finished `profileResult`의 output Artifact는 `MANAGED_OUTPUT`이다. caller가 output path, URI나 파일 이름을
+지정할 수 없으며 daemon은 output digest와 size를 검증한 뒤 cleanup-confirmed `FINISHED` 결과와 함께 공개한다.
 
-`OBJECT_REFERENCE` descriptor는 input에서 `kind`, `uri`, `digest`, `sizeBytes`를, published output에서
-추가로 `mediaType`을 가진다. `mediaType`은 daemon이 Profile contract에서 정한 값이며 caller가 정하지 않는다.
+```json
+{
+  "kind": "MANAGED_OUTPUT",
+  "artifactId": "88888888-8888-4888-8888-888888888888",
+  "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "sizeBytes": 4567,
+  "mediaType": "audio/wav",
+  "expiresAt": "2026-08-13T12:12:00Z"
+}
+```
+
+SDK는 `readArtifactChunk`로 `artifactId`, raw `offset`, `maxBytes`를 요청하고, `artifactChunk` response의
+base64 `dataBase64`, `nextOffset`, `finished`를 순서대로 받아 목적 `Path`에 쓴다. `maxBytes`는 capability의
+`maxArtifactChunkBytes` 이하의 positive integer다. artifact는 owning principal만 read할 수 있으며, expiry,
+다른 principal 또는 존재하지 않는 ID는 `ARTIFACT_NOT_FOUND`다. SDK는 partial download를 자동 공개하지 않고
+caller가 지정한 temporary file을 성공한 digest/size 검증 뒤에만 최종 Path로 publish한다.
 
 ## 오류와 연결 장애
 
@@ -227,10 +325,14 @@ finished `profileResult`의 output Artifact는 `OBJECT_REFERENCE`다. URI는 dae
 | `UNSUPPORTED_REMOTE_PROTOCOL_VERSION` | 지원하지 않는 Remote version | false |
 | `AUTHENTICATION_FAILED` | service account ID 또는 secret 검증 실패 | false |
 | `AUTHORIZATION_DENIED` | Profile, Raw Command 또는 override 권한 없음 | false |
-| `ARTIFACT_REFERENCE_DENIED` | 허용되지 않은 Artifact URI 또는 resolver policy | false |
-| `ARTIFACT_DIGEST_MISMATCH` | resolved object의 digest 또는 size 불일치 | false |
+| `INVALID_ARTIFACT_UPLOAD` | upload descriptor, offset, chunk 또는 completion 순서 위반 | false |
+| `ARTIFACT_DIGEST_MISMATCH` | uploaded bytes의 digest 또는 size 불일치 | false |
+| `ARTIFACT_NOT_FOUND` | expired, incomplete, 다른 principal 소유 또는 없는 Artifact | false |
 | `CAPACITY_EXHAUSTED` | daemon 실행 slot 또는 Registry 여유 없음 | true |
 | `TASK_NOT_FOUND` | task가 없거나 다른 principal 소유 | false |
+| `TASK_ALREADY_FINISHED` | 이미 완료된 task의 cancel 요청 | false |
+| `PROFILE_NOT_FOUND` | identity가 설치·허용된 Profile과 일치하지 않음 | false |
+| `INVALID_PROFILE_INPUT` | slot, typed scalar, Artifact kind 또는 resource override 위반 | false |
 | `IDEMPOTENCY_CONFLICT` | 같은 principal의 key에 다른 payload 사용 | false |
 | `LIMIT_EXCEEDS_POLICY` | 요청이 Profile 또는 deployment 정책을 초과 | false |
 | `ENVIRONMENT_UNAVAILABLE` | 안전한 cgroup 실행·정리 조건 없음 | false |
@@ -256,7 +358,8 @@ TaskCageClient.connect(
 ```
 
 `RemoteConnectionOptions`는 URI parsing, trust material, service credentials, connect timeout, request timeout과
-optional secret provider만 가진다. Profile authorization, Artifact resolver configuration, secret verifier와
+optional secret provider만 가진다. SDK의 Remote Artifact API는 local source/destination `Path`를 streaming
+bytes로 변환하고, protocol에는 `artifactId`만 보낸다. Profile authorization, Artifact retention, secret verifier와
 resource policy는 daemon 배포 설정이며 SDK public API가 아니다.
 
 ## 구현 gate
