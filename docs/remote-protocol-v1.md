@@ -326,15 +326,17 @@ yet been referenced by an accepted Task.
 }
 ```
 
-On success the daemon removes all staging or completed-input bytes and releases the principal quota before
-returning `artifactUploadAborted`. For this operation, an active `UPLOADING` or unreferenced completed input is
-valid; an expired, nonexistent, other-principal, already-aborted, or output Artifact returns
-`ARTIFACT_NOT_FOUND`. An input Artifact referenced by an accepted Task returns `ARTIFACT_IN_USE` and remains
-available to that Task until cleanup. In the error table, `incomplete` means an Artifact unavailable to an
-operation that requires a completed input or downloadable output; it does not make an active upload invalid for
-`uploadArtifactChunk` or `abortArtifactUpload`. Connection loss, expiry, failed Profile preflight, and daemon
-restart discard incomplete uploads; the daemon may discard unreferenced completed input Artifacts after
-`artifactRetentionSeconds`.
+On success the daemon removes all staging or completed-input bytes, releases the principal quota, and removes the
+corresponding `(principal, clientArtifactId)` upload idempotency record before returning
+`artifactUploadAborted`. For this operation, an active `UPLOADING` or unreferenced completed input is valid; an
+expired, nonexistent, other-principal, already-aborted, or output Artifact returns `ARTIFACT_NOT_FOUND`. A
+task-owned input Artifact returns `ARTIFACT_IN_USE` and remains available to that Task until cleanup. In the error
+table, `incomplete` means an Artifact unavailable to an operation that requires a completed input or downloadable
+output; it does not make an active upload invalid for `uploadArtifactChunk` or `abortArtifactUpload`. Connection
+loss, expiry, failed Profile preflight, and daemon restart discard incomplete uploads and remove their upload
+idempotency records; the daemon may discard unreferenced completed input Artifacts after
+`artifactRetentionSeconds`, releasing quota and removing their upload idempotency records as part of the same
+transition. The principal may then reuse the same `clientArtifactId` for a fresh upload.
 
 ### `submitProfile`
 
@@ -367,6 +369,20 @@ restart discard incomplete uploads; the daemon may discard unreferenced complete
 - `MANAGED_INPUT.artifactId`는 authenticated principal이 소유한 completed input Artifact여야 한다. caller의
   local path, daemon host path, URI, digest, size 또는 output file name은 request에 허용하지 않는다.
 - daemon은 private staging area의 completed input만 Profile working area에 materialize한다.
+- A completed input is **single-use**. After all Profile, authorization, resource, and Artifact validation succeeds,
+  the first new `submitProfile` acceptance atomically transfers each referenced input from `COMPLETED` to a
+  task-owned snapshot. The transfer releases the input's upload quota and removes its
+  `(principal, clientArtifactId)` upload idempotency record; it does not remove the task's
+  `(principal, clientRequestId)` submission idempotency record. A validation, authorization, or capacity failure
+  before acceptance leaves the completed input reusable.
+- The daemon resolves `(principal, clientRequestId)` idempotency before looking up input Artifacts. Therefore a
+  retry with the same canonical payload returns the original Task even after its inputs became task-owned or were
+  cleaned up. A different new `clientRequestId` that references a task-owned Artifact returns `ARTIFACT_IN_USE`.
+  It may not consume the same Artifact a second time.
+- Task cleanup removes task-owned input snapshots; their old `artifactId` then returns `ARTIFACT_NOT_FOUND`.
+  The daemon retains the Task result and its `(principal, clientRequestId)` idempotency record for the normal Task
+  retention period, independently from Artifact cleanup. Because the upload record was removed at ownership
+  transfer, the principal may reuse the former `clientArtifactId` for a new upload while the Task runs.
 - accepted response는 Local v2의 `profileAccepted`와 동일한 `taskId`, `profile`, `effectiveResources`를
   반환한다.
 - `clientRequestId` idempotency는 `(authenticated principal, clientRequestId)` namespace로 한정한다. 같은
@@ -445,7 +461,7 @@ caller가 지정한 temporary file을 성공한 digest/size 검증 뒤에만 최
 | `ARTIFACT_UPLOAD_QUOTA_EXHAUSTED` | principal retained Artifact count 또는 byte quota가 현재 소진됨 | true |
 | `ARTIFACT_DIGEST_MISMATCH` | uploaded bytes의 digest 또는 size 불일치 | false |
 | `ARTIFACT_NOT_FOUND` | 해당 operation에서 사용할 수 없거나 principal이 소유하지 않는 Artifact | false |
-| `ARTIFACT_IN_USE` | accepted Task가 참조하는 input Artifact를 abort하려 함 | false |
+| `ARTIFACT_IN_USE` | task-owned input Artifact를 다른 제출에 사용하거나 abort하려 함 | false |
 | `CAPACITY_EXHAUSTED` | daemon 실행 slot 또는 Registry 여유 없음 | true |
 | `TASK_NOT_FOUND` | task가 없거나 다른 principal 소유 | false |
 | `TASK_ALREADY_FINISHED` | 이미 완료된 task의 cancel 요청 | false |
