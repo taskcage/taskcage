@@ -1,0 +1,44 @@
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "66666666-6666-4666-8666-666666666666",
+  "type": "profileResult",
+  "payload": {
+    "taskId": "55555555-5555-4555-8555-555555555555",
+    "state": "FINISHED",
+    "profile": {
+      "name": "ffmpeg-audio-to-wav",
+      "version": "1.0.0"
+    },
+    "profileOutcome": "SUCCEEDED",
+    "terminationReason": "EXITED",
+    "process": {
+      "exitCode": 0,
+      "signal": null
+    },
+    "timing": {
+      "submittedAt": "2026-08-13T12:00:00Z",
+      "startedAt": "2026-08-13T12:00:01Z",
+      "finishedAt": "2026-08-13T12:00:02Z",
+      "wallTimeMs": 1000
+    },
+    "usage": {
+      "cpuTimeMicros": 7000,
+      "memoryPeakBytes": 1048576
+    },
+    "output": {
+      "stdoutTail": "",
+      "stderrTail": "",
+      "stdoutTruncated": false,
+      "stderrTruncated": false
+    },
+    "artifacts": {
+      "result": {
+        "kind": "OBJECT_REFERENCE",
+        "uri": "s3://taskcage-fixtures/results/55555555-5555-4555-8555-555555555555/output.wav",
+        "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sizeBytes": 4567,
+        "mediaType": "audio/wav"
+      }
+    }
+  }
+}

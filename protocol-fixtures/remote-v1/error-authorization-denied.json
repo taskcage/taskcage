@@ -1,0 +1,10 @@
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "33333333-3333-4333-8333-333333333333",
+  "type": "error",
+  "payload": {
+    "code": "AUTHORIZATION_DENIED",
+    "message": "principal is not allowed to run profile ffmpeg-audio-to-wav@1.0.0",
+    "retryable": false
+  }
+}

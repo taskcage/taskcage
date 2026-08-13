@@ -108,21 +108,10 @@ TaskCage Core SDK
 Profile·Package·Artifact로 일반화할 반복 요구가 2개 이상 확인된 뒤에 Local Product Alpha 계약을
 확장한다.
 
-Remote는 Local Public Alpha나 Local Product Alpha의 선행 조건이 아니다. Local 계약과 실제 원격 수요,
-trust boundary와 운영 근거가 확보된 뒤에 topology와 wire를 선택한다. daemon의 직접 listener와
-별도 Gateway 중 어느 구조를 사용할지는 아직 선택하지 않았다.
-
-Remote 구현 전에 최소한 다음 계약을 함께 승인해야 한다.
-
-- caller authentication과 Task·Profile·Artifact·Raw Command별 authorization
-- 전송 암호화, server identity, credential rotation과 revocation
-- Remote Artifact의 크기·무결성·전달·정리 책임
-- 요청·응답·출력에 대한 backpressure와 연결 상한
-- 연결 단절과 응답 유실 시 Task 상태, idempotency와 재시도 의미
-- Raw Command의 기본 거부 여부와 명시적 허용 범위
-
-이 계약이 정해지기 전에는 Local Protocol v1 framing을 network에 그대로 노출하거나 Remote를 사용할 수
-있다고 문서화하지 않는다.
+Remote는 Local Protocol v1 framing을 network에 그대로 노출하지 않는다. 원격 Profile 실행의 TLS,
+service-account authentication, authorization, Artifact reference와 failure contract는
+[Remote Protocol v1](remote-protocol-v1.md)에서 별도로 정의한다. 이 계약은 Remote Raw Command와
+Local UDS fallback을 허용하지 않는다.
 
 ### 7. 기존 인프라를 대체하지 않고 연결한다
 

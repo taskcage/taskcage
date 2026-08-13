@@ -19,23 +19,11 @@
 원격 전송, 작업 대기열, 스트리밍, 영속 Registry, 재시작 뒤 작업 재개와 Profile·Bundle 실행은 이 Local
 Protocol v1의 범위가 아니다.
 
-### 후속 Remote 경계
+### Remote와의 경계
 
-현재 Protocol v1과 다음 Local Public Alpha는 Local UDS를 사용한다. Remote는 Local Public Alpha나
-Local Product Alpha의 선행 조건이 아니며, Local Product Alpha의 Profile·Artifact 계약과 실제 원격
-수요가 검증된 뒤에 별도 설계와 API 계약으로 다룬다. 현재 Protocol v1 framing을 network에 그대로
-노출하지 않으며, Remote 구현 전에 다음 계약을 함께 승인해야 한다.
-
-- caller authentication과 Task·Profile·Artifact·Raw Command별 authorization
-- 전송 암호화, server identity, credential rotation과 revocation
-- Remote Artifact의 크기·무결성·전달·정리 책임
-- 요청·응답·출력 backpressure와 연결 상한
-- 연결 단절과 응답 유실 시 Task 상태, idempotency와 재시도 의미
-- Raw Command의 기본 거부 여부와 명시적 허용 범위
-
-daemon의 직접 listener와 별도 Gateway 중 어느 topology를 사용할지, TCP/TLS/mTLS 또는 다른 wire를
-사용할지는 아직 선택하지 않았다. 중앙 Hub server는 Local Public Alpha와 Local Product Alpha의
-필수 구성요소가 아니다.
+Local Protocol v1은 Local UDS 전용이며 network에 노출하지 않는다. 인증된 원격 Profile 실행은 별도
+[Remote Protocol v1](remote-protocol-v1.md)을 따른다. Remote Raw Command와 UDS fallback은 허용하지 않는다.
+중앙 Hub server는 Local 또는 Remote Protocol의 필수 구성요소가 아니다.
 
 ## 실행 불변 조건
 

@@ -1,0 +1,11 @@
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "22222222-2222-4222-8222-222222222222",
+  "type": "capabilities",
+  "payload": {
+    "daemonVersion": "0.3.0",
+    "remoteProtocolVersions": [1],
+    "maxFrameBytes": 1048576,
+    "artifactModes": ["OBJECT_REFERENCE"]
+  }
+}
