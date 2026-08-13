@@ -1,0 +1,10 @@
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "33333333-3333-4333-8333-333333333333",
+  "type": "error",
+  "payload": {
+    "code": "ARTIFACT_UPLOAD_LIMIT_EXCEEDED",
+    "message": "declared Artifact size exceeds the principal policy",
+    "retryable": false
+  }
+}

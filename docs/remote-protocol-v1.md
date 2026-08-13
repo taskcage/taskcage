@@ -194,6 +194,21 @@ Remote client의 파일 경로는 protocol field가 아니다. SDK는 파일 byt
 daemon은 principal 전용 staging area에서 크기와 SHA-256 digest를 검증한다. upload가 완료되기 전에는
 Profile Task, cgroup, target process 또는 output Artifact를 만들지 않는다.
 
+Each Remote principal has an explicit daemon deployment policy containing `artifactUploadAllowed`,
+`maxPrincipalArtifactBytes`, and `maxPrincipalArtifacts`. Before allocating an Artifact ID, opening a staging
+file, reserving bytes, or otherwise creating an Artifact side effect, `beginArtifactUpload` verifies all of:
+
+- the authenticated principal has `artifactUploadAllowed`;
+- the declared `sizeBytes` is within both `maxArtifactBytes` and `maxPrincipalArtifactBytes`;
+- accepting the upload would not exceed the principal's retained input Artifact count or byte budget.
+
+Missing upload permission returns `AUTHORIZATION_DENIED`; a declared size that exceeds a static policy returns
+`ARTIFACT_UPLOAD_LIMIT_EXCEEDED`; and a retained count or byte budget that is temporarily full returns
+`ARTIFACT_UPLOAD_QUOTA_EXHAUSTED`. Neither response creates an Artifact record, staging file, reservation, or
+Task. The daemon releases the principal quota when it deletes an aborted, expired, failed-preflight, or otherwise
+unreferenced input Artifact. An accepted Task holds its input snapshot outside this upload quota until Task
+cleanup finishes.
+
 #### `beginArtifactUpload`
 
 ```json
@@ -210,10 +225,20 @@ Profile Task, cgroup, target process 또는 output Artifact를 만들지 않는�
 }
 ```
 
-`clientArtifactId`는 principal-scoped idempotency key다. 같은 principal과 같은 descriptor는 existing upload의
-`artifactUploadStarted` response를 반환하고, descriptor가 다르면 `IDEMPOTENCY_CONFLICT`다. `sizeBytes`는
-`maxArtifactBytes` 이하의 positive integer이고, digest는 lower-case SHA-256이다. `mediaType`은 optional
-non-empty string이며 daemon은 이를 실행 권한으로 해석하지 않는다.
+`clientArtifactId`는 principal-scoped idempotency key다. `beginArtifactUpload` is one atomic daemon operation:
+it first looks up an existing `(principal, clientArtifactId)` record; if one exists with the same descriptor it
+returns that record's current `artifactId`, `state`, and `nextOffset` without re-checking or re-reserving quota;
+if its descriptor differs it returns `IDEMPOTENCY_CONFLICT`; only a missing key proceeds to authorization, quota
+check, byte/count reservation, Artifact ID allocation, and staging creation as one atomic transition. Concurrent
+new keys cannot both reserve the same remaining quota.
+
+`sizeBytes`는 `maxArtifactBytes` 이하의 positive integer이고, digest는 lower-case SHA-256이다. `mediaType`은
+optional non-empty string이며 daemon은 이를 실행 권한으로 해석하지 않는다.
+
+`artifactUploadStarted.payload.state` is `UPLOADING` or `UPLOADED`. For `UPLOADING`, `nextOffset` is the next
+append position. For `UPLOADED`, `nextOffset` equals declared `sizeBytes`; SDK must not send more chunks and may
+call `completeArtifactUpload` again to retrieve the stable completed response. The daemon serializes upload
+state transitions per `artifactId`.
 
 ```json
 {
@@ -222,6 +247,7 @@ non-empty string이며 daemon은 이를 실행 권한으로 해석하지 않는�
   "type": "artifactUploadStarted",
   "payload": {
     "artifactId": "55555555-5555-4555-8555-555555555555",
+    "state": "UPLOADING",
     "nextOffset": 0
   }
 }
@@ -245,12 +271,19 @@ offset이 다르거나 empty/invalid base64, declared size 초과, complete 뒤 
 }
 ```
 
-성공 응답 `artifactChunkAccepted`는 같은 `artifactId`와 다음 raw byte offset `nextOffset`을 반환한다. SDK는
-connection loss 뒤 새 TLS connection에서 인증하고 마지막으로 확인된 offset의 chunk부터 재개할 수 있다.
+성공 응답 `artifactChunkAccepted`는 같은 `artifactId`와 다음 raw byte offset `nextOffset`을 반환한다. A chunk
+at the current `nextOffset` is appended once. A retried chunk whose `offset` is lower than `nextOffset` succeeds
+only when its entire byte range matches bytes already staged at that offset, returning the unchanged current
+`nextOffset`; a different overlapping byte range is `INVALID_ARTIFACT_UPLOAD`. A higher offset remains
+`INVALID_ARTIFACT_UPLOAD`. SDK는 connection loss 뒤 새 TLS connection에서 인증하고 같은 descriptor로
+`beginArtifactUpload`를 호출해 returned `nextOffset`부터 재개한다.
 
 모든 bytes를 보낸 뒤 `completeArtifactUpload`를 호출한다. daemon은 declared size와 digest를 검증하고 성공하면
-`artifactUploaded`를 반환한다. mismatch는 `ARTIFACT_DIGEST_MISMATCH`이며 incomplete staging data는 Profile에
-노출하지 않는다.
+`artifactUploaded`를 반환한다. A repeated `completeArtifactUpload` for the same completed input Artifact returns
+the original `artifactUploaded` payload without rehashing, republishing, or changing expiry. mismatch는
+`ARTIFACT_DIGEST_MISMATCH`이며 incomplete staging data는 Profile에 노출하지 않는다.
+On mismatch the daemon aborts that staging upload, releases its quota, and removes its idempotency record; a
+subsequent `beginArtifactUpload` with the same `clientArtifactId` starts a fresh upload.
 
 ```json
 {
@@ -266,9 +299,44 @@ connection loss 뒤 새 TLS connection에서 인증하고 마지막으로 확인
 }
 ```
 
-`abortArtifactUpload`는 incomplete staging upload를 명시적으로 폐기한다. 연결 단절, expiry, failed Profile
-preflight와 daemon restart도 incomplete upload를 폐기한다. daemon은 `artifactRetentionSeconds` 안에 submit되지
-않은 completed input Artifact를 폐기할 수 있다.
+#### `abortArtifactUpload`
+
+The owning principal may explicitly discard an incomplete upload or a completed input Artifact that has not
+yet been referenced by an accepted Task.
+
+```json
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "88888888-8888-4888-8888-888888888888",
+  "type": "abortArtifactUpload",
+  "payload": {
+    "artifactId": "55555555-5555-4555-8555-555555555555"
+  }
+}
+```
+
+```json
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "88888888-8888-4888-8888-888888888888",
+  "type": "artifactUploadAborted",
+  "payload": {
+    "artifactId": "55555555-5555-4555-8555-555555555555"
+  }
+}
+```
+
+On success the daemon removes all staging or completed-input bytes, releases the principal quota, and removes the
+corresponding `(principal, clientArtifactId)` upload idempotency record before returning
+`artifactUploadAborted`. For this operation, an active `UPLOADING` or unreferenced completed input is valid; an
+expired, nonexistent, other-principal, already-aborted, or output Artifact returns `ARTIFACT_NOT_FOUND`. A
+task-owned input Artifact returns `ARTIFACT_IN_USE` and remains available to that Task until cleanup. In the error
+table, `incomplete` means an Artifact unavailable to an operation that requires a completed input or downloadable
+output; it does not make an active upload invalid for `uploadArtifactChunk` or `abortArtifactUpload`. Connection
+loss, expiry, failed Profile preflight, and daemon restart discard incomplete uploads and remove their upload
+idempotency records; the daemon may discard unreferenced completed input Artifacts after
+`artifactRetentionSeconds`, releasing quota and removing their upload idempotency records as part of the same
+transition. The principal may then reuse the same `clientArtifactId` for a fresh upload.
 
 ### `submitProfile`
 
@@ -301,6 +369,20 @@ preflight와 daemon restart도 incomplete upload를 폐기한다. daemon은 `art
 - `MANAGED_INPUT.artifactId`는 authenticated principal이 소유한 completed input Artifact여야 한다. caller의
   local path, daemon host path, URI, digest, size 또는 output file name은 request에 허용하지 않는다.
 - daemon은 private staging area의 completed input만 Profile working area에 materialize한다.
+- A completed input is **single-use**. After all Profile, authorization, resource, and Artifact validation succeeds,
+  the first new `submitProfile` acceptance atomically transfers each referenced input from `COMPLETED` to a
+  task-owned snapshot. The transfer releases the input's upload quota and removes its
+  `(principal, clientArtifactId)` upload idempotency record; it does not remove the task's
+  `(principal, clientRequestId)` submission idempotency record. A validation, authorization, or capacity failure
+  before acceptance leaves the completed input reusable.
+- The daemon resolves `(principal, clientRequestId)` idempotency before looking up input Artifacts. Therefore a
+  retry with the same canonical payload returns the original Task even after its inputs became task-owned or were
+  cleaned up. A different new `clientRequestId` that references a task-owned Artifact returns `ARTIFACT_IN_USE`.
+  It may not consume the same Artifact a second time.
+- Task cleanup removes task-owned input snapshots; their old `artifactId` then returns `ARTIFACT_NOT_FOUND`.
+  The daemon retains the Task result and its `(principal, clientRequestId)` idempotency record for the normal Task
+  retention period, independently from Artifact cleanup. Because the upload record was removed at ownership
+  transfer, the principal may reuse the former `clientArtifactId` for a new upload while the Task runs.
 - accepted response는 Local v2의 `profileAccepted`와 동일한 `taskId`, `profile`, `effectiveResources`를
   반환한다.
 - `clientRequestId` idempotency는 `(authenticated principal, clientRequestId)` namespace로 한정한다. 같은
@@ -375,8 +457,11 @@ caller가 지정한 temporary file을 성공한 digest/size 검증 뒤에만 최
 | `AUTHENTICATION_REQUIRED` | authenticate 이전 operation 요청 | false |
 | `AUTHORIZATION_DENIED` | Profile, Raw Command 또는 override 권한 없음 | false |
 | `INVALID_ARTIFACT_UPLOAD` | upload descriptor, offset, chunk 또는 completion 순서 위반 | false |
+| `ARTIFACT_UPLOAD_LIMIT_EXCEEDED` | declared Artifact size가 정적인 deployment/principal policy 초과 | false |
+| `ARTIFACT_UPLOAD_QUOTA_EXHAUSTED` | principal retained Artifact count 또는 byte quota가 현재 소진됨 | true |
 | `ARTIFACT_DIGEST_MISMATCH` | uploaded bytes의 digest 또는 size 불일치 | false |
-| `ARTIFACT_NOT_FOUND` | expired, incomplete, 다른 principal 소유 또는 없는 Artifact | false |
+| `ARTIFACT_NOT_FOUND` | 해당 operation에서 사용할 수 없거나 principal이 소유하지 않는 Artifact | false |
+| `ARTIFACT_IN_USE` | task-owned input Artifact를 다른 제출에 사용하거나 abort하려 함 | false |
 | `CAPACITY_EXHAUSTED` | daemon 실행 slot 또는 Registry 여유 없음 | true |
 | `TASK_NOT_FOUND` | task가 없거나 다른 principal 소유 | false |
 | `TASK_ALREADY_FINISHED` | 이미 완료된 task의 cancel 요청 | false |
