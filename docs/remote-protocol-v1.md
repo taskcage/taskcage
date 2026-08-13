@@ -194,6 +194,20 @@ Remote client의 파일 경로는 protocol field가 아니다. SDK는 파일 byt
 daemon은 principal 전용 staging area에서 크기와 SHA-256 digest를 검증한다. upload가 완료되기 전에는
 Profile Task, cgroup, target process 또는 output Artifact를 만들지 않는다.
 
+Each Remote principal has an explicit daemon deployment policy containing `artifactUploadAllowed`,
+`maxPrincipalArtifactBytes`, and `maxPrincipalArtifacts`. Before allocating an Artifact ID, opening a staging
+file, reserving bytes, or otherwise creating an Artifact side effect, `beginArtifactUpload` verifies all of:
+
+- the authenticated principal has `artifactUploadAllowed`;
+- the declared `sizeBytes` is within both `maxArtifactBytes` and `maxPrincipalArtifactBytes`;
+- accepting the upload would not exceed the principal's retained input Artifact count or byte budget.
+
+Missing upload permission returns `AUTHORIZATION_DENIED`; a declared size or retained Artifact quota violation
+returns `ARTIFACT_UPLOAD_LIMIT_EXCEEDED`. Neither response creates an Artifact record, staging file, or Task.
+The daemon releases the principal quota when it deletes an aborted, expired, failed-preflight, or otherwise
+unreferenced input Artifact. An accepted Task holds its input snapshot outside this upload quota until Task
+cleanup finishes.
+
 #### `beginArtifactUpload`
 
 ```json
@@ -266,9 +280,39 @@ connection loss 뒤 새 TLS connection에서 인증하고 마지막으로 확인
 }
 ```
 
-`abortArtifactUpload`는 incomplete staging upload를 명시적으로 폐기한다. 연결 단절, expiry, failed Profile
-preflight와 daemon restart도 incomplete upload를 폐기한다. daemon은 `artifactRetentionSeconds` 안에 submit되지
-않은 completed input Artifact를 폐기할 수 있다.
+#### `abortArtifactUpload`
+
+The owning principal may explicitly discard an incomplete upload or a completed input Artifact that has not
+yet been referenced by an accepted Task.
+
+```json
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "88888888-8888-4888-8888-888888888888",
+  "type": "abortArtifactUpload",
+  "payload": {
+    "artifactId": "55555555-5555-4555-8555-555555555555"
+  }
+}
+```
+
+```json
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "88888888-8888-4888-8888-888888888888",
+  "type": "artifactUploadAborted",
+  "payload": {
+    "artifactId": "55555555-5555-4555-8555-555555555555"
+  }
+}
+```
+
+On success the daemon removes all staging or completed-input bytes and releases the principal quota before
+returning `artifactUploadAborted`. An expired, nonexistent, other-principal, already-aborted, or output
+Artifact returns `ARTIFACT_NOT_FOUND`. An input Artifact referenced by an accepted Task returns
+`ARTIFACT_IN_USE` and remains available to that Task until cleanup. Connection loss, expiry, failed Profile
+preflight, and daemon restart discard incomplete uploads; the daemon may discard unreferenced completed input
+Artifacts after `artifactRetentionSeconds`.
 
 ### `submitProfile`
 
@@ -375,8 +419,10 @@ caller가 지정한 temporary file을 성공한 digest/size 검증 뒤에만 최
 | `AUTHENTICATION_REQUIRED` | authenticate 이전 operation 요청 | false |
 | `AUTHORIZATION_DENIED` | Profile, Raw Command 또는 override 권한 없음 | false |
 | `INVALID_ARTIFACT_UPLOAD` | upload descriptor, offset, chunk 또는 completion 순서 위반 | false |
+| `ARTIFACT_UPLOAD_LIMIT_EXCEEDED` | principal Artifact size, count 또는 retained byte policy 초과 | false |
 | `ARTIFACT_DIGEST_MISMATCH` | uploaded bytes의 digest 또는 size 불일치 | false |
 | `ARTIFACT_NOT_FOUND` | expired, incomplete, 다른 principal 소유 또는 없는 Artifact | false |
+| `ARTIFACT_IN_USE` | accepted Task가 참조하는 input Artifact를 abort하려 함 | false |
 | `CAPACITY_EXHAUSTED` | daemon 실행 slot 또는 Registry 여유 없음 | true |
 | `TASK_NOT_FOUND` | task가 없거나 다른 principal 소유 | false |
 | `TASK_ALREADY_FINISHED` | 이미 완료된 task의 cancel 요청 | false |
