@@ -17,6 +17,9 @@ import org.taskcage.sdk.ManagedOutputArtifact;
 import org.taskcage.sdk.ProfileIdentity;
 import org.taskcage.sdk.ProfileResourceOverrides;
 import org.taskcage.sdk.RemoteArtifactUpload;
+import org.taskcage.sdk.RemoteArtifactUploadStart;
+import org.taskcage.sdk.RemoteArtifactUploadState;
+import org.taskcage.sdk.RemoteArtifactChunkProgress;
 import org.taskcage.sdk.RemoteBooleanInput;
 import org.taskcage.sdk.RemoteCapabilities;
 import org.taskcage.sdk.RemoteInt64Input;
@@ -202,6 +205,33 @@ public final class RemoteProtocolCodec {
                     Instant.parse(requiredText(payload, "expiresAt")));
         } catch (IllegalArgumentException exception) {
             throw new TaskCageProtocolException("invalid artifactUploaded response payload", exception);
+        }
+    }
+
+    /** Decodes a begin-upload response that is also used to recover after a lost acknowledgement. */
+    public RemoteArtifactUploadStart decodeArtifactUploadStarted(JsonNode response) {
+        requireType(response, "artifactUploadStarted");
+        JsonNode payload = response.path("payload");
+        try {
+            return new RemoteArtifactUploadStart(
+                    UUID.fromString(requiredText(payload, "artifactId")),
+                    enumValue(payload, "state", RemoteArtifactUploadState.class),
+                    requiredNonNegativeLong(payload, "nextOffset"));
+        } catch (IllegalArgumentException exception) {
+            throw new TaskCageProtocolException("invalid artifactUploadStarted response payload", exception);
+        }
+    }
+
+    /** Decodes a chunk acknowledgement, including an idempotent acknowledgement after retry. */
+    public RemoteArtifactChunkProgress decodeArtifactChunkAccepted(JsonNode response) {
+        requireType(response, "artifactChunkAccepted");
+        JsonNode payload = response.path("payload");
+        try {
+            return new RemoteArtifactChunkProgress(
+                    UUID.fromString(requiredText(payload, "artifactId")),
+                    requiredNonNegativeLong(payload, "nextOffset"));
+        } catch (IllegalArgumentException exception) {
+            throw new TaskCageProtocolException("invalid artifactChunkAccepted response payload", exception);
         }
     }
 

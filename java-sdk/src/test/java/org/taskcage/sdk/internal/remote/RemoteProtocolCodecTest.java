@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.taskcage.sdk.ManagedInputArtifact;
 import org.taskcage.sdk.ManagedOutputArtifact;
 import org.taskcage.sdk.FinishedRemoteProfileTaskSnapshot;
+import org.taskcage.sdk.RemoteArtifactUploadState;
 import org.taskcage.sdk.ProfileIdentity;
 import org.taskcage.sdk.ProfileResourceOverrides;
 import org.taskcage.sdk.RemoteCapabilities;
@@ -103,6 +104,12 @@ class RemoteProtocolCodecTest {
         assertEquals(true, capabilities.supportsManagedTransfer());
         assertEquals(780000, capabilities.maxArtifactChunkBytes());
         assertEquals(artifactId(), codec.decodeArtifactUploaded(fixture("artifact-uploaded.json")).artifactId());
+        assertEquals(RemoteArtifactUploadState.UPLOADING, codec.decodeArtifactUploadStarted(MAPPER.readTree("""
+                {"remoteProtocolVersion":1,"requestId":"33333333-3333-4333-8333-333333333333",
+                 "type":"artifactUploadStarted","payload":{"artifactId":"55555555-5555-4555-8555-555555555555",
+                 "state":"UPLOADING","nextOffset":0}}
+                """)).state());
+        assertEquals(4, codec.decodeArtifactChunkAccepted(fixture("artifact-chunk-accepted.json")).nextOffset());
 
         ManagedOutputArtifact output = codec.decodeManagedOutputArtifact(
                 fixture("profile-result-success.json").path("payload").path("artifacts").path("result"));
