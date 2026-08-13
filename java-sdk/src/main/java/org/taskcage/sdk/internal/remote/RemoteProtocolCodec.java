@@ -103,6 +103,11 @@ public final class RemoteProtocolCodec {
         return write(envelope(requestId, "completeArtifactUpload", artifactIdPayload(artifactId)));
     }
 
+    /** Encodes the owner-only request to discard an unreferenced managed input Artifact. */
+    public byte[] abortArtifactUpload(UUID requestId, UUID artifactId) {
+        return write(envelope(requestId, "abortArtifactUpload", artifactIdPayload(artifactId)));
+    }
+
     public byte[] readArtifactChunk(UUID requestId, UUID artifactId, long offset, int maxBytes) {
         if (offset < 0 || maxBytes <= 0) {
             throw new IllegalArgumentException("offset must be non-negative and maxBytes must be positive");

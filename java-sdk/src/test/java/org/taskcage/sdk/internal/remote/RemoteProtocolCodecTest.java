@@ -79,6 +79,11 @@ class RemoteProtocolCodecTest {
                 UUID.fromString("66666666-6666-4666-8666-666666666666"), artifactId, 0, "test".getBytes())));
         assertEquals(fixture("complete-artifact-upload.json"), MAPPER.readTree(codec.completeArtifactUpload(
                 UUID.fromString("77777777-7777-4777-8777-777777777777"), artifactId)));
+        assertEquals(MAPPER.readTree("""
+                {"remoteProtocolVersion":1,"requestId":"88888888-8888-4888-8888-888888888888",
+                 "type":"abortArtifactUpload","payload":{"artifactId":"55555555-5555-4555-8555-555555555555"}}
+                """), MAPPER.readTree(codec.abortArtifactUpload(
+                UUID.fromString("88888888-8888-4888-8888-888888888888"), artifactId)));
         assertEquals(fixture("read-artifact-chunk.json"), MAPPER.readTree(codec.readArtifactChunk(
                 UUID.fromString("99999999-9999-4999-8999-999999999999"),
                 UUID.fromString("88888888-8888-4888-8888-888888888888"), 0, 780000)));
