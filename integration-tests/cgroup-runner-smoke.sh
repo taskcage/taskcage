@@ -297,6 +297,22 @@ unit_sequence=$((unit_sequence + 1))
   --exact \
   --nocapture
 
+# Remote MANAGED_INPUT은 공개 Local path를 우회하지 않고 daemon-owned FD로 같은 Profile/cgroup core를 사용한다.
+unit_sequence=$((unit_sequence + 1))
+"${taskcage_systemd[@]}" \
+  --quiet \
+  --wait \
+  --collect \
+  --pipe \
+  --unit="taskcage-remote-profile-$$-${unit_sequence}" \
+  --property=Type=exec \
+  --property=Delegate=yes \
+  --setenv=TASKCAGE_RUN_LINUX_PROFILE_INTEGRATION=1 \
+  "${submit_test}" \
+  'remote_backend::tests::actual_remote_managed_input_runs_and_publishes_after_cgroup_cleanup' \
+  --exact \
+  --nocapture
+
 # FFmpeg Profile은 service UID cache의 digest를 시작 시와 Task마다 검증하고, 고정 entrypoint FD로
 # daemon-owned argv를 실행한다. 성공 외에는 Artifact를 publish하지 않고 timeout/cancel 후손을 정리한다.
 unit_sequence=$((unit_sequence + 1))

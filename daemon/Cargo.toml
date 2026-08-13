@@ -7,13 +7,24 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+argon2 = "0.5"
+base64 = "0.22"
 libc = "0.2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_json_canonicalizer = "0.3.2"
 sha2 = "0.10"
 thiserror = "2"
+time = { version = "=0.3.44", features = ["formatting"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

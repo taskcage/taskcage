@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -73,8 +74,36 @@ async fn main() -> taskcaged::Result<()> {
             println!("{}", serde_json::to_string(&report)?);
             Ok(())
         }
+        Some(command) if command == OsStr::new("hash-remote-secret") => {
+            if args.next().is_some() {
+                return Err(Error::InvalidArgument(
+                    "hash-remote-secret 뒤에는 인자를 받을 수 없습니다".to_owned(),
+                ));
+            }
+            let mut secret = zeroize::Zeroizing::new(Vec::new());
+            std::io::stdin()
+                .take(4_097)
+                .read_to_end(&mut secret)
+                .map_err(|error| {
+                    Error::InvalidArgument(format!("stdin secret을 읽지 못했습니다: {error}"))
+                })?;
+            if !(1..=4_096).contains(&secret.len()) {
+                return Err(Error::InvalidArgument(
+                    "Remote secret은 1~4096 bytes여야 합니다".to_owned(),
+                ));
+            }
+            use argon2::password_hash::{PasswordHasher, SaltString};
+            let salt = SaltString::generate(&mut rand_core::OsRng);
+            let verifier = argon2::Argon2::default()
+                .hash_password(&secret, &salt)
+                .map_err(|error| {
+                    Error::InvalidArgument(format!("secret verifier 생성에 실패했습니다: {error}"))
+                })?;
+            println!("{verifier}");
+            Ok(())
+        }
         Some(other) => Err(Error::InvalidArgument(format!(
-            "알 수 없는 명령입니다: {other:?}; serve, check-environment, status, run-once 또는 import-package를 사용하세요"
+            "알 수 없는 명령입니다: {other:?}; serve, check-environment, status, run-once, import-package 또는 hash-remote-secret을 사용하세요"
         ))),
     }
 }
@@ -220,6 +249,7 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
     let mut profile_artifact_max_bytes = None;
     let mut runtime_package_cache_root = None;
     let mut ffmpeg_audio_to_wav_package_digest = None;
+    let mut remote_config = None;
     let mut index = 0;
     while index < args.len() {
         let name = args[index].to_str().ok_or_else(|| {
@@ -291,6 +321,9 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
                     })?,
                 );
             }
+            "--remote-config" if remote_config.is_none() => {
+                remote_config = Some(PathBuf::from(value));
+            }
             "--socket"
             | "--max-concurrent-tasks"
             | "--max-registry-tasks"
@@ -307,7 +340,8 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             | "--profile-artifact-root"
             | "--profile-artifact-max-bytes"
             | "--runtime-package-cache-root"
-            | "--ffmpeg-audio-to-wav-package-digest" => {
+            | "--ffmpeg-audio-to-wav-package-digest"
+            | "--remote-config" => {
                 return Err(Error::InvalidArgument(format!(
                     "serve 옵션이 중복되었습니다: {name}"
                 )));
@@ -369,18 +403,22 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
                 .to_owned(),
         ))?,
     };
-    match (
+    let config = match (
         runtime_package_cache_root,
         ffmpeg_audio_to_wav_package_digest,
     ) {
-        (None, None) => Ok(config),
+        (None, None) => config,
         (Some(cache_root), Some(digest)) => {
-            config.with_ffmpeg_audio_to_wav_profile(cache_root, digest)
+            config.with_ffmpeg_audio_to_wav_profile(cache_root, digest)?
         }
-        _ => Err(Error::InvalidArgument(
+        _ => return Err(Error::InvalidArgument(
             "FFmpeg Profile 등록에는 --runtime-package-cache-root와 --ffmpeg-audio-to-wav-package-digest를 함께 지정해야 합니다"
                 .to_owned(),
         )),
+    };
+    match remote_config {
+        Some(path) => config.with_remote_config(path),
+        None => Ok(config),
     }
 }
 

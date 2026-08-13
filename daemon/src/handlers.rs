@@ -3,6 +3,8 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
+#[cfg(target_os = "linux")]
+use std::{collections::HashMap, fs::File, sync::Mutex};
 
 use crate::capability::{CapabilityAdapter, CapabilityInitialization};
 use crate::capacity::TaskCapacitySettings;
@@ -122,6 +124,8 @@ pub(crate) struct ProtocolHandlers<C> {
     fail_stop: Arc<FailStopCoordinator>,
     #[cfg(target_os = "linux")]
     profile: Option<Arc<LocalProfileRuntime>>,
+    #[cfg(target_os = "linux")]
+    remote_tasks: Mutex<HashMap<String, String>>,
 }
 
 impl<C> ProtocolHandlers<C> {
@@ -148,6 +152,8 @@ impl<C> ProtocolHandlers<C> {
                 fail_stop,
                 #[cfg(target_os = "linux")]
                 profile: None,
+                #[cfg(target_os = "linux")]
+                remote_tasks: Mutex::new(HashMap::new()),
             }),
             CapabilityInitialization::Unavailable { adapter } => Ok(Self {
                 state: HandlerState::Unavailable {
@@ -157,6 +163,8 @@ impl<C> ProtocolHandlers<C> {
                 fail_stop,
                 #[cfg(target_os = "linux")]
                 profile: None,
+                #[cfg(target_os = "linux")]
+                remote_tasks: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -242,6 +250,16 @@ impl ProtocolHandlers<SubmitCoordinator> {
     where
         F: FnOnce() -> SubmitContext,
     {
+        if let Some(task_id) = task_id_for_visibility_check(&request)
+            && self.is_remote_task(task_id)
+        {
+            return error_response_for(
+                request.protocol_version(),
+                request.request_id().to_owned(),
+                ErrorCode::TaskNotFound,
+                format!("task was not found: {task_id}"),
+            );
+        }
         match request {
             request @ Request::GetCapabilities {
                 protocol_version: PROTOCOL_VERSION,
@@ -285,7 +303,39 @@ impl ProtocolHandlers<SubmitCoordinator> {
         response
     }
 
-    async fn handle_submit_profile<F>(&self, request: Request, make_context: F) -> Response
+    pub(crate) async fn handle_submit_profile<F>(
+        &self,
+        request: Request,
+        make_context: F,
+    ) -> Response
+    where
+        F: FnOnce() -> SubmitContext,
+    {
+        self.handle_submit_profile_with_source(request, make_context, None, None)
+            .await
+    }
+
+    pub(crate) async fn handle_submit_remote_profile<F>(
+        &self,
+        request: Request,
+        make_context: F,
+        source: File,
+        principal: String,
+    ) -> Response
+    where
+        F: FnOnce() -> SubmitContext,
+    {
+        self.handle_submit_profile_with_source(request, make_context, Some(source), Some(principal))
+            .await
+    }
+
+    async fn handle_submit_profile_with_source<F>(
+        &self,
+        request: Request,
+        make_context: F,
+        daemon_source: Option<File>,
+        remote_principal: Option<String>,
+    ) -> Response
     where
         F: FnOnce() -> SubmitContext,
     {
@@ -368,7 +418,11 @@ impl ProtocolHandlers<SubmitCoordinator> {
         }
         let mut context = make_context();
         let task_id = context.preallocate_task_id();
-        let staged = match runtime.stage(&task_id, prepared) {
+        let staged = match daemon_source {
+            Some(source) => runtime.stage_daemon_input(&task_id, prepared, source),
+            None => runtime.stage(&task_id, prepared),
+        };
+        let staged = match staged {
             Ok(staged) => staged,
             Err(error) => {
                 runtime.release(reservation);
@@ -377,6 +431,9 @@ impl ProtocolHandlers<SubmitCoordinator> {
         };
         let (profile_request, budget, staged_artifacts, plan, output_slot) = staged.into_plan();
         let profile_task = runtime.new_task(&task_id, &profile_request, budget, output_slot);
+        if let Some(principal) = &remote_principal {
+            self.register_remote_task(task_id.clone(), principal.clone());
+        }
         let outcome = core
             .submit_profile_validated(
                 request_id.clone(),
@@ -391,6 +448,11 @@ impl ProtocolHandlers<SubmitCoordinator> {
             Ok(outcome) => outcome,
             Err(error) => {
                 runtime.release(reservation);
+                if submit_error_code(&error) != ErrorCode::InternalError
+                    && let Some(principal) = &remote_principal
+                {
+                    self.remove_remote_task_if_owned(&task_id, principal);
+                }
                 return error_response_for(
                     PROFILE_PROTOCOL_VERSION,
                     request_id,
@@ -445,6 +507,11 @@ impl ProtocolHandlers<SubmitCoordinator> {
             }
             SubmitObservation::Failed(failure) => {
                 runtime.release(reservation);
+                if failure.code != ErrorCode::InternalError
+                    && let Some(principal) = &remote_principal
+                {
+                    self.remove_remote_task_if_owned(&task_id, principal);
+                }
                 error_response_for(
                     PROFILE_PROTOCOL_VERSION,
                     request_id,
@@ -455,7 +522,7 @@ impl ProtocolHandlers<SubmitCoordinator> {
         }
     }
 
-    async fn handle_get_profile_result(&self, request: Request) -> Response {
+    pub(crate) async fn handle_get_profile_result(&self, request: Request) -> Response {
         let Request::GetProfileResult {
             protocol_version,
             request_id,
@@ -541,6 +608,97 @@ impl ProtocolHandlers<SubmitCoordinator> {
                 error.to_string(),
             ),
         }
+    }
+
+    pub(crate) fn register_remote_task(&self, task_id: String, principal: String) {
+        self.remote_tasks
+            .lock()
+            .expect("remote task owner state poisoned")
+            .insert(task_id, principal);
+    }
+
+    pub(crate) fn prevalidate_remote_profile(
+        &self,
+        request_id: &str,
+        payload: &crate::protocol::ProfileRequestPayload,
+    ) -> Option<Response> {
+        let Some(runtime) = &self.profile else {
+            return Some(error_response_for(
+                PROFILE_PROTOCOL_VERSION,
+                request_id.to_owned(),
+                ErrorCode::ProfileNotFound,
+                "daemon-installed profiles are not enabled",
+            ));
+        };
+        let prepared = match runtime.validate(payload) {
+            Ok(prepared) => prepared,
+            Err(error) => return Some(profile_error_response(request_id.to_owned(), error)),
+        };
+        if let Err(error) = self.deployment_policy.validate(prepared.budget()) {
+            return Some(error_response_for(
+                PROFILE_PROTOCOL_VERSION,
+                request_id.to_owned(),
+                ErrorCode::LimitExceedsPolicy,
+                error.to_string(),
+            ));
+        }
+        if matches!(self.state, HandlerState::Unavailable { .. }) {
+            return Some(error_response_for(
+                PROFILE_PROTOCOL_VERSION,
+                request_id.to_owned(),
+                ErrorCode::EnvironmentUnavailable,
+                "cgroup v2 execution environment is unavailable",
+            ));
+        }
+        None
+    }
+
+    pub(crate) fn remote_task_owned_by(&self, task_id: &str, principal: &str) -> bool {
+        self.remote_tasks
+            .lock()
+            .expect("remote task owner state poisoned")
+            .get(task_id)
+            .is_some_and(|owner| owner == principal)
+    }
+
+    pub(crate) fn remove_remote_task_if_owned(&self, task_id: &str, principal: &str) {
+        let mut remote_tasks = self
+            .remote_tasks
+            .lock()
+            .expect("remote task owner state poisoned");
+        if remote_tasks
+            .get(task_id)
+            .is_some_and(|owner| owner == principal)
+        {
+            remote_tasks.remove(task_id);
+        }
+    }
+
+    pub(crate) fn open_remote_profile_output(&self, path: &str) -> Result<File, String> {
+        self.profile
+            .as_ref()
+            .ok_or_else(|| "daemon-installed profiles are not enabled".to_owned())?
+            .open_published_artifact(path)
+            .map_err(|error| error.to_string())
+    }
+
+    fn is_remote_task(&self, task_id: &str) -> bool {
+        self.remote_tasks
+            .lock()
+            .expect("remote task owner state poisoned")
+            .contains_key(task_id)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn task_id_for_visibility_check(request: &Request) -> Option<&str> {
+    match request {
+        Request::GetTask { payload, .. }
+        | Request::CancelTask { payload, .. }
+        | Request::GetProfileResult { payload, .. } => Some(&payload.task_id),
+        Request::GetCapabilities { .. }
+        | Request::SubmitTask { .. }
+        | Request::SubmitProfile { .. } => None,
     }
 }
 

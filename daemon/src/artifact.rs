@@ -321,6 +321,29 @@ impl LocalArtifactStore {
         input: &LocalInputArtifact,
         output: DeclaredOutputArtifact,
     ) -> Result<StagedArtifactTask, ArtifactStoreError> {
+        let source = self.open_input(input.path())?;
+        self.stage_open_input(task_id, input, output, source)
+    }
+
+    /// Remote MANAGED_INPUT처럼 daemon이 이미 소유한 regular file descriptor를 Local 공개 path 해석 없이
+    /// 같은 digest/size 검증과 staging 경계에 연결한다.
+    pub(crate) fn stage_daemon_input(
+        self: &Arc<Self>,
+        task_id: &str,
+        input: &LocalInputArtifact,
+        output: DeclaredOutputArtifact,
+        source: File,
+    ) -> Result<StagedArtifactTask, ArtifactStoreError> {
+        self.stage_open_input(task_id, input, output, source)
+    }
+
+    fn stage_open_input(
+        self: &Arc<Self>,
+        task_id: &str,
+        input: &LocalInputArtifact,
+        output: DeclaredOutputArtifact,
+        mut source: File,
+    ) -> Result<StagedArtifactTask, ArtifactStoreError> {
         validate_task_id(task_id)?;
         let layout = self.open_layout()?;
         let preflight_name = self.next_preflight_name(task_id);
@@ -328,7 +351,6 @@ impl LocalArtifactStore {
         let created_task_staging = Cell::new(false);
 
         let result = (|| {
-            let mut source = self.open_input(input.path())?;
             let snapshot = preflight.create_regular_file("source", 0o400)?;
             copy_and_verify_input(input, self.maximum_bytes, &mut source, snapshot)?;
             preflight.sync_all()?;
@@ -393,6 +415,13 @@ impl LocalArtifactStore {
             }
         }
         unreachable!("ArtifactPath는 빈 path를 허용하지 않습니다")
+    }
+
+    pub(crate) fn open_published_artifact(
+        &self,
+        path: &ArtifactPath,
+    ) -> Result<File, ArtifactStoreError> {
+        self.open_input(path)
     }
 }
 
@@ -1405,6 +1434,35 @@ mod linux_store_tests {
             b"source bytes",
             "caller input은 daemon이 수정하지 않습니다"
         );
+    }
+
+    #[test]
+    fn daemon_owned_descriptor_stages_without_exposing_an_external_local_path() {
+        let root = TemporaryRoot::new();
+        let external = TemporaryRoot::new();
+        let bytes = b"remote managed input";
+        let external_path = external.path().join("source.bin");
+        fs::write(&external_path, bytes).expect("external daemon input");
+        let input = LocalInputArtifact::new(
+            ArtifactPath::parse("remote-managed-input").expect("internal marker path"),
+            Sha256Digest::from_bytes(Sha256::digest(bytes).into()),
+            bytes.len() as u64,
+        );
+        let store =
+            Arc::new(LocalArtifactStore::open(root.path(), 1_024).expect("Artifact store 준비"));
+
+        assert!(
+            store
+                .stage_input(TASK_ID, &input, output_contract())
+                .is_err(),
+            "공개 Local path로 external input을 열 수 없어야 합니다"
+        );
+        let source = File::open(&external_path).expect("daemon-owned input descriptor");
+        let staged = store
+            .stage_daemon_input(TASK_ID, &input, output_contract(), source)
+            .expect("daemon-owned input staging");
+        assert_eq!(fs::read(staged.input_path()).unwrap(), bytes);
+        staged.cleanup().expect("daemon input staging cleanup");
     }
 
     #[test]
