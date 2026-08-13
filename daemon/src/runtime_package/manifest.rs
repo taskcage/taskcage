@@ -255,11 +255,11 @@ fn validate_manifest(package: &RuntimePackageManifest) -> RuntimePackageResult<(
 
 fn validate_platform(package: &RuntimePackageManifest) -> RuntimePackageResult<()> {
     require_exact("platform.os", &package.platform.os, "linux")?;
-    require_exact(
-        "platform.architecture",
-        &package.platform.architecture,
-        "x86_64",
-    )?;
+    if !matches!(package.platform.architecture.as_str(), "x86_64" | "aarch64") {
+        return Err(RuntimePackageError::InvalidManifest(
+            "platform.architecture은 x86_64 또는 aarch64여야 합니다".to_owned(),
+        ));
+    }
     require_exact("platform.abi", &package.platform.abi, "gnu")?;
     require_exact(
         "platform.libc.family",
@@ -409,6 +409,16 @@ mod tests {
     fn rejects_integers_outside_the_exact_json_range() {
         let mut value: serde_json::Value = serde_json::from_slice(&valid_manifest()).unwrap();
         value["files"][0]["sizeBytes"] = serde_json::json!(9_007_199_254_740_992_u64);
+        assert!(parse_manifest(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn accepts_aarch64_and_rejects_unknown_architectures() {
+        let mut value: serde_json::Value = serde_json::from_slice(&valid_manifest()).unwrap();
+        value["platform"]["architecture"] = serde_json::json!("aarch64");
+        assert!(parse_manifest(&serde_json::to_vec(&value).unwrap()).is_ok());
+
+        value["platform"]["architecture"] = serde_json::json!("arm64");
         assert!(parse_manifest(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 }

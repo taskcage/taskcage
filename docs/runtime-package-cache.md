@@ -7,8 +7,9 @@ Runtime Package는 신뢰된 Linux 실행 파일과 필요한 library·license·
 고정한다. 이 기능은 Hub, URL download, 자동 update, eviction, Bundle import 또는 container image를
 제공하지 않는다.
 
-지원 platform은 현재 `linux/x86_64/gnu`와 glibc다. Package가 요구하는 최소 glibc version이 host보다
-높으면 import와 resolve가 모두 실패한다.
+지원 platform은 현재 `linux/x86_64/gnu`, `linux/aarch64/gnu`와 glibc다. Package architecture는 daemon이
+실행 중인 host architecture와 정확히 일치해야 하며, Package가 요구하는 최소 glibc version이 host보다 높으면
+import와 resolve가 모두 실패한다.
 
 ## 관리자 import
 
@@ -128,6 +129,8 @@ rootfs와 entrypoint file descriptor를 실행 준비가 끝날 때까지 보유
 ## FFmpeg Profile 정적 등록
 
 `ffmpeg-audio-to-wav@1.0.0`은 generic registry 없이 하나의 cache root와 digest를 정적으로 등록한다.
+AMD64와 ARM64 FFmpeg Package는 서로 다른 binary content와 digest를 가지므로, 각 host에는 자신의
+architecture에 맞는 digest를 설정한다.
 Artifact 설정과 아래 두 옵션을 모두 지정해야 한다.
 
 ```text
