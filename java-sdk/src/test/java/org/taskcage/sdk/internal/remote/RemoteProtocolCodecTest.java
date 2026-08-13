@@ -95,6 +95,12 @@ class RemoteProtocolCodecTest {
                 ProfileResourceOverrides.builder().wallTimeLimit(java.time.Duration.ofMinutes(5)).build());
         assertEquals(fixture("submit-profile-valid.json"), MAPPER.readTree(codec.submitProfile(
                 uploadRequest, clientArtifactId, request)));
+
+        JsonNode firstSubmission = MAPPER.readTree(codec.submitProfile(uploadRequest, clientArtifactId, request));
+        JsonNode idempotentRetry = MAPPER.readTree(codec.submitProfile(
+                UUID.fromString("99999999-9999-4999-8999-999999999999"), clientArtifactId, request));
+        assertEquals(firstSubmission.path("payload"), idempotentRetry.path("payload"));
+        assertEquals("99999999-9999-4999-8999-999999999999", idempotentRetry.path("requestId").asText());
     }
 
     @Test

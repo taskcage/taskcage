@@ -121,6 +121,13 @@ public final class RemoteProtocolCodec {
         return write(envelope(requestId, "readArtifactChunk", payload));
     }
 
+    /**
+     * Encodes a Profile submission with a caller-owned idempotency key.
+     *
+     * <p>After a lost response, callers must reuse {@code clientRequestId} with the same request. The daemon
+     * resolves that key before input Artifact lookup, so this remains the only valid recovery path after a managed
+     * input Artifact has transferred to task ownership.
+     */
     public byte[] submitProfile(UUID requestId, UUID clientRequestId, RemoteProfileRequest request) {
         ObjectNode payload = mapper.createObjectNode();
         payload.put("clientRequestId", clientRequestId.toString());
