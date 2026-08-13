@@ -194,7 +194,7 @@ async fn real_tls13_listener_requires_authentication_then_serves_capabilities() 
         "maxRemoteConnections": 4,
         "tlsHandshakeTimeoutMs": 2000,
         "authenticationTimeoutMs": 2000,
-        "idleConnectionTimeoutMs": 2000,
+        "idleConnectionTimeoutMs": 1000,
         "sessionLifetimeSeconds": 60,
         "artifactRoot": artifact_root,
         "maxArtifactBytes": 1000000,
@@ -388,11 +388,71 @@ async fn real_tls13_listener_requires_authentication_then_serves_capabilities() 
     )
     .await
     .expect("submit dispatch started");
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            read_json_frame::<_, RemoteResponse>(&mut tls),
+        )
+        .await
+        .expect("idle timeout closes connection during request processing")
+        .is_err()
+    );
+    backend.submit_release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !backend.submit_completed.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("idle timeout must not cancel the accepted operation");
+    drop(tls);
+
+    backend.submit_completed.store(false, Ordering::SeqCst);
+    let mut revoked_tls = connect_test_tls(
+        address,
+        trusted_roots.clone(),
+        "foobar.com",
+        vec![REMOTE_ALPN.to_vec()],
+    )
+    .await
+    .expect("revocation TLS connect");
+    write_json_frame(&mut revoked_tls, &authenticate)
+        .await
+        .expect("revocation authenticate write");
+    let authenticated: RemoteResponse = read_json_frame(&mut revoked_tls)
+        .await
+        .expect("revocation authenticated response");
+    assert!(matches!(
+        authenticated,
+        RemoteResponse::Authenticated { .. }
+    ));
+    let revoked_submit = RemoteRequest::SubmitProfile {
+        remote_protocol_version: 1,
+        request_id: "14141414-1414-4414-8414-141414141414".to_owned(),
+        payload: RemoteProfileRequestPayload {
+            client_request_id: "15151515-1515-4515-8515-151515151515".to_owned(),
+            profile: taskcaged::remote_protocol::ProfileIdentity {
+                name: "ffmpeg-audio-to-wav".to_owned(),
+                version: "1.0.0".to_owned(),
+            },
+            inputs: BTreeMap::new(),
+            resource_overrides: None,
+        },
+    };
+    write_json_frame(&mut revoked_tls, &revoked_submit)
+        .await
+        .expect("revoked submit write");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        backend.submit_started.notified(),
+    )
+    .await
+    .expect("revoked submit dispatch started");
     credentials.revoke("document-worker");
     assert!(
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            read_json_frame::<_, RemoteResponse>(&mut tls),
+            read_json_frame::<_, RemoteResponse>(&mut revoked_tls),
         )
         .await
         .expect("revocation closes connection")
@@ -406,7 +466,7 @@ async fn real_tls13_listener_requires_authentication_then_serves_capabilities() 
     })
     .await
     .expect("revoked connection must not cancel the accepted operation");
-    drop(tls);
+    drop(revoked_tls);
 
     assert!(
         connect_test_tls(

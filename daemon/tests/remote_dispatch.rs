@@ -11,7 +11,7 @@ use taskcaged::remote_dispatch::{
     RemoteBoolFuture, RemoteDispatcher, RemoteTaskBackend, RemoteTaskFuture,
 };
 use taskcaged::remote_protocol::{
-    ArtifactIdPayload, CpuMax, OutputLimits, ProfileEffectiveResources, ProfileIdentity,
+    BeginArtifactUploadPayload, CpuMax, OutputLimits, ProfileEffectiveResources, ProfileIdentity,
     RemoteErrorCode, RemoteProfileRequestPayload, RemoteRequest, RemoteResponse, ResourceLimits,
     TaskIdPayload, TaskState,
 };
@@ -235,7 +235,7 @@ async fn principal_scoped_idempotency_is_resolved_before_backend_artifact_lookup
 }
 
 #[tokio::test]
-async fn artifact_operations_observe_only_the_submit_transition_result() {
+async fn unrelated_artifact_operation_does_not_wait_for_slow_submit() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let backend = Arc::new(MockBackend {
         submits: AtomicUsize::new(0),
@@ -263,40 +263,35 @@ async fn artifact_operations_observe_only_the_submit_transition_result() {
     });
     backend.submit_started.notified().await;
 
-    let abort_dispatcher = Arc::clone(&dispatcher);
-    let mut abort = tokio::spawn(async move {
-        abort_dispatcher
+    let upload_dispatcher = Arc::clone(&dispatcher);
+    let mut upload = tokio::spawn(async move {
+        upload_dispatcher
             .handle(
-                &principal("document-worker"),
-                RemoteRequest::AbortArtifactUpload {
+                &principal("other-worker"),
+                RemoteRequest::BeginArtifactUpload {
                     remote_protocol_version: 1,
                     request_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned(),
-                    payload: ArtifactIdPayload {
-                        artifact_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_owned(),
+                    payload: BeginArtifactUploadPayload {
+                        client_artifact_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_owned(),
+                        digest: format!("sha256:{}", "a".repeat(64)),
+                        size_bytes: 1,
+                        media_type: None,
                     },
                 },
             )
             .await
     });
-    assert!(
-        timeout(Duration::from_millis(50), &mut abort)
+    assert!(matches!(
+        timeout(Duration::from_secs(1), &mut upload)
             .await
-            .is_err()
-    );
+            .expect("unrelated upload must not wait for submit")
+            .expect("upload task"),
+        RemoteResponse::ArtifactUploadStarted { .. }
+    ));
 
     backend.submit_release.notify_one();
     assert!(matches!(
         submit.await.expect("submit task"),
         RemoteResponse::ProfileAccepted { .. }
-    ));
-    assert!(matches!(
-        abort.await.expect("abort task"),
-        RemoteResponse::Error {
-            payload: taskcaged::remote_protocol::ErrorPayload {
-                code: RemoteErrorCode::ArtifactNotFound,
-                ..
-            },
-            ..
-        }
     ));
 }

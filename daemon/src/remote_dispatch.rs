@@ -56,7 +56,6 @@ pub type RemoteBoolFuture<'a> = Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 pub struct RemoteDispatcher<B> {
     artifacts: RemoteArtifactStore,
     backend: Arc<B>,
-    artifact_operations: Mutex<()>,
     submissions: Mutex<BTreeMap<(String, String), SubmissionRecord>>,
 }
 
@@ -65,7 +64,6 @@ impl<B> RemoteDispatcher<B> {
         Self {
             artifacts,
             backend,
-            artifact_operations: Mutex::new(()),
             submissions: Mutex::new(BTreeMap::new()),
         }
     }
@@ -102,7 +100,6 @@ impl<B: RemoteTaskBackend> RemoteDispatcher<B> {
         let request_id = request.request_id().to_owned();
         match request {
             RemoteRequest::BeginArtifactUpload { payload, .. } => {
-                let _operation = self.artifact_operations.lock().await;
                 match self.artifacts.begin_upload(principal, payload) {
                     Ok(payload) => RemoteResponse::ArtifactUploadStarted {
                         remote_protocol_version: REMOTE_PROTOCOL_VERSION,
@@ -113,7 +110,6 @@ impl<B: RemoteTaskBackend> RemoteDispatcher<B> {
                 }
             }
             RemoteRequest::UploadArtifactChunk { payload, .. } => {
-                let _operation = self.artifact_operations.lock().await;
                 match self.artifacts.upload_chunk(&principal.client_id, payload) {
                     Ok(payload) => RemoteResponse::ArtifactChunkAccepted {
                         remote_protocol_version: REMOTE_PROTOCOL_VERSION,
@@ -127,7 +123,6 @@ impl<B: RemoteTaskBackend> RemoteDispatcher<B> {
                 payload: ArtifactIdPayload { artifact_id },
                 ..
             } => {
-                let _operation = self.artifact_operations.lock().await;
                 match self
                     .artifacts
                     .complete_upload(&principal.client_id, &artifact_id)
@@ -144,7 +139,6 @@ impl<B: RemoteTaskBackend> RemoteDispatcher<B> {
                 payload: ArtifactIdPayload { artifact_id },
                 ..
             } => {
-                let _operation = self.artifact_operations.lock().await;
                 match self
                     .artifacts
                     .abort_upload(&principal.client_id, &artifact_id)
@@ -158,7 +152,6 @@ impl<B: RemoteTaskBackend> RemoteDispatcher<B> {
                 }
             }
             RemoteRequest::ReadArtifactChunk { payload, .. } => {
-                let _operation = self.artifact_operations.lock().await;
                 match self.artifacts.read_output_chunk(
                     &principal.client_id,
                     &payload.artifact_id,
@@ -174,7 +167,6 @@ impl<B: RemoteTaskBackend> RemoteDispatcher<B> {
                 }
             }
             RemoteRequest::SubmitProfile { payload, .. } => {
-                let _operation = self.artifact_operations.lock().await;
                 self.submit(principal, request_id, payload).await
             }
             RemoteRequest::GetProfileResult { payload, .. } => {

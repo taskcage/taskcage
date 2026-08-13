@@ -902,10 +902,7 @@ mod tests {
             )
             .await;
         let task_id = match submitted {
-            remote::RemoteResponse::ProfileResult {
-                payload: remote::ProfileTaskPayload::Running { task_id, .. },
-                ..
-            } => task_id,
+            remote::RemoteResponse::ProfileAccepted { payload, .. } => payload.task_id,
             other => panic!("Remote Profile submit must create a running task: {other:#?}"),
         };
         let finished = tokio::time::timeout(Duration::from_secs(10), async {

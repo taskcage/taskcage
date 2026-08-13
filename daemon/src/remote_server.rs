@@ -397,6 +397,7 @@ async fn serve_authenticated<H: RemoteOperationHandler>(
         let response = tokio::select! {
             _ = tokio::time::sleep_until(session_deadline) => return Err(ConnectionError::SessionExpired),
             _ = authenticated.revoked() => return Err(ConnectionError::CredentialRevoked),
+            _ = tokio::time::sleep(config.idle_connection_timeout) => return Err(ConnectionError::IdleTimeout),
             response = &mut operation => response.map_err(ConnectionError::OperationTask)?,
         };
         send_with_timeout(tls, config.idle_connection_timeout, &response).await?;

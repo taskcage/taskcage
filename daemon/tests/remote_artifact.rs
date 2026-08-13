@@ -182,6 +182,39 @@ fn descriptor_quota_and_digest_failures_have_no_retained_side_effect() {
 }
 
 #[test]
+fn begin_upload_resolves_existing_key_before_current_policy() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let store = store(temporary.path());
+    let bytes = b"lost response recovery";
+    let original = store
+        .begin_upload(&policy(1_000_000, 4), descriptor(bytes))
+        .expect("initial upload");
+
+    let mut reduced = policy(1, 1);
+    reduced.artifact_upload_allowed = false;
+    let recovered = store
+        .begin_upload(&reduced, descriptor(bytes))
+        .expect("existing upload must survive policy reduction");
+    assert_eq!(recovered, original);
+
+    let mut changed = descriptor(bytes);
+    changed.size_bytes += 1;
+    assert!(matches!(
+        store.begin_upload(&reduced, changed),
+        Err(RemoteArtifactError::IdempotencyConflict)
+    ));
+
+    let missing = descriptor_with_client_id(
+        b"larger than the reduced policy",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    );
+    assert!(matches!(
+        store.begin_upload(&reduced, missing),
+        Err(RemoteArtifactError::AuthorizationDenied)
+    ));
+}
+
+#[test]
 fn managed_output_is_published_only_after_verification_and_downloaded_in_chunks() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let store = store(temporary.path());

@@ -79,7 +79,6 @@ impl RemoteArtifactStore {
         principal: &PrincipalPolicy,
         descriptor: BeginArtifactUploadPayload,
     ) -> Result<ArtifactUploadStartedPayload, RemoteArtifactError> {
-        validate_descriptor(&descriptor, self.max_artifact_bytes, principal)?;
         let mut state = self.state.lock().expect("remote artifact state poisoned");
         self.purge_expired_locked(&mut state)?;
         let key = (
@@ -97,6 +96,7 @@ impl RemoteArtifactStore {
         if !principal.artifact_upload_allowed {
             return Err(RemoteArtifactError::AuthorizationDenied);
         }
+        validate_descriptor(&descriptor, self.max_artifact_bytes, principal)?;
         let quota = state.quotas.entry(principal.client_id.clone()).or_default();
         let next_count = quota
             .count
