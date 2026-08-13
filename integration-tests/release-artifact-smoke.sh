@@ -36,7 +36,16 @@ checksum_path="$(readlink -f "$3")"
 readonly checksum_path
 bootstrap_installer_path="$(readlink -f "$4")"
 readonly bootstrap_installer_path
-readonly archive_root="taskcage-v${release_version}-x86_64-unknown-linux-gnu"
+case "$(uname -m)" in
+  x86_64) release_target="x86_64-unknown-linux-gnu" ;;
+  aarch64) release_target="aarch64-unknown-linux-gnu" ;;
+  *)
+    echo "SKIP: release artifact 시험은 Linux x86_64 또는 aarch64가 필요합니다" >&2
+    exit 77
+    ;;
+esac
+readonly release_target
+readonly archive_root="taskcage-v${release_version}-${release_target}"
 
 [[ -f "${archive_path}" && ! -L "${archive_path}" ]] || {
   echo "ERROR: release archive must be a regular file" >&2

@@ -68,7 +68,7 @@ TaskCage는 다음 조건을 실행 계약으로 취급한다.
 
 ## 지원 환경
 
-- Linux cgroup v2
+- Linux cgroup v2 on x86-64 or ARM64
 - Rust 1.88 이상
 - Java 17 이상
 - PoC 검증 환경: Ubuntu 24.04
@@ -77,7 +77,7 @@ TaskCage는 신뢰할 수 없는 코드를 격리하는 보안 sandbox가 아니
 
 ## 데몬 실행
 
-Ubuntu 24.04 x86-64 host에서는 버전이 고정된 GitHub Release의 bootstrap installer로 daemon을 설치하고
+Ubuntu 24.04 x86-64 또는 ARM64 host에서는 버전이 고정된 GitHub Release의 bootstrap installer로 daemon을 설치하고
 바로 시작할 수 있다. 내려받은 스크립트의 내용을 확인한 뒤 root로 실행한다.
 
 ```bash

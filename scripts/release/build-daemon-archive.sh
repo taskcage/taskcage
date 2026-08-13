@@ -14,9 +14,16 @@ fail() {
 if [[ $# -lt 1 || $# -gt 2 ]]; then
   fail "usage: build-daemon-archive.sh VERSION [OUTPUT_DIRECTORY]"
 fi
-if [[ "$(uname -s)" != "Linux" || "$(uname -m)" != "x86_64" ]]; then
-  fail "the Public Alpha daemon archive currently requires Linux x86-64"
+if [[ "$(uname -s)" != "Linux" ]]; then
+  fail "the daemon release archive requires Linux"
 fi
+
+case "$(uname -m)" in
+  x86_64) release_target="x86_64-unknown-linux-gnu" ;;
+  aarch64) release_target="aarch64-unknown-linux-gnu" ;;
+  *) fail "the daemon release archive supports Linux x86_64 or aarch64" ;;
+esac
+readonly release_target
 
 readonly release_version="$1"
 readonly requested_output_directory="${2:-${repository_root}/dist}"
@@ -29,7 +36,7 @@ done
 mkdir -p -- "${requested_output_directory}"
 output_directory="$(cd -- "${requested_output_directory}" && pwd)"
 readonly output_directory
-readonly archive_root="taskcage-v${release_version}-x86_64-unknown-linux-gnu"
+readonly archive_root="taskcage-v${release_version}-${release_target}"
 readonly archive_path="${output_directory}/${archive_root}.tar.gz"
 readonly checksum_path="${archive_path}.sha256"
 readonly bootstrap_installer_path="${output_directory}/install-taskcaged.sh"
