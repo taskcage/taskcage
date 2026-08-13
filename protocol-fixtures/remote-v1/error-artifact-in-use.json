@@ -4,7 +4,7 @@
   "type": "error",
   "payload": {
     "code": "ARTIFACT_IN_USE",
-    "message": "Artifact is referenced by an accepted Task",
+    "message": "Artifact is task-owned by an accepted Task",
     "retryable": false
   }
 }

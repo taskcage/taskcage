@@ -1,0 +1,23 @@
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "99999999-9999-4999-8999-999999999999",
+  "type": "submitProfile",
+  "payload": {
+    "clientRequestId": "44444444-4444-4444-8444-444444444444",
+    "profile": {
+      "name": "ffmpeg-audio-to-wav",
+      "version": "1.0.0"
+    },
+    "inputs": {
+      "source": {
+        "kind": "MANAGED_INPUT",
+        "artifactId": "55555555-5555-4555-8555-555555555555"
+      }
+    },
+    "resourceOverrides": {
+      "limits": {
+        "wallTimeLimitMs": 300000
+      }
+    }
+  }
+}
