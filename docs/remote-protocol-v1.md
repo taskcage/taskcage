@@ -1,6 +1,6 @@
 # TaskCage Remote Protocol v1
 
-> 상태: daemon과 SDK 구현을 시작하기 위한 **승인 대기 공통 계약**이다. Local UDS Protocol v1/v2를
+> 상태: daemon과 SDK 구현을 시작하기 위한 **승인된 공통 계약**이다. Local UDS Protocol v1/v2를
 > TCP에 그대로 공개하는 규격이 아니며, Remote Raw Command는 지원하지 않는다.
 
 ## 목적과 범위
@@ -40,6 +40,24 @@ Protocol v1의 필수 구성요소가 아니다.
 - `connectTimeout`은 DNS, TCP connect, TLS handshake 전체에 적용한다. `requestTimeout`은 인증 완료 뒤 한
   request/response round trip에만 적용하며 running Task를 취소하지 않는다.
 
+### Listener limits and deadlines
+
+The daemon deployment must configure positive values for `maxRemoteConnections`, `tlsHandshakeTimeout`,
+`authenticationTimeout`, and `idleConnectionTimeout`. These are deployment policy, not SDK defaults or
+capabilities negotiated by the client.
+
+- `maxRemoteConnections` counts accepted TCP connections from the start of the TLS handshake until close.
+  When the cap is reached, the daemon closes newly accepted sockets before TLS application data; it does not
+  consume a Task execution slot or send a protocol response.
+- `tlsHandshakeTimeout` starts after TCP acceptance. An incomplete or failed handshake closes without a
+  protocol response.
+- `authenticationTimeout` starts after a successful TLS handshake and ends only after a valid
+  `authenticated` response. Expiry closes without a protocol response.
+- `idleConnectionTimeout` starts again after each complete request or response. Expiry closes without a
+  protocol response and does not cancel submitted Tasks or completed Artifacts.
+- The daemon applies the same connection cap to all Remote principals. Task execution capacity remains a
+  separate, host-wide admission control limit.
+
 ## framing과 envelope
 
 TLS application data 안에는 다음 Remote 전용 framing을 사용한다.
@@ -55,8 +73,8 @@ TLS application data 안에는 다음 Remote 전용 framing을 사용한다.
 - JSON top-level은 object이며 duplicate key를 허용하지 않는다.
 - 각 연결은 요청과 응답을 순서대로 하나씩 처리한다. server push와 multiplexing은 없다.
 - `remoteProtocolVersion`은 integer `1`이어야 한다. Local Protocol의 `protocolVersion`과 별도 namespace다.
-- 요청의 unknown field, unknown `type`, 잘못된 UUID 또는 잘못된 JSON type은 `INVALID_REQUEST`다. 성공 응답의
-  unknown field는 SDK가 무시한다.
+- 인증 후 요청의 unknown field, unknown `type`, 잘못된 UUID 또는 잘못된 JSON type은 `INVALID_REQUEST`다.
+  성공 응답의 unknown field는 SDK가 무시한다.
 
 공통 envelope:
 
@@ -71,6 +89,12 @@ TLS application data 안에는 다음 Remote 전용 framing을 사용한다.
 
 `requestId`는 UUID request/response correlation ID이고, response는 요청 값을 그대로 돌려준다. `message`는
 사람을 위한 진단 값이며 SDK는 `code`와 `retryable`만으로 분기한다.
+
+Before authentication, a malformed length prefix, invalid UTF-8/JSON, duplicate key, non-object JSON, or
+incomplete frame closes the connection without a response. A complete, syntactically valid envelope with an
+unsupported `remoteProtocolVersion` receives `UNSUPPORTED_REMOTE_PROTOCOL_VERSION` and then closes. A valid
+version whose first `type` is not `authenticate` receives `AUTHENTICATION_REQUIRED` and then closes. These
+rules prevent unauthenticated callers from using the Remote operation surface.
 
 ## 인증과 authorization
 
@@ -111,10 +135,18 @@ operation을 처리하지 않으며 daemon은 연결을 닫는다.
   않은 자동 인증 재시도를 하지 않는다.
 - `sessionExpiresAt` 이후 daemon은 새 request를 받지 않고 연결을 닫는다. SDK는 새 TLS connection을 만들고
   다시 인증할 수 있지만 이전 request를 자동 재제출하지 않는다.
+- `sessionExpiresAt` is an RFC 3339 UTC timestamp using a trailing `Z`, with second or fractional-second
+  precision. It is strictly later than the time at which the daemon sends `authenticated`.
 - 인증은 identity를, authorization은 허용된 Profile identity와 resource override 범위를 결정한다. 권한 밖의
   Profile 또는 override는 `AUTHORIZATION_DENIED`다.
 - secret은 explicit SDK option, environment-backed secret provider 또는 secret-manager integration으로
   제공한다. explicit option이 이를 우선한다.
+- Credential rotation accepts a newly configured secret for new connections and rejects the replaced secret
+  for new authentication. Existing authenticated sessions remain valid only until their advertised
+  `sessionExpiresAt`.
+- Credential revocation immediately rejects new authentication and closes all currently authenticated
+  connections for that principal. It does not cancel existing Tasks; their owner may reconnect only with a
+  non-revoked credential before the normal Task retention period expires.
 - mTLS는 future optional authentication mode다. 도입하더라도 Remote Protocol v1의 Profile authorization
   모델과 error code를 변경하지 않는다.
 
@@ -282,6 +314,22 @@ preflight와 daemon restart도 incomplete upload를 폐기한다. daemon은 `art
 `cancelTask` payload/result 의미를 따른다. task ID는 authenticated principal의 소유여야 하며, 다른 principal의 task ID는
 존재 여부를 밝히지 않고 `TASK_NOT_FOUND`를 반환한다.
 
+### Local and Remote ownership boundary
+
+The daemon has one host-wide cgroup runner and capacity budget, but task visibility is split into ownership
+namespaces:
+
+- A Remote task belongs to exactly one authenticated principal. Remote `getProfileResult` and `cancelTask`
+  may access only that principal's Remote tasks and return `TASK_NOT_FOUND` for every other task ID.
+- Local UDS Protocol v1/v2 operations may access only tasks submitted over Local UDS. They return
+  `TASK_NOT_FOUND` for Remote task IDs and cannot read, cancel, download, or reuse Remote Artifacts.
+- Remote operations return `TASK_NOT_FOUND` for Local UDS task IDs and cannot access Local Artifacts.
+- The daemon's operator-only status, recovery, and cleanup tooling is not an application protocol client and
+  may inspect aggregate state without exposing task arguments, output, Artifact names, or service secrets.
+
+This separation prevents a local application account or a different Remote principal from inferring another
+caller's task existence. It does not create separate cgroup capacity pools.
+
 finished `profileResult`의 output Artifact는 `MANAGED_OUTPUT`이다. caller가 output path, URI나 파일 이름을
 지정할 수 없으며 daemon은 output digest와 size를 검증한 뒤 cleanup-confirmed `FINISHED` 결과와 함께 공개한다.
 
@@ -324,6 +372,7 @@ caller가 지정한 temporary file을 성공한 digest/size 검증 뒤에만 최
 | `INVALID_REQUEST` | frame, envelope 또는 value validation 실패 | false |
 | `UNSUPPORTED_REMOTE_PROTOCOL_VERSION` | 지원하지 않는 Remote version | false |
 | `AUTHENTICATION_FAILED` | service account ID 또는 secret 검증 실패 | false |
+| `AUTHENTICATION_REQUIRED` | authenticate 이전 operation 요청 | false |
 | `AUTHORIZATION_DENIED` | Profile, Raw Command 또는 override 권한 없음 | false |
 | `INVALID_ARTIFACT_UPLOAD` | upload descriptor, offset, chunk 또는 completion 순서 위반 | false |
 | `ARTIFACT_DIGEST_MISMATCH` | uploaded bytes의 digest 또는 size 불일치 | false |
