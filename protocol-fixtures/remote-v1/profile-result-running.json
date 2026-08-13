@@ -1,0 +1,15 @@
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "66666666-6666-4666-8666-666666666666",
+  "type": "profileResult",
+  "payload": {
+    "taskId": "55555555-5555-4555-8555-555555555555",
+    "state": "RUNNING",
+    "profile": {
+      "name": "ffmpeg-audio-to-wav",
+      "version": "1.0.0"
+    },
+    "submittedAt": "2026-08-13T12:00:00Z",
+    "startedAt": "2026-08-13T12:00:01Z"
+  }
+}

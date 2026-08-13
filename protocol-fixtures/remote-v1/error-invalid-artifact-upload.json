@@ -1,0 +1,6 @@
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "66666666-6666-4666-8666-666666666666",
+  "type": "error",
+  "payload": { "code": "INVALID_ARTIFACT_UPLOAD", "message": "chunk offset does not match nextOffset", "retryable": false }
+}

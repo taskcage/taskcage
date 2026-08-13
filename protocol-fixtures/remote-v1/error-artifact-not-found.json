@@ -1,0 +1,6 @@
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "99999999-9999-4999-8999-999999999999",
+  "type": "error",
+  "payload": { "code": "ARTIFACT_NOT_FOUND", "message": "artifact is unavailable", "retryable": false }
+}

@@ -1,0 +1,6 @@
+{
+  "remoteProtocolVersion": 1,
+  "requestId": "77777777-7777-4777-8777-777777777777",
+  "type": "error",
+  "payload": { "code": "ARTIFACT_DIGEST_MISMATCH", "message": "uploaded bytes do not match declared digest", "retryable": false }
+}
