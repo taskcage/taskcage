@@ -7,6 +7,14 @@ entrypoint=${source_root}/rootfs/bin/ffmpeg
 sbom=${source_root}/rootfs/share/sbom.spdx.json
 manifest=${source_root}/runtime-package.json
 
+case "$(uname -m)" in
+  x86_64|aarch64) package_architecture="$(uname -m)" ;;
+  *)
+    echo "ERROR: Runtime Package requires Linux x86_64 or aarch64" >&2
+    exit 1
+    ;;
+esac
+
 rm -rf -- "${source_root}"
 mkdir -p "${source_root}/rootfs/bin" "${source_root}/rootfs/share"
 mkdir -p "${cache_root}"
@@ -29,7 +37,7 @@ printf '%s\n' \
   '  "version": "0.0.0-container.1",' \
   '  "platform": {' \
   '    "os": "linux",' \
-  '    "architecture": "x86_64",' \
+  "    \"architecture\": \"${package_architecture}\"," \
   '    "abi": "gnu",' \
   '    "libc": { "family": "glibc", "minimumVersion": "2.17" }' \
   '  },' \

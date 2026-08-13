@@ -62,9 +62,9 @@ bash dev/container/run-ffmpeg-example.sh
 
 ## 권한과 제한
 
-현재 Runtime Package는 `linux/x86_64/gnu`만 지원하므로 이 Compose 환경도 x86-64 Docker host가
-필요하다. ARM Mac에서 `linux/amd64` emulation을 사용하면 Runtime Package의 fail-closed `openat2`
-검증을 제공하지 못해 daemon 시작이 거부될 수 있다.
+Compose는 host architecture에 맞는 native image를 build한다. Runtime Package는 `linux/x86_64/gnu`와
+`linux/aarch64/gnu`를 지원한다. ARM Mac에서는 `linux/amd64` emulation을 강제하지 말고 native ARM64
+Docker Desktop Linux VM에서 실행해야 한다.
 
 `taskcaged` 컨테이너는 자신의 private cgroup namespace 안에서 cgroup을 생성하고 프로세스를 이동해야
 하므로 `privileged: true`를 사용한다. 후손 PID 정리를 Java E2E에서 직접 검증하기 위해 daemon과 Java
