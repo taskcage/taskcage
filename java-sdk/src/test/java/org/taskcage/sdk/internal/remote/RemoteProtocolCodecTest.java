@@ -88,6 +88,8 @@ class RemoteProtocolCodecTest {
         assertEquals(fixture("read-artifact-chunk.json"), MAPPER.readTree(codec.readArtifactChunk(
                 UUID.fromString("99999999-9999-4999-8999-999999999999"),
                 UUID.fromString("88888888-8888-4888-8888-888888888888"), 0, 780000)));
+        assertEquals(fixture("get-profile-result.json"), MAPPER.readTree(codec.getProfileResult(
+                UUID.fromString("66666666-6666-4666-8666-666666666666"), artifactId)));
 
         RemoteProfileRequest request = new RemoteProfileRequest(
                 new ProfileIdentity("ffmpeg-audio-to-wav", "1.0.0"),
@@ -116,6 +118,8 @@ class RemoteProtocolCodecTest {
                  "state":"UPLOADING","nextOffset":0}}
                 """)).state());
         assertEquals(4, codec.decodeArtifactChunkAccepted(fixture("artifact-chunk-accepted.json")).nextOffset());
+        assertEquals("test", new String(codec.decodeArtifactChunk(fixture("artifact-chunk.json")).bytes()));
+        assertEquals(artifactId(), codec.decodeTaskCancelled(fixture("task-cancelled.json")).taskId());
 
         ManagedOutputArtifact output = codec.decodeManagedOutputArtifact(
                 fixture("profile-result-success.json").path("payload").path("artifacts").path("result"));
