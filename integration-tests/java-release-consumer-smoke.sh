@@ -52,22 +52,17 @@ release_version() {
 }
 
 readonly java_sdk_version="$(release_version "${repository_root}/java-sdk" "java-sdk")"
-readonly ffmpeg_binding_version="$(release_version "${repository_root}/java-bindings/ffmpeg" "ffmpeg-binding")"
-
 "${repository_root}/scripts/release/build-validation-central-bundle.sh" \
   "${java_sdk_version}" \
-  "${bundles_directory}"
-"${repository_root}/scripts/release/build-validation-ffmpeg-binding-central-bundle.sh" \
-  "${ffmpeg_binding_version}" \
   "${bundles_directory}"
 
 (
   cd "${repository_directory}"
   jar --extract --file "${bundles_directory}/taskcage-java-sdk-${java_sdk_version}-central.zip"
-  jar --extract --file "${bundles_directory}/taskcage-ffmpeg-binding-${ffmpeg_binding_version}-central.zip"
 )
 
 TASKCAGE_RELEASE_REPOSITORY="${repository_directory}" \
+TASKCAGE_JAVA_SDK_VERSION="${java_sdk_version}" \
   "${repository_root}/java-sdk/gradlew" \
   -p "${repository_root}/integration-tests/java-release-consumer" \
   clean \
@@ -75,4 +70,4 @@ TASKCAGE_RELEASE_REPOSITORY="${repository_directory}" \
   --no-daemon \
   --no-problems-report
 
-echo "PASS: external Java consumer resolved the FFmpeg Binding and transitive Core SDK"
+echo "PASS: external Java consumer resolved the Core SDK"

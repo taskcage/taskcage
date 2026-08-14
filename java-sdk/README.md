@@ -3,7 +3,7 @@
 TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`에 작업을 제출·조회·취소하도록 제공하는 Java 17+ 라이브러리다. cgroup과 Protocol v1의 세부 사항은 SDK 내부에 숨기고 명령, 자원 예산, 상태와 결과를 Java 타입으로 제공한다.
 
 > **상태:** `0.2.0`은 Local UDS Raw Command와 opt-in Local Profile을 제공하는 공개 릴리스다.
-> `main`의 Remote TLS Profile·Artifact API와 Docker Compose E2E는 다음 SDK 릴리스 후보이며 아직
+> `main`의 Remote TLS Profile·Artifact API와 Docker Compose E2E는 `0.3.0` 릴리스 후보이며 아직
 > Maven Central artifact에는 포함되지 않았다. `0.x`는 초기 개발 버전이며 SDK는 Spring Boot에 의존하지 않는다.
 
 공개된 `0.2.0`은 Local UDS transport, Raw Command와 opt-in [Local Profile Core API v2](../docs/api-profile-v2.md)를
@@ -194,10 +194,10 @@ daemon과 Java Core SDK는 독립적으로 버전을 관리하고 배포한다. 
 버전 문자열이 아니라 양쪽이 지원하는 Protocol 버전으로 판단한다.
 
 ```text
-Daemon tag:     taskcaged-v0.3.0
-Java SDK tag:   java-sdk-v0.2.0
-Java Core SDK:  0.2.0
-Protocol:       v1, v2
+Daemon tag:     taskcaged-v0.4.0 (Remote Profile)
+Java SDK tag:   java-sdk-v0.3.0
+Java Core SDK:  0.3.0
+Protocol:       Local v1, v2; Remote v1
 ```
 
 Maven Central에는 다음 좌표로 main, sources와 javadoc artifact가 서명되어 공개됐다.
