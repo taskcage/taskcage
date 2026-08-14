@@ -5,6 +5,14 @@ TaskCage는 daemon과 SDK의 버전을 독립적으로 관리한다. 이 문서�
 
 ## Unreleased
 
+### taskcaged 0.4.0
+
+- TLS 1.3과 service-account 인증을 사용하는 Remote Protocol v1 daemon listener를 추가한다.
+- Remote principal별 Profile authorization, resource override 정책, connection·handshake·session 제한을 적용한다.
+- TLS connection 위에서 관리되는 Artifact upload/download, quota, 재개 가능한 upload와 single-use input ownership을 제공한다.
+- Remote Task의 Profile 실행·조회·취소를 principal 경계 안에서 제공하고, Local UDS Task·Artifact와 분리한다.
+- Linux ARM64 Runtime Package와 GitHub Release archive를 지원한다.
+
 ### taskcaged 0.2.0 release candidate
 
 - Protocol v1 Raw Command 동작을 유지하면서 Protocol v2 Local Execution Profile 제출과 결과 조회를 추가한다.

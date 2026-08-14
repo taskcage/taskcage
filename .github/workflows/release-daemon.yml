@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing daemon release tag, for example taskcaged-v0.2.0.
+        description: Existing daemon release tag, for example taskcaged-v0.4.0.
         required: true
         type: string
 
@@ -208,7 +208,7 @@ jobs:
             echo "ERROR: a GitHub release already exists for ${RELEASE_TAG}" >&2
             exit 1
           fi
-          release_notes="$(printf 'TaskCage daemon %s\n\nSupported Protocols: v1, v2\nSupported platforms: Ubuntu 24.04, Linux x86-64 and ARM64\n\nReview and complete these notes before approving publication.' "${RELEASE_VERSION}")"
+          release_notes="$(printf 'TaskCage daemon %s\n\nSupported Local Protocols: v1, v2\nSupported Remote Protocol: v1\nSupported platforms: Ubuntu 24.04, Linux x86-64 and ARM64\n\nReview and complete these notes before approving publication.' "${RELEASE_VERSION}")"
           gh release create "${RELEASE_TAG}" \
             dist/taskcage-v*-x86_64-unknown-linux-gnu.tar.gz \
             dist/taskcage-v*-x86_64-unknown-linux-gnu.tar.gz.sha256 \
