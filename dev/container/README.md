@@ -49,6 +49,19 @@ snapshot·실행·결과 publish를 검증할 수 있다. 테스트가 끝나면
 cgroup이 없는지도 검사한다. 최종 cgroup·systemd·릴리스 검증은 계속 Ubuntu 24.04 VM 또는 host 통합
 테스트가 담당한다.
 
+## Remote TLS Java E2E
+
+Remote Protocol v1의 실제 TCP/TLS 경로는 별도 daemon과 Java test runner 컨테이너로 검증한다.
+
+```bash
+bash dev/container/run-remote-e2e.sh
+```
+
+이 구성은 daemon에만 `privileged: true`와 private cgroup namespace를 부여한다. Java runner는 일반 Compose
+network에서 TLS 1.3과 ALPN `taskcage/remote/1`로 daemon DNS에 연결하고, test-only CA·service account로 인증한다.
+`file-copy@1.0.0` Profile을 통해 Artifact upload → Profile 실행 → output download를 검증한다. 인증서와 secret은
+test fixture 전용이며 운영 credential이나 인증서로 재사용하면 안 된다.
+
 ## FFmpeg Binding 예제
 
 다음 명령은 실제 FFmpeg Binding 예제 하나만 실행하고 결과 Artifact 경로를 출력한다.
@@ -72,7 +85,7 @@ Docker Desktop Linux VM에서 실행해야 한다.
 광범위한 접근을 허용하므로 신뢰할 수 있는 개발 장비에서만 이 Compose 파일을 실행해야 한다.
 
 - 운영 환경에서 사용하지 않는다.
-- daemon에는 network namespace를 제공하지 않으며 port를 publish하지 않는다.
+- Local UDS daemon에는 network namespace를 제공하지 않으며, Remote test daemon도 host port를 publish하지 않는다.
 - host cgroup tree를 별도 bind mount하지 않는다.
 - 인증 없는 TCP proxy를 UDS 앞에 추가하지 않는다.
 - 격리와 권한 동작의 최종 근거로 사용하지 않고 Ubuntu 통합 테스트를 유지한다.

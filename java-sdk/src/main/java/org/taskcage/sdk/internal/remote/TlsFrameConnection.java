@@ -26,13 +26,13 @@ final class TlsFrameConnection implements AutoCloseable {
         SSLParameters parameters = socket.getSSLParameters();
         parameters.setProtocols(new String[] {"TLSv1.3"});
         parameters.setEndpointIdentificationAlgorithm("HTTPS");
-        parameters.setApplicationProtocols(new String[] {"taskcage/1"});
+        parameters.setApplicationProtocols(new String[] {"taskcage/remote/1"});
         socket.setSSLParameters(parameters);
         socket.setSoTimeout(timeoutMillis(options.requestTimeout()));
         socket.startHandshake();
-        if (!"taskcage/1".equals(socket.getApplicationProtocol())) {
+        if (!"taskcage/remote/1".equals(socket.getApplicationProtocol())) {
             socket.close();
-            throw new IOException("TaskCage daemon did not negotiate ALPN taskcage/1");
+            throw new IOException("TaskCage daemon did not negotiate ALPN taskcage/remote/1");
         }
         return new TlsFrameConnection(socket);
     }

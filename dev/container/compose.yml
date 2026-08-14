@@ -65,6 +65,44 @@ services:
       - taskcage-runtime:/run/taskcage
       - taskcage-work:/taskcage-work
 
+  remote-taskcaged:
+    image: taskcage-dev/remote-taskcaged:local
+    profiles: [remote-test]
+    build:
+      context: ../..
+      dockerfile: dev/container/Dockerfile
+      target: daemon
+    entrypoint: ["/usr/local/bin/taskcage-container-remote-entrypoint"]
+    privileged: true
+    cgroup: private
+    pid: host
+    stop_grace_period: 15s
+    networks:
+      default:
+        aliases: [foobar.com]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/7443'"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  java-remote-e2e:
+    image: taskcage-dev/java-remote-e2e:local
+    profiles: [remote-test]
+    build:
+      context: ../..
+      dockerfile: dev/container/Dockerfile
+      target: java-remote-e2e
+    depends_on:
+      remote-taskcaged:
+        condition: service_healthy
+    environment:
+      TASKCAGE_REMOTE_ENDPOINT: taskcage+tls://foobar.com:7443
+      TASKCAGE_REMOTE_CLIENT_ID: document-worker
+      TASKCAGE_REMOTE_SECRET: fixture-secret-only
+      TASKCAGE_REMOTE_CA_PEM: /workspace/daemon/tests/data/remote-root.pem
+
 volumes:
   taskcage-runtime:
   taskcage-work:

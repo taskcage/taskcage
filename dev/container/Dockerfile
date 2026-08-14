@@ -17,7 +17,9 @@ RUN apt-get update \
 COPY --from=rust-builder /workspace/target/release/taskcaged /usr/local/bin/taskcaged
 COPY --from=rust-builder /workspace/target/release/ghost-tree /usr/local/libexec/taskcage/ghost-tree
 COPY --from=rust-builder /workspace/target/release/output-flood /usr/local/libexec/taskcage/output-flood
+COPY daemon/tests/data/remote-chain.pem daemon/tests/data/remote-end.key daemon/tests/data/remote-root.pem /usr/local/share/taskcage/
 COPY --chmod=0755 dev/container/entrypoint.sh /usr/local/bin/taskcage-container-entrypoint
+COPY --chmod=0755 dev/container/remote-entrypoint.sh /usr/local/bin/taskcage-container-remote-entrypoint
 COPY --chmod=0755 dev/container/prepare-ffmpeg-package.sh /usr/local/bin/taskcage-container-prepare-ffmpeg-package
 COPY --chmod=0755 dev/container/verify-cleanup.sh /usr/local/bin/taskcage-container-verify-cleanup
 
@@ -48,11 +50,16 @@ WORKDIR /workspace
 COPY java-sdk ./java-sdk
 COPY java-bindings ./java-bindings
 COPY protocol-fixtures ./protocol-fixtures
-RUN ./java-sdk/gradlew -p ./java-sdk test e2eTestClasses --no-daemon \
+COPY daemon/tests/data/remote-root.pem ./daemon/tests/data/remote-root.pem
+RUN ./java-sdk/gradlew -p ./java-sdk test e2eTestClasses remoteE2eTestClasses --no-daemon \
     && ./java-sdk/gradlew -p ./java-bindings/ffmpeg test bindingE2eTestClasses --no-daemon
 
 WORKDIR /workspace
 CMD ["/bin/bash", "-c", "./java-sdk/gradlew -p ./java-sdk test e2eTest --rerun-tasks --no-daemon --offline && ./java-sdk/gradlew -p ./java-bindings/ffmpeg test bindingE2eTest --rerun-tasks --no-daemon --offline"]
+
+FROM java-e2e AS java-remote-e2e
+
+CMD ["/bin/bash", "-c", "./java-sdk/gradlew -p ./java-sdk remoteE2eTest --rerun-tasks --no-daemon --offline"]
 
 FROM eclipse-temurin:17-jdk-jammy AS ffmpeg-example
 
