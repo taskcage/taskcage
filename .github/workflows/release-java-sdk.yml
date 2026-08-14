@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing Java SDK release tag, for example java-sdk-v0.2.0.
+        description: Existing Java SDK release tag, for example java-sdk-v0.3.0.
         required: true
         type: string
       central_deployment_id:
@@ -112,6 +112,16 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - run: bash dev/container/run-e2e.sh
 
+  remote-profile-gate:
+    name: Java Remote TLS and daemon compatibility gate
+    if: needs.validate.outputs.mode == 'prepare'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: bash dev/container/run-remote-e2e.sh
+
   prepare:
     name: Prepare Central deployment and draft release
     if: needs.validate.outputs.mode == 'prepare'
@@ -120,6 +130,7 @@ jobs:
       - java-gate
       - ffmpeg-gate
       - profile-gate
+      - remote-profile-gate
     runs-on: ubuntu-24.04
     environment: java-sdk-release
     permissions:
@@ -172,7 +183,7 @@ jobs:
             upload \
             "dist/taskcage-java-sdk-${RELEASE_VERSION}-central.zip" \
             "taskcage-java-sdk-${RELEASE_VERSION}")"
-          release_notes="$(printf 'TaskCage Java SDK %s\n\nSupported Protocols: v1, v2\nMaven: org.taskcage:taskcage-java-sdk:%s\n\nCentral USER_MANAGED deployment: %s\n\nReview and complete these notes before finalizing publication.' "${RELEASE_VERSION}" "${RELEASE_VERSION}" "${deployment_id}")"
+          release_notes="$(printf 'TaskCage Java SDK %s\n\nSupported Local Protocols: v1, v2\nSupported Remote Protocol: v1\nRequires taskcaged: 0.4.0 or later for Remote Profile execution\nMaven: org.taskcage:taskcage-java-sdk:%s\n\nCentral USER_MANAGED deployment: %s\n\nReview and complete these notes before finalizing publication.' "${RELEASE_VERSION}" "${RELEASE_VERSION}" "${deployment_id}")"
           gh release create "${RELEASE_TAG}" \
             --draft \
             --prerelease \

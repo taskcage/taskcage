@@ -13,6 +13,14 @@ TaskCage는 daemon과 SDK의 버전을 독립적으로 관리한다. 이 문서�
 - Remote Task의 Profile 실행·조회·취소를 principal 경계 안에서 제공하고, Local UDS Task·Artifact와 분리한다.
 - Linux ARM64 Runtime Package와 GitHub Release archive를 지원한다.
 
+### TaskCage Java SDK 0.3.0
+
+- `RemoteTaskCageClient`로 TLS 1.3 Remote Profile 실행, 조회와 취소를 제공한다. Remote Raw Command는 제공하지 않는다.
+- `Path` 기반 Managed Artifact upload/download를 bounded chunk와 증분 SHA-256 검증으로 처리한다.
+- service-account 인증 오류, TLS connection 실패와 daemon의 구조화 오류를 구분한다.
+- Docker Compose에서 다중 chunk transfer, Profile 실행, output download와 인증 거부를 실제 daemon과 검증한다.
+- Remote Profile 실행에는 `taskcaged` 0.4.0 이상이 필요하다.
+
 ### taskcaged 0.2.0 release candidate
 
 - Protocol v1 Raw Command 동작을 유지하면서 Protocol v2 Local Execution Profile 제출과 결과 조회를 추가한다.
