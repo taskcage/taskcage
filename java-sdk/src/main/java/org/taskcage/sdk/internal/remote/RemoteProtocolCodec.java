@@ -145,11 +145,11 @@ public final class RemoteProtocolCodec {
     }
 
     public byte[] getProfileResult(UUID requestId, UUID taskId) {
-        return write(envelope(requestId, "getProfileResult", artifactIdPayload(taskId)));
+        return write(envelope(requestId, "getProfileResult", taskIdPayload(taskId)));
     }
 
     public byte[] cancelTask(UUID requestId, UUID taskId) {
-        return write(envelope(requestId, "cancelTask", artifactIdPayload(taskId)));
+        return write(envelope(requestId, "cancelTask", taskIdPayload(taskId)));
     }
 
     public JsonNode readAndValidate(byte[] bytes, UUID requestId) {
@@ -381,6 +381,12 @@ public final class RemoteProtocolCodec {
     private ObjectNode artifactIdPayload(UUID artifactId) {
         ObjectNode payload = mapper.createObjectNode();
         payload.put("artifactId", artifactId.toString());
+        return payload;
+    }
+
+    private ObjectNode taskIdPayload(UUID taskId) {
+        ObjectNode payload = mapper.createObjectNode();
+        payload.put("taskId", taskId.toString());
         return payload;
     }
 
