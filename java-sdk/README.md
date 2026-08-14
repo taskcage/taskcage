@@ -9,8 +9,8 @@ TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`�
 
 공개된 `0.1.0`은 Local UDS transport와 Raw Command 모델을 구현한다. `0.2.0` release candidate에는 승인된
 [Local Profile Core API v2](../docs/api-profile-v2.md)의 Java 모델과 client가 추가됐고, opt-in
-`file-copy@1.0.0` Profile을 사용하는 실제 Linux daemon E2E까지 검증한다. 인증된 Remote transport는 아직
-구현된 SDK 기능이 아니다.
+`file-copy@1.0.0` Profile을 사용하는 실제 Linux daemon E2E까지 검증한다. 인증된 Remote transport는
+`RemoteTaskCageClient`로 별도 제공하며, Remote Raw Command는 노출하지 않는다.
 
 ## Core SDK 역할
 
@@ -27,6 +27,32 @@ Java application
                   ▼
               taskcaged
 ```
+
+## Remote Profile 실행
+
+Remote daemon에는 TLS 1.3과 service-account 인증이 필수다. Local UDS용 `TaskCageClient`와 Remote의
+`RemoteTaskCageClient`는 의도적으로 분리되어 있어, 원격에서는 Raw Command를 호출할 수 없다.
+
+```java
+RemoteConnectionOptions options = RemoteConnectionOptions.builder(
+        URI.create("taskcage+tls://taskcage.internal:7443"),
+        ServiceCredentials.of("document-worker", Secret.fromEnvironment("TASKCAGE_CLIENT_SECRET")))
+    .connectTimeout(Duration.ofSeconds(3))
+    .requestTimeout(Duration.ofSeconds(30))
+    .build();
+
+try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(options)) {
+    RemoteArtifactUpload source = client.upload(Path.of("input.mp3"), "audio/mpeg");
+    RemoteProfileTask task = client.submitProfile(new RemoteProfileRequest(
+        new ProfileIdentity("ffmpeg-audio-to-wav", "1.0.0"),
+        Map.of("source", source.asInput())));
+    RemoteProfileTaskSnapshot snapshot = client.getProfileResult(task.taskId());
+}
+```
+
+`upload`은 daemon이 준 chunk 상한을 따르고 digest를 검증한다. input Artifact는 첫 수락된 Profile Task에
+단 한 번만 소비된다. 제출 응답이 유실되면 같은 `clientRequestId`와 같은 `RemoteProfileRequest`로 재제출해야
+한다. output은 완료 snapshot의 `ManagedOutputArtifact`를 `download()`로 local `Path`에 받는다.
 
 `0.1.0`은 처음 사용하는 Java 개발자가 10분 안에 SDK를 설치하고, 같은 Linux
 호스트의 `taskcaged`를 통해 FFmpeg 작업 하나를 안전하게 실행하는 것이다. Profile·Bundle·Hub보다
