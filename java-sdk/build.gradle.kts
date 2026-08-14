@@ -94,10 +94,19 @@ val ffmpegE2eTest by sourceSets.creating {
     runtimeClasspath += output + compileClasspath
 }
 
+val remoteE2eTest by sourceSets.creating {
+    java.srcDir("src/remoteE2eTest/java")
+    resources.srcDir("src/remoteE2eTest/resources")
+    compileClasspath += sourceSets.main.get().output
+    runtimeClasspath += output + compileClasspath
+}
+
 configurations[e2eTest.implementationConfigurationName].extendsFrom(configurations.testImplementation.get())
 configurations[e2eTest.runtimeOnlyConfigurationName].extendsFrom(configurations.testRuntimeOnly.get())
 configurations[ffmpegE2eTest.implementationConfigurationName].extendsFrom(configurations.testImplementation.get())
 configurations[ffmpegE2eTest.runtimeOnlyConfigurationName].extendsFrom(configurations.testRuntimeOnly.get())
+configurations[remoteE2eTest.implementationConfigurationName].extendsFrom(configurations.testImplementation.get())
+configurations[remoteE2eTest.runtimeOnlyConfigurationName].extendsFrom(configurations.testRuntimeOnly.get())
 
 tasks.test {
     useJUnitPlatform()
@@ -147,6 +156,19 @@ tasks.register<Test>("ffmpegE2eTest") {
             require(!System.getenv(name).isNullOrBlank()) {
                 "ffmpegE2eTest requires $name"
             }
+        }
+    }
+}
+
+tasks.register<Test>("remoteE2eTest") {
+    group = "verification"
+    description = "Runs the Java Remote TLS client against a real Linux TaskCage daemon."
+    testClassesDirs = remoteE2eTest.output.classesDirs
+    classpath = remoteE2eTest.runtimeClasspath
+    useJUnitPlatform()
+    doFirst {
+        listOf("TASKCAGE_REMOTE_ENDPOINT", "TASKCAGE_REMOTE_CLIENT_ID", "TASKCAGE_REMOTE_SECRET", "TASKCAGE_REMOTE_CA_PEM").forEach { name ->
+            require(!System.getenv(name).isNullOrBlank()) { "remoteE2eTest requires $name" }
         }
     }
 }
