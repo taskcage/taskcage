@@ -1,7 +1,6 @@
 package org.taskcage.sdk;
 
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
@@ -14,13 +13,15 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Contract test for Java's TLS client against a daemon configured with the opt-in file-copy Profile. */
 class RemoteTlsDaemonContractTest {
     @Test
     void uploadsSubmitsAndDownloadsThroughTheRemoteDaemon() throws Exception {
-        byte[] sourceBytes = "TaskCage Remote TLS E2E\n".getBytes(StandardCharsets.UTF_8);
+        byte[] sourceBytes = new byte[1_600_003];
+        for (int index = 0; index < sourceBytes.length; index++) sourceBytes[index] = (byte) (index % 251);
         Path source = Files.createTempFile("taskcage-remote-source-", ".txt");
         Path destination = Files.createTempFile("taskcage-remote-output-", ".txt");
         try {
@@ -40,6 +41,21 @@ class RemoteTlsDaemonContractTest {
                 assertArrayEquals(sourceBytes, Files.readAllBytes(destination));
             }
         } finally { Files.deleteIfExists(source); Files.deleteIfExists(destination); }
+    }
+
+    @Test
+    void rejectsInvalidServiceAccountSecret() throws Exception {
+        RemoteConnectionOptions invalid = RemoteConnectionOptions.builder(
+                        URI.create(System.getenv("TASKCAGE_REMOTE_ENDPOINT")),
+                        ServiceCredentials.of(System.getenv("TASKCAGE_REMOTE_CLIENT_ID"), Secret.of("not-the-daemon-secret")))
+                .sslContext(trustContext(Path.of(System.getenv("TASKCAGE_REMOTE_CA_PEM"))))
+                .build();
+
+        try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(invalid)) {
+            TaskCageDaemonException exception = assertThrows(TaskCageDaemonException.class, client::capabilities);
+            assertEquals("AUTHENTICATION_FAILED", exception.code());
+            assertEquals(false, exception.retryable());
+        }
     }
 
     private static RemoteProfileTaskSnapshot awaitFinished(RemoteTaskCageClient client, java.util.UUID taskId) throws Exception {
