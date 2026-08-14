@@ -20,6 +20,7 @@ import org.taskcage.sdk.RemoteArtifactUpload;
 import org.taskcage.sdk.RemoteArtifactUploadStart;
 import org.taskcage.sdk.RemoteArtifactUploadState;
 import org.taskcage.sdk.RemoteArtifactChunkProgress;
+import org.taskcage.sdk.RemoteArtifactChunk;
 import org.taskcage.sdk.RemoteBooleanInput;
 import org.taskcage.sdk.RemoteCapabilities;
 import org.taskcage.sdk.RemoteInt64Input;
@@ -44,6 +45,7 @@ import org.taskcage.sdk.TerminationReason;
 import org.taskcage.sdk.ServiceCredentials;
 import org.taskcage.sdk.TaskCageDaemonException;
 import org.taskcage.sdk.TaskCageProtocolException;
+import org.taskcage.sdk.TaskCancellation;
 
 /** Encoder and envelope validator for Remote Protocol v1. */
 public final class RemoteProtocolCodec {
@@ -140,6 +142,14 @@ public final class RemoteProtocolCodec {
             encodeResourceOverrides(payload.putObject("resourceOverrides"), request.resourceOverrides());
         }
         return write(envelope(requestId, "submitProfile", payload));
+    }
+
+    public byte[] getProfileResult(UUID requestId, UUID taskId) {
+        return write(envelope(requestId, "getProfileResult", artifactIdPayload(taskId)));
+    }
+
+    public byte[] cancelTask(UUID requestId, UUID taskId) {
+        return write(envelope(requestId, "cancelTask", artifactIdPayload(taskId)));
     }
 
     public JsonNode readAndValidate(byte[] bytes, UUID requestId) {
@@ -289,6 +299,31 @@ public final class RemoteProtocolCodec {
             };
         } catch (IllegalArgumentException exception) {
             throw new TaskCageProtocolException("invalid remote profileResult payload", exception);
+        }
+    }
+
+    public TaskCancellation decodeTaskCancelled(JsonNode response) {
+        requireType(response, "taskCancelled");
+        JsonNode payload = response.path("payload");
+        try {
+            return new TaskCancellation(UUID.fromString(requiredText(payload, "taskId")),
+                    enumValue(payload, "state", org.taskcage.sdk.TaskState.class),
+                    enumValue(payload, "terminationReason", TerminationReason.class));
+        } catch (IllegalArgumentException exception) {
+            throw new TaskCageProtocolException("invalid taskCancelled response payload", exception);
+        }
+    }
+
+    public RemoteArtifactChunk decodeArtifactChunk(JsonNode response) {
+        requireType(response, "artifactChunk");
+        JsonNode payload = response.path("payload");
+        try {
+            return new RemoteArtifactChunk(UUID.fromString(requiredText(payload, "artifactId")),
+                    requiredNonNegativeLong(payload, "offset"),
+                    Base64.getDecoder().decode(requiredText(payload, "dataBase64")),
+                    requiredNonNegativeLong(payload, "nextOffset"), requiredBoolean(payload, "finished"));
+        } catch (IllegalArgumentException exception) {
+            throw new TaskCageProtocolException("invalid artifactChunk response payload", exception);
         }
     }
 
