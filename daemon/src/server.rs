@@ -648,7 +648,7 @@ fn invalid_request_response(request_id: String) -> Response {
     }
 }
 
-fn submit_context(cleanup_timeout: Duration) -> SubmitContext {
+pub(crate) fn submit_context(cleanup_timeout: Duration) -> SubmitContext {
     let submitted_at = timestamp_now();
     SubmitContext::new(
         SubmitMetadata::lazy(

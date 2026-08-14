@@ -33,6 +33,14 @@ pub mod preflight;
 #[cfg(target_os = "linux")]
 mod profile;
 pub mod protocol;
+pub mod remote_artifact;
+pub mod remote_auth;
+#[cfg(target_os = "linux")]
+mod remote_backend;
+pub mod remote_config;
+pub mod remote_dispatch;
+pub mod remote_protocol;
+pub mod remote_server;
 pub mod resource_budget;
 #[cfg(target_os = "linux")]
 mod runner;
@@ -164,6 +172,7 @@ pub struct DaemonConfig {
     fail_stop_timeout: Duration,
     deployment_policy: deployment_policy::DeploymentResourcePolicy,
     local_profile: Option<LocalProfileConfig>,
+    remote: Option<remote_config::RemoteDaemonConfig>,
 }
 
 /// 명시적으로 활성화한 v0.2 test Profile의 daemon-owned Artifact root 설정이다.
@@ -259,6 +268,7 @@ impl DaemonConfig {
             fail_stop_timeout,
             deployment_policy,
             local_profile: None,
+            remote: None,
         })
     }
 
@@ -321,6 +331,14 @@ impl DaemonConfig {
             ));
         }
         local_profile.ffmpeg_audio_to_wav = Some(FfmpegRuntimePackageConfig { cache_root, digest });
+        Ok(self)
+    }
+
+    /// 승인된 Remote Protocol v1 listener deployment 설정을 추가한다.
+    pub fn with_remote_config(mut self, path: PathBuf) -> Result<Self> {
+        let remote = remote_config::RemoteDaemonConfig::load(&path)
+            .map_err(|error| Error::InvalidArgument(error.to_string()))?;
+        self.remote = Some(remote);
         Ok(self)
     }
 }
@@ -411,18 +429,46 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         local_profile,
     )?);
     tracing::info!(event = "daemon_started", "TaskCage daemon started");
-    let result = server::serve_protocol_until(
-        startup,
-        config.cleanup_timeout,
-        config.max_concurrent_connections,
-        handlers,
-        shutdown_signal(),
-    )
-    .await
-    .map_err(|error| match error {
-        server::ServerError::FailStop { task_id, stage } => Error::FailStop { task_id, stage },
-        other => Error::Server(other.to_string()),
-    });
+    let result = if let Some(remote) = config.remote {
+        if config.local_profile.is_none() {
+            return Err(Error::InvalidArgument(
+                "Remote listener에는 daemon-installed Profile 설정이 필요합니다".to_owned(),
+            ));
+        }
+        let artifacts = remote_artifact::RemoteArtifactStore::open(
+            &remote.artifact_root,
+            remote.max_artifact_bytes.get(),
+            remote.max_artifact_chunk_bytes.get(),
+            remote.artifact_retention,
+        )
+        .map_err(|error| Error::InvalidArgument(error.to_string()))?;
+        let credentials = remote_auth::CredentialStore::new(remote.principals.clone());
+        let backend = Arc::new(remote_backend::LocalProfileRemoteBackend::new(
+            Arc::clone(&handlers),
+            config.cleanup_timeout,
+        ));
+        let dispatcher = Arc::new(remote_dispatch::RemoteDispatcher::new(artifacts, backend));
+        serve_local_and_remote(
+            startup,
+            config.cleanup_timeout,
+            config.max_concurrent_connections,
+            handlers,
+            Arc::new(remote),
+            credentials,
+            dispatcher,
+        )
+        .await
+    } else {
+        server::serve_protocol_until(
+            startup,
+            config.cleanup_timeout,
+            config.max_concurrent_connections,
+            handlers,
+            shutdown_signal(),
+        )
+        .await
+        .map_err(map_local_server_error)
+    };
     if result.is_ok() {
         tracing::info!(
             event = "daemon_stopped",
@@ -437,6 +483,120 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         );
     }
     result
+}
+
+#[cfg(target_os = "linux")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "local과 Remote listener의 명시적 runtime ownership이다"
+)]
+async fn serve_local_and_remote(
+    startup: StartupOwnership,
+    cleanup_timeout: Duration,
+    max_local_connections: NonZeroUsize,
+    handlers: Arc<ProtocolHandlers<submit::SubmitCoordinator>>,
+    remote: Arc<remote_config::RemoteDaemonConfig>,
+    credentials: remote_auth::CredentialStore,
+    dispatcher: Arc<remote_dispatch::RemoteDispatcher<remote_backend::LocalProfileRemoteBackend>>,
+) -> Result<()> {
+    let (shutdown_sender, shutdown_receiver) = tokio::sync::watch::channel(false);
+    let local_shutdown_receiver = shutdown_receiver.clone();
+    let local_shutdown = async move {
+        wait_for_listener_shutdown(local_shutdown_receiver).await;
+        Ok(())
+    };
+    let remote_shutdown = wait_for_listener_shutdown(shutdown_receiver.clone());
+    let local = server::serve_protocol_until(
+        startup,
+        cleanup_timeout,
+        max_local_connections,
+        Arc::clone(&handlers),
+        local_shutdown,
+    );
+    let reload = reload_remote_credentials(
+        remote.source_path.clone(),
+        credentials.clone(),
+        shutdown_receiver,
+    );
+    let remote_listener =
+        remote_server::serve_remote_until(remote, credentials, dispatcher, remote_shutdown);
+    tokio::pin!(local);
+    tokio::pin!(remote_listener);
+    tokio::pin!(reload);
+    enum First {
+        Local(std::result::Result<(), server::ServerError>),
+        Remote(std::result::Result<(), remote_server::RemoteServerError>),
+        Reload(std::result::Result<(), io::Error>),
+        Signal(std::result::Result<(), io::Error>),
+    }
+    let first = tokio::select! {
+        result = &mut local => First::Local(result),
+        result = &mut remote_listener => First::Remote(result),
+        result = &mut reload => First::Reload(result),
+        result = shutdown_signal() => First::Signal(result),
+    };
+    let _ = shutdown_sender.send(true);
+    let (local_result, remote_result) = match first {
+        First::Local(local_result) => (local_result, remote_listener.await),
+        First::Remote(remote_result) => (local.await, remote_result),
+        First::Reload(reload_result) => {
+            reload_result.map_err(Error::Signal)?;
+            tokio::join!(&mut local, &mut remote_listener)
+        }
+        First::Signal(signal) => {
+            signal.map_err(Error::Signal)?;
+            tokio::join!(&mut local, &mut remote_listener)
+        }
+    };
+    local_result.map_err(map_local_server_error)?;
+    remote_result.map_err(|error| Error::Server(error.to_string()))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn reload_remote_credentials(
+    path: PathBuf,
+    credentials: remote_auth::CredentialStore,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> io::Result<()> {
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    loop {
+        tokio::select! {
+            _ = hangup.recv() => {
+                match remote_config::RemoteDaemonConfig::load(&path) {
+                    Ok(config) => {
+                        credentials.replace_all(config.principals);
+                        tracing::info!(event = "remote_credentials_reloaded", "Remote principal 설정을 다시 읽었습니다");
+                    }
+                    Err(error) => {
+                        tracing::error!(event = "remote_credentials_reload_failed", cause = %error, "Remote principal 설정 reload에 실패했습니다");
+                    }
+                }
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_listener_shutdown(mut receiver: tokio::sync::watch::Receiver<bool>) {
+    while !*receiver.borrow() {
+        if receiver.changed().await.is_err() {
+            break;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn map_local_server_error(error: server::ServerError) -> Error {
+    match error {
+        server::ServerError::FailStop { task_id, stage } => Error::FailStop { task_id, stage },
+        other => Error::Server(other.to_string()),
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]

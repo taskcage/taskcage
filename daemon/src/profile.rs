@@ -446,6 +446,33 @@ impl LocalProfileRuntime {
         })
     }
 
+    pub(crate) fn stage_daemon_input(
+        &self,
+        task_id: &str,
+        prepared: PreparedProfile,
+        source: File,
+    ) -> Result<StagedProfile, ProfileError> {
+        let staged = self
+            .artifacts
+            .stage_daemon_input(task_id, &prepared.source, prepared.output, source)
+            .map_err(profile_stage_error)?;
+        Ok(StagedProfile {
+            request: prepared.request,
+            budget: prepared.budget,
+            staged,
+            execution: prepared.execution,
+            output_slot: prepared.output_slot,
+        })
+    }
+
+    pub(crate) fn open_published_artifact(&self, path: &str) -> Result<File, ProfileError> {
+        let path = ArtifactPath::parse(path.to_owned())
+            .map_err(|error| ProfileError::new(ErrorCode::InternalError, error.to_string()))?;
+        self.artifacts
+            .open_published_artifact(&path)
+            .map_err(profile_stage_error)
+    }
+
     pub(crate) fn new_task(
         &self,
         task_id: &str,
