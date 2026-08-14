@@ -30,15 +30,41 @@ readonly bundles_directory
 readonly repository_directory="${temporary_root}/repository"
 mkdir -p -- "${repository_directory}"
 
-"${repository_root}/scripts/release/build-validation-central-bundle.sh" 0.2.0 "${bundles_directory}"
+release_version() {
+  local project_directory="$1"
+  local component_name="$2"
+  local version
+
+  version="$(
+    "${repository_root}/java-sdk/gradlew" \
+      -p "${project_directory}" \
+      properties \
+      --no-daemon \
+      --no-problems-report \
+      --quiet | \
+      awk -F ': ' '$1 == "version" { print $2; exit }'
+  )"
+  [[ -n "${version}" ]] || {
+    echo "ERROR: ${component_name} version could not be read" >&2
+    exit 1
+  }
+  printf '%s\n' "${version}"
+}
+
+readonly java_sdk_version="$(release_version "${repository_root}/java-sdk" "java-sdk")"
+readonly ffmpeg_binding_version="$(release_version "${repository_root}/java-bindings/ffmpeg" "ffmpeg-binding")"
+
+"${repository_root}/scripts/release/build-validation-central-bundle.sh" \
+  "${java_sdk_version}" \
+  "${bundles_directory}"
 "${repository_root}/scripts/release/build-validation-ffmpeg-binding-central-bundle.sh" \
-  0.1.0 \
+  "${ffmpeg_binding_version}" \
   "${bundles_directory}"
 
 (
   cd "${repository_directory}"
-  jar --extract --file "${bundles_directory}/taskcage-java-sdk-0.2.0-central.zip"
-  jar --extract --file "${bundles_directory}/taskcage-ffmpeg-binding-0.1.0-central.zip"
+  jar --extract --file "${bundles_directory}/taskcage-java-sdk-${java_sdk_version}-central.zip"
+  jar --extract --file "${bundles_directory}/taskcage-ffmpeg-binding-${ffmpeg_binding_version}-central.zip"
 )
 
 TASKCAGE_RELEASE_REPOSITORY="${repository_directory}" \

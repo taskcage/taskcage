@@ -174,7 +174,7 @@ operation을 처리하지 않으며 daemon은 연결을 닫는다.
   "requestId": "22222222-2222-4222-8222-222222222222",
   "type": "capabilities",
   "payload": {
-    "daemonVersion": "0.3.0",
+    "daemonVersion": "0.4.0",
     "remoteProtocolVersions": [1],
     "maxFrameBytes": 1048576,
     "artifactModes": ["MANAGED_TRANSFER"],
