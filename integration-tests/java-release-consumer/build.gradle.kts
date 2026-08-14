@@ -24,5 +24,5 @@ repositories {
 }
 
 dependencies {
-    implementation("org.taskcage:taskcage-ffmpeg-binding:0.1.0")
+    implementation("org.taskcage:taskcage-java-sdk:${requireNotNull(System.getenv("TASKCAGE_JAVA_SDK_VERSION"))}")
 }
