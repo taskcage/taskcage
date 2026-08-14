@@ -2,15 +2,13 @@
 
 TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`에 작업을 제출·조회·취소하도록 제공하는 Java 17+ 라이브러리다. cgroup과 Protocol v1의 세부 사항은 SDK 내부에 숨기고 명령, 자원 예산, 상태와 결과를 Java 타입으로 제공한다.
 
-> **상태:** `0.1.0` Local Public Alpha prerelease가
-> [Maven Central](https://repo1.maven.org/maven2/org/taskcage/taskcage-java-sdk/0.1.0/)에 공개됐다.
-> 현재 source의 다음 release version은 `0.2.0`이며 공개 전까지 Maven Central에서는 `0.1.0`을 사용한다.
-> `0.x`는 초기 개발 버전이며 SDK는 Spring Boot에 의존하지 않는다.
+> **상태:** `0.2.0`은 Local UDS Raw Command와 opt-in Local Profile을 제공하는 공개 릴리스다.
+> `main`의 Remote TLS Profile·Artifact API와 Docker Compose E2E는 다음 SDK 릴리스 후보이며 아직
+> Maven Central artifact에는 포함되지 않았다. `0.x`는 초기 개발 버전이며 SDK는 Spring Boot에 의존하지 않는다.
 
-공개된 `0.1.0`은 Local UDS transport와 Raw Command 모델을 구현한다. `0.2.0` release candidate에는 승인된
-[Local Profile Core API v2](../docs/api-profile-v2.md)의 Java 모델과 client가 추가됐고, opt-in
-`file-copy@1.0.0` Profile을 사용하는 실제 Linux daemon E2E까지 검증한다. 인증된 Remote transport는
-`RemoteTaskCageClient`로 별도 제공하며, Remote Raw Command는 노출하지 않는다.
+공개된 `0.2.0`은 Local UDS transport, Raw Command와 opt-in [Local Profile Core API v2](../docs/api-profile-v2.md)를
+구현한다. `main`은 인증된 Remote transport를 `RemoteTaskCageClient`로 별도 제공하며, Remote Raw Command는
+의도적으로 노출하지 않는다.
 
 ## Core SDK 역할
 
@@ -196,7 +194,7 @@ daemon과 Java Core SDK는 독립적으로 버전을 관리하고 배포한다. 
 버전 문자열이 아니라 양쪽이 지원하는 Protocol 버전으로 판단한다.
 
 ```text
-Daemon tag:     taskcaged-v0.2.0
+Daemon tag:     taskcaged-v0.3.0
 Java SDK tag:   java-sdk-v0.2.0
 Java Core SDK:  0.2.0
 Protocol:       v1, v2
@@ -206,7 +204,7 @@ Maven Central에는 다음 좌표로 main, sources와 javadoc artifact가 서명
 
 ```kotlin
 dependencies {
-    implementation("org.taskcage:taskcage-java-sdk:0.1.0")
+    implementation("org.taskcage:taskcage-java-sdk:0.2.0")
 }
 ```
 
@@ -234,8 +232,8 @@ workflow로 검증한다.
    계약을 구현하고 가짜 daemon 단위 테스트와 실제 daemon reference E2E를 추가했다.
 3. **동기 실행 — 구현됨:** `run()`을 `TaskHandle` 계약 위에 구현하고 실제 daemon·FFmpeg E2E로 정상
    종료·Task wall-time timeout·출력 결과를 검증했다. 명시적 취소는 `TaskHandle.cancel()`을 사용한다.
-4. **배포 — 0.2.0 준비 완료:** Maven Central publishing, 서명, POM metadata, sources/javadoc artifact와
-   독립 `java-sdk-v0.2.0` 검증 pipeline을 구성했다. 공개 tag와 Central publish는 검증된 `main`에서 수행한다.
+4. **배포 — 0.2.0 공개 완료:** Maven Central publishing, 서명, POM metadata, sources/javadoc artifact와
+   독립 `java-sdk-v0.2.0` 검증 pipeline을 구성했고, 공개 tag와 Central publish를 완료했다.
 5. **첫 사용자 경로 — 구현됨:** FFmpeg reference workflow와 설치·daemon 연결·실행·문제 해결 문서를
    제공한다.
 
@@ -263,12 +261,11 @@ workflow로 검증한다.
 ./gradlew build
 ```
 
-일반 빌드 결과는 `build/libs/`에 생성된다. 현재 공개된 Public Alpha는 다음 좌표로 설치한다. `0.2.0`은
-Maven Central 공개가 확인된 뒤 이 값을 갱신한다.
+일반 빌드 결과는 `build/libs/`에 생성된다. 현재 공개된 Local Product Alpha는 다음 좌표로 설치한다.
 
 ```kotlin
 dependencies {
-    implementation("org.taskcage:taskcage-java-sdk:0.1.0")
+    implementation("org.taskcage:taskcage-java-sdk:0.2.0")
 }
 ```
 

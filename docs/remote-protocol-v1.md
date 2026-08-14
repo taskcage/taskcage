@@ -1,7 +1,8 @@
 # TaskCage Remote Protocol v1
 
-> 상태: daemon과 SDK 구현을 시작하기 위한 **승인된 공통 계약**이다. Local UDS Protocol v1/v2를
-> TCP에 그대로 공개하는 규격이 아니며, Remote Raw Command는 지원하지 않는다.
+> 상태: daemon과 Java SDK 구현 및 Docker Compose 상호운용 E2E가 `main`에서 이 계약을 따른다. 다음
+> component release 전까지는 공개 배포 계약이 아니다. Local UDS Protocol v1/v2를 TCP에 그대로 공개하는
+> 규격이 아니며, Remote Raw Command는 지원하지 않는다.
 
 ## 목적과 범위
 

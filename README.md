@@ -2,10 +2,10 @@
 
 TaskCage는 신뢰된 외부 프로세스를 작업 단위로 실행하고, Linux cgroup v2로 자원과 수명주기를 관리하는 경량 런타임이다.
 
-> **상태:** daemon과 Java SDK `0.1.0` Local Public Alpha prerelease가 공개됐다. daemon은
-> [GitHub Release](https://github.com/taskcage/taskcage/releases/tag/taskcaged-v0.1.0), Java SDK는
-> [Maven Central](https://repo1.maven.org/maven2/org/taskcage/taskcage-java-sdk/0.1.0/)에서 설치할 수 있다.
-> `0.x`는 초기 개발 버전이며 공개 API와 운영 계약이 이후 minor 버전에서 변경될 수 있다.
+> **상태:** 공개된 최신 Local 릴리스는 daemon `0.3.0`, Java SDK `0.2.0`이다. `main`에는 다음
+> 컴포넌트 릴리스에 포함될 Remote Protocol v1 구현과 Docker Compose E2E가 추가되어 있다. Remote 기능은
+> 아직 공개 artifact로 배포되지 않았으므로, 설치·운영 기준은 각 공개 GitHub Release와 Maven Central
+> 버전을 따른다. `0.x`는 초기 개발 버전이며 공개 API와 운영 계약이 이후 minor 버전에서 변경될 수 있다.
 
 제품의 장기 방향과 표준 용어는 [제품 철학과 용어](docs/product-philosophy.md)에서 정의한다. 이 README는
 현재 구현하고 공개한 Local Public Alpha 범위를 설명한다.
