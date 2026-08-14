@@ -16,29 +16,28 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Contract test for Java's TLS client against a daemon configured with an authorized FFmpeg Profile. */
+/** Contract test for Java's TLS client against a daemon configured with the opt-in file-copy Profile. */
 class RemoteTlsDaemonContractTest {
     @Test
     void uploadsSubmitsAndDownloadsThroughTheRemoteDaemon() throws Exception {
-        byte[] sourceBytes = wavFixture();
-        Path source = Files.createTempFile("taskcage-remote-source-", ".wav");
-        Path destination = Files.createTempFile("taskcage-remote-output-", ".wav");
+        byte[] sourceBytes = "TaskCage Remote TLS E2E\n".getBytes(StandardCharsets.UTF_8);
+        Path source = Files.createTempFile("taskcage-remote-source-", ".txt");
+        Path destination = Files.createTempFile("taskcage-remote-output-", ".txt");
         try {
             Files.write(source, sourceBytes);
             try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(options())) {
                 assertTrue(client.capabilities().supportsManagedTransfer());
-                RemoteArtifactUpload uploaded = client.upload(source, "audio/wav");
+                RemoteArtifactUpload uploaded = client.upload(source, "text/plain");
                 RemoteProfileTask task = client.submitProfile(new RemoteProfileRequest(
-                        new ProfileIdentity("ffmpeg-audio-to-wav", "1.0.0"),
-                        Map.of("source", uploaded.asInput(), "sample_rate_hz", new RemoteInt64Input(8000),
-                                "channels", new RemoteInt64Input(1))));
+                        new ProfileIdentity("file-copy", "1.0.0"),
+                        Map.of("source", uploaded.asInput(), "label", new RemoteStringInput("remote"),
+                                "retain_metadata", new RemoteBooleanInput(true), "priority", new RemoteInt64Input(1))));
                 RemoteProfileTaskSnapshot snapshot = awaitFinished(client, task.taskId());
                 FinishedRemoteProfileTaskSnapshot finished = (FinishedRemoteProfileTaskSnapshot) snapshot;
                 assertEquals(ProfileOutcome.SUCCEEDED, finished.profileOutcome());
-                ManagedOutputArtifact output = finished.artifacts().get("audio");
+                ManagedOutputArtifact output = finished.artifacts().get("result");
                 client.download(output, destination);
-                assertArrayEquals("RIFF".getBytes(StandardCharsets.US_ASCII),
-                        java.util.Arrays.copyOf(Files.readAllBytes(destination), 4));
+                assertArrayEquals(sourceBytes, Files.readAllBytes(destination));
             }
         } finally { Files.deleteIfExists(source); Files.deleteIfExists(destination); }
     }
@@ -69,5 +68,4 @@ class RemoteTlsDaemonContractTest {
         SSLContext context = SSLContext.getInstance("TLS"); context.init(null, managers.getTrustManagers(), null); return context;
     }
 
-    private static byte[] wavFixture() { return new byte[] {'R','I','F','F',36,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,1,0,64,31,0,0,-128,62,0,0,2,0,16,0,'d','a','t','a',0,0,0,0}; }
 }
