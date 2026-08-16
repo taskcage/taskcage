@@ -5,7 +5,9 @@ TaskCage는 daemon과 SDK의 버전을 독립적으로 관리한다. 이 문서�
 
 ## Unreleased
 
-### taskcaged 0.4.0
+현재 문서화된 변경 없음.
+
+## taskcaged 0.4.0 - 2026-08-14
 
 - TLS 1.3과 service-account 인증을 사용하는 Remote Protocol v1 daemon listener를 추가한다.
 - Remote principal별 Profile authorization, resource override 정책, connection·handshake·session 제한을 적용한다.
@@ -13,7 +15,7 @@ TaskCage는 daemon과 SDK의 버전을 독립적으로 관리한다. 이 문서�
 - Remote Task의 Profile 실행·조회·취소를 principal 경계 안에서 제공하고, Local UDS Task·Artifact와 분리한다.
 - Linux ARM64 Runtime Package와 GitHub Release archive를 지원한다.
 
-### TaskCage Java SDK 0.3.0
+## TaskCage Java SDK 0.3.0 - 2026-08-14 (Maven Central)
 
 - `RemoteTaskCageClient`로 TLS 1.3 Remote Profile 실행, 조회와 취소를 제공한다. Remote Raw Command는 제공하지 않는다.
 - `Path` 기반 Managed Artifact upload/download를 bounded chunk와 증분 SHA-256 검증으로 처리한다.
@@ -21,7 +23,14 @@ TaskCage는 daemon과 SDK의 버전을 독립적으로 관리한다. 이 문서�
 - Docker Compose에서 다중 chunk transfer, Profile 실행, output download와 인증 거부를 실제 daemon과 검증한다.
 - Remote Profile 실행에는 `taskcaged` 0.4.0 이상이 필요하다.
 
-### taskcaged 0.2.0 release candidate
+## taskcaged 0.3.0 - 2026-08-13
+
+- Linux x86-64와 함께 native ARM64 Runtime Package와 release archive를 지원한다.
+- Runtime Package architecture가 실행 host와 정확히 일치하는지 검증한다.
+- bootstrap installer가 host architecture에 맞는 archive를 선택한다.
+- ARM64 Runtime Package, container E2E와 release packaging을 CI에서 검증한다.
+
+## taskcaged 0.2.0 - 2026-08-12
 
 - Protocol v1 Raw Command 동작을 유지하면서 Protocol v2 Local Execution Profile 제출과 결과 조회를 추가한다.
 - owner-controlled Local Artifact root에서 입력 snapshot을 검증하고, Task 정리 뒤에만 선언된 출력 Artifact를
@@ -31,21 +40,6 @@ TaskCage는 daemon과 SDK의 버전을 독립적으로 관리한다. 이 문서�
 - `file-copy@1.0.0`과 opt-in `ffmpeg-audio-to-wav@1.0.0` Profile을 제공한다.
 - Runtime Package 실행은 검증된 entrypoint descriptor를 사용하며 shell과 `PATH` lookup을 거치지 않는다.
 - Local UDS, Ubuntu 24.04 x86-64와 Protocol v1·v2를 지원한다. Hub와 Remote transport는 포함하지 않는다.
-
-### TaskCage Java SDK 0.2.0 release candidate
-
-- Protocol v1 Raw Command API를 유지하면서 Protocol v2 Local Profile 제출·조회·대기·취소 API를 추가한다.
-- typed Profile input, Local Artifact reference, resource override와 published Artifact 결과 모델을 제공한다.
-- 공유 Protocol v2 fixture, 실제 daemon Profile E2E와 FFmpeg Binding E2E로 호환성을 검증한다.
-- Java 17 이상, Local UDS와 Protocol v1·v2를 지원한다. Remote transport는 포함하지 않는다.
-
-### TaskCage FFmpeg Binding 0.1.0 release candidate
-
-- `ffmpeg-audio-to-wav@1.0.0` Profile을 Java typed request와 result로 제공한다.
-- FFmpeg executable path와 argv를 애플리케이션 API에서 숨기고 mono/stereo와 16/44.1/48 kHz 출력을 제한된
-  enum으로 선택한다.
-- `org.taskcage:taskcage-java-sdk:0.2.0`을 transitive dependency로 사용한다.
-- taskcaged `0.2.0`, 검증된 FFmpeg Runtime Package와 Local Artifact root가 필요하다.
 
 ### 수정
 
@@ -57,6 +51,21 @@ TaskCage는 daemon과 SDK의 버전을 독립적으로 관리한다. 이 문서�
 
 - 배포되는 Ubuntu service는 `DelegateSubgroup=`를 지원하는 systemd 254 이상이 필요하다. 지원 기준인
   Ubuntu 24.04는 이 요구사항을 충족한다.
+
+## TaskCage Java SDK 0.2.0 - 2026-08-12
+
+- Protocol v1 Raw Command API를 유지하면서 Protocol v2 Local Profile 제출·조회·대기·취소 API를 추가한다.
+- typed Profile input, Local Artifact reference, resource override와 published Artifact 결과 모델을 제공한다.
+- 공유 Protocol v2 fixture, 실제 daemon Profile E2E와 FFmpeg Binding E2E로 호환성을 검증한다.
+- Java 17 이상, Local UDS와 Protocol v1·v2를 지원한다. Remote transport는 포함하지 않는다.
+
+## TaskCage FFmpeg Binding 0.1.0 - 2026-08-12
+
+- `ffmpeg-audio-to-wav@1.0.0` Profile을 Java typed request와 result로 제공한다.
+- FFmpeg executable path와 argv를 애플리케이션 API에서 숨기고 mono/stereo와 16/44.1/48 kHz 출력을 제한된
+  enum으로 선택한다.
+- `org.taskcage:taskcage-java-sdk:0.2.0`을 transitive dependency로 사용한다.
+- taskcaged `0.2.0`, 검증된 FFmpeg Runtime Package와 Local Artifact root가 필요하다.
 
 ## TaskCage Java SDK 0.1.0 - 2026-08-11
 

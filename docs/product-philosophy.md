@@ -5,8 +5,10 @@
 TaskCage는 신뢰된 외부 프로세스를 호출 코드의 부수 효과가 아니라, 재현 가능하고 제한된 실행 계약으로 다루게 하는 Linux-native process runtime이다.
 
 이 문서는 제품 수준의 방향과 공개 용어를 정의한다. 현재 구현된 wire 계약은
-[Local Protocol v1 API 명세](api-mvp.md)를 따르며, 아직 결정되지 않은 Remote topology·보안·wire 세부사항은
-별도의 설계와 API 계약이 확정되기 전에는 구현 대상으로 간주하지 않는다.
+[Local Protocol v1 API 명세](api-mvp.md), [Local Profile Core API v2](api-profile-v2.md)와
+[Remote Protocol v1](remote-protocol-v1.md)을 따른다. Remote는 TLS 1.3, service-account 인증,
+Profile authorization과 관리되는 Artifact 전송을 사용하는 별도 opt-in 경로이며 Local framing을 그대로
+network에 노출하지 않는다.
 
 ## 우리가 믿는 것
 
@@ -93,20 +95,20 @@ cgroup controller, 권한, 원자적 task cgroup entry 또는 제한값 read-bac
 상태로 실행하지 않는다. whole-task cleanup을 증명할 수 없다면 새 Task를 시작하지 않고, 필요하면
 fail-stop과 시작 복구를 선택한다.
 
-### 6. Local에서 Core 계약을 먼저 검증하고 Remote는 나중에 확장한다
+### 6. Local Core 계약을 유지하고 Remote는 제한된 별도 경로로 제공한다
 
 Core SDK는 장기적으로 transport와 상관없이 같은 Task·결과·종료 원인 계약을 제공한다.
 
 ```text
 TaskCage Core SDK
-├─ Current: Local Transport (UDS)
-└─ Later: authenticated Remote Transport
+├─ Local Transport (UDS): Raw Command와 Profile
+└─ Remote Transport (TLS): 승인된 Profile과 관리되는 Artifact
 ```
 
-현재 병합된 기준선은 Local UDS와 Protocol v1이다. 다음 단계인 Local Public Alpha는 Raw Command 실행을
-설치·운영·관찰 가능한 제품 경로로 검증한다. 최소 3명의 외부 사용자가 이 경로를 사용하고,
-Profile·Package·Artifact로 일반화할 반복 요구가 2개 이상 확인된 뒤에 Local Product Alpha 계약을
-확장한다.
+현재 공개 기준선은 Local UDS의 Raw Command·Profile과 인증된 Remote Profile 실행이다. Local과 Remote는
+같은 Task 결과·종료 원인·정리 계약을 유지하지만 transport와 허용된 실행 입력은 명시적으로 구분한다.
+Profile·Package·Artifact를 더 일반화하기 전에는 최소 3명의 외부 사용자가 현재 경로를 사용하고 반복 요구가
+확인되어야 한다.
 
 Remote는 Local Protocol v1 framing을 network에 그대로 노출하지 않는다. 원격 Profile 실행의 TLS,
 service-account authentication, authorization, Artifact reference와 failure contract는
@@ -131,7 +133,7 @@ TaskCage는 다음을 제공하는 것을 목표로 한다.
 - 외부 프로세스의 Task 단위 추상화
 - Linux cgroup v2 기반 자원·수명주기 관리
 - Execution Profile 기반 실행 계약
-- Local UDS와 이후 단계의 인증된 Remote runtime 연결
+- Local UDS와 인증된 Remote runtime 연결
 - 일관된 결과, Artifact와 종료 원인
 
 TaskCage는 다음을 기본 제공하지 않는다.
@@ -153,7 +155,7 @@ Hub server를 구현하거나 운영하지 않는다.
 | TaskCage | 신뢰된 외부 프로세스를 제한된 실행 계약으로 다루는 Linux-native process runtime |
 | Task | 특정 실행 계약을 입력과 자원 정책으로 수행하는 일회성 작업이며, cgroup v2 실행 경계·프로세스 트리·상태·결과를 포함하는 공개 실행 단위 |
 | TaskCage Daemon (`taskcaged`) | Task를 검증하고 task cgroup을 생성해 외부 프로세스를 실행·관찰·정리하는 runtime |
-| TaskCage Core SDK | Task 제출·조회·취소와 Local 연결을 제공하고, 이후 검증된 Execution Profile·Remote 연결로 확장하는 공통 SDK 계약 |
+| TaskCage Core SDK | Task 제출·조회·취소와 Local Raw Command·Profile, 인증된 Remote Profile 연결을 제공하는 공통 SDK 계약 |
 | Execution Profile | 입력·출력 schema, argv 구성 규칙, Runtime Package 참조와 기본 자원 정책을 정의한 버전 관리 실행 계약 |
 | TaskCage Bundle | Execution Profile, Runtime Package ref + digest, 호환성·정책·무결성 정보를 담은 불변 실행 계약 |
 | Runtime Package | 실행 binary와 필요한 library·codec·font·설정을 묶어 별도로 cache하는 플랫폼별 실행물 |

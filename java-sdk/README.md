@@ -1,19 +1,19 @@
 # TaskCage Java SDK
 
-TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`에 작업을 제출·조회·취소하도록 제공하는 Java 17+ 라이브러리다. cgroup과 Protocol v1의 세부 사항은 SDK 내부에 숨기고 명령, 자원 예산, 상태와 결과를 Java 타입으로 제공한다.
+TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`에 작업을 제출·조회·취소하도록 제공하는 Java 17+ 라이브러리다. cgroup과 Local Protocol v1·v2, Remote Protocol v1의 세부 사항은 SDK 내부에 숨기고 명령, Profile, Artifact, 자원 예산, 상태와 결과를 Java 타입으로 제공한다.
 
-> **상태:** `0.2.0`은 Local UDS Raw Command와 opt-in Local Profile을 제공하는 공개 릴리스다.
-> `main`의 Remote TLS Profile·Artifact API와 Docker Compose E2E는 `0.3.0` 릴리스 후보이며 아직
-> Maven Central artifact에는 포함되지 않았다. `0.x`는 초기 개발 버전이며 SDK는 Spring Boot에 의존하지 않는다.
+> **상태:** `0.3.0`은 Maven Central에 공개된 최신 artifact다. 기존 Local UDS Raw Command·Profile을
+> 유지하면서 TLS 1.3 Remote Profile·Artifact API를 추가한다. Remote Profile 실행에는 `taskcaged` `0.4.0`
+> 이상이 필요하다. `0.x`는 초기 개발 버전이며 SDK는 Spring Boot에 의존하지 않는다.
 
-공개된 `0.2.0`은 Local UDS transport, Raw Command와 opt-in [Local Profile Core API v2](../docs/api-profile-v2.md)를
-구현한다. `main`은 인증된 Remote transport를 `RemoteTaskCageClient`로 별도 제공하며, Remote Raw Command는
+`0.3.0`은 Local UDS transport, Raw Command, opt-in [Local Profile Core API v2](../docs/api-profile-v2.md)와
+인증된 Remote transport를 구현한다. Remote는 `RemoteTaskCageClient`로 별도 제공하며, Remote Raw Command는
 의도적으로 노출하지 않는다.
 
 ## Core SDK 역할
 
 이 모듈은 특정 외부 도구를 위한 Binding이 아니라 **TaskCage Java Core SDK**다. Java 객체와
-Protocol v1 사이를 변환하고, `taskcaged` 연결과 Task 생명주기를 공통 API로 제공한다.
+Local Protocol v1·v2와 Remote Protocol v1 사이를 변환하고, `taskcaged` 연결과 Task 생명주기를 공통 API로 제공한다.
 
 ```text
 Java application
@@ -21,7 +21,8 @@ Java application
     ├─ FFmpeg Profile Binding / 향후 Chromium Binding
     │             │
     └──── TaskCage Java Core SDK
-                  │ UDS / Protocol v1 + Local Profile v2
+                  ├─ UDS / Local Protocol v1·v2
+                  └─ TLS / Remote Protocol v1
                   ▼
               taskcaged
 ```
@@ -52,7 +53,7 @@ try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(options)) {
 단 한 번만 소비된다. 제출 응답이 유실되면 같은 `clientRequestId`와 같은 `RemoteProfileRequest`로 재제출해야
 한다. output은 완료 snapshot의 `ManagedOutputArtifact`를 `download()`로 local `Path`에 받는다.
 
-`0.1.0`은 처음 사용하는 Java 개발자가 10분 안에 SDK를 설치하고, 같은 Linux
+첫 사용자 경로의 목표는 Java 개발자가 10분 안에 SDK를 설치하고, 같은 Linux
 호스트의 `taskcaged`를 통해 FFmpeg 작업 하나를 안전하게 실행하는 것이다. Profile·Bundle·Hub보다
 현재 검증된 Raw Command 실행, 자원 제한과 프로세스 트리 정리를 쉽게 사용하는 경험을 우선한다.
 
@@ -115,7 +116,7 @@ Artifact root, 실행 파일, working directory 또는 output file name을 선�
 현재 호출자는 필요할 때 자원 예산을 override하고 `run()`으로 동기 실행하거나 `TaskHandle`로 상태
 조회·완료 대기·취소를 수행할 수 있다. SDK는 Maven Central의 공개 좌표로 설치할 수 있다.
 
-## v0.1 Public Alpha 범위
+## Local Raw Command 편의 API
 
 ### 편의 API
 
@@ -154,8 +155,8 @@ FinishedTaskSnapshot finished = task.await(Duration.ofMinutes(5));
 
 ### 안전한 기본 자원 정책
 
-Protocol v1은 CPU·메모리·PID·벽시계 시간과 출력 tail 제한을 모두 필수로 요구한다. v0.1에서는
-프로토콜을 바꾸지 않고 Core SDK가 문서화된 유한 기본값을 채워 전송하며, daemon이 기존 정책에 따라
+Protocol v1은 CPU·메모리·PID·벽시계 시간과 출력 tail 제한을 모두 필수로 요구한다. Raw Command API에서는
+Core SDK가 문서화된 유한 기본값을 채워 전송하며, daemon이 기존 정책에 따라
 최종 검증한다. 사용자는 필요한 항목만 작업별로 override할 수 있어야 한다.
 
 ```java
@@ -167,8 +168,7 @@ FinishedTaskSnapshot finished = client.run(spec, Duration.ofMinutes(6));
 포함하며, cleanup 결과를 기다릴 시간을 고려해 두 값을 독립적으로 정한다.
 
 SDK 기본값은 무제한 값을 사용하지 않는다. 현재 수치는 FFmpeg 예제와 daemon 정책을 기준으로 공개 API
-문서와 테스트에 고정했다. daemon 기본 정책과 부분 필드 생략은 향후 protocol 변경 후보이며 v0.1 범위가
-아니다.
+문서와 테스트에 고정했다. daemon 기본 정책과 부분 필드 생략은 현재 Raw Command 계약 범위가 아니다.
 
 ### 결과와 오류
 
@@ -204,7 +204,7 @@ Maven Central에는 다음 좌표로 main, sources와 javadoc artifact가 서명
 
 ```kotlin
 dependencies {
-    implementation("org.taskcage:taskcage-java-sdk:0.2.0")
+    implementation("org.taskcage:taskcage-java-sdk:0.3.0")
 }
 ```
 
@@ -232,12 +232,12 @@ workflow로 검증한다.
    계약을 구현하고 가짜 daemon 단위 테스트와 실제 daemon reference E2E를 추가했다.
 3. **동기 실행 — 구현됨:** `run()`을 `TaskHandle` 계약 위에 구현하고 실제 daemon·FFmpeg E2E로 정상
    종료·Task wall-time timeout·출력 결과를 검증했다. 명시적 취소는 `TaskHandle.cancel()`을 사용한다.
-4. **배포 — 0.2.0 공개 완료:** Maven Central publishing, 서명, POM metadata, sources/javadoc artifact와
-   독립 `java-sdk-v0.2.0` 검증 pipeline을 구성했고, 공개 tag와 Central publish를 완료했다.
+4. **배포 — 0.3.0 Maven Central 공개:** 서명된 main, sources와 javadoc artifact를
+   `org.taskcage:taskcage-java-sdk:0.3.0` 좌표로 공개했다.
 5. **첫 사용자 경로 — 구현됨:** FFmpeg reference workflow와 설치·daemon 연결·실행·문제 해결 문서를
    제공한다.
 
-## v0.1 완료 기준
+## 품질 기준
 
 - Java 17에서 단위 테스트와 실제 Ubuntu 24.04 daemon E2E가 통과한다.
 - 제한 없는 기본 실행 경로가 없다.
@@ -246,14 +246,14 @@ workflow로 검증한다.
 - 새 사용자가 문서만 보고 10분 안에 FFmpeg 변환을 실행할 수 있다.
 - Alpha 버전과 Protocol v1 호환 범위가 문서에 명시된다.
 
-## v0.2 이후 범위 밖
+## 현재 범위 밖
 
 - Chromium 등 추가 Profile Binding
 - TaskCage Hub 연동
-- Remote TCP/TLS와 Artifact upload/download
+- Remote Raw Command와 Local UDS로의 자동 fallback
 - Spring Boot starter와 다른 언어 SDK
 
-이 기능들은 Local Product Alpha의 실제 사용 경험을 확인한 뒤 별도 범위로 다룬다.
+이 기능들은 현재 Public Alpha의 실제 사용 경험과 반복 요구를 확인한 뒤 별도 범위로 다룬다.
 
 ## 빌드
 
@@ -261,11 +261,11 @@ workflow로 검증한다.
 ./gradlew build
 ```
 
-일반 빌드 결과는 `build/libs/`에 생성된다. 현재 공개된 Local Product Alpha는 다음 좌표로 설치한다.
+일반 빌드 결과는 `build/libs/`에 생성된다. 현재 공개 artifact는 다음 좌표로 설치한다.
 
 ```kotlin
 dependencies {
-    implementation("org.taskcage:taskcage-java-sdk:0.2.0")
+    implementation("org.taskcage:taskcage-java-sdk:0.3.0")
 }
 ```
 
