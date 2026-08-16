@@ -12,6 +12,38 @@ services:
     pid: host
     network_mode: none
     stop_grace_period: 15s
+    command:
+      - serve
+      - --socket
+      - /run/taskcage/taskcaged.sock
+      - --max-concurrent-tasks
+      - ${BENCHMARK_MAX_CONCURRENT_TASKS:-4}
+      - --max-registry-tasks
+      - "1000"
+      - --max-concurrent-connections
+      - "32"
+      - --cleanup-timeout-ms
+      - "5000"
+      - --fail-stop-timeout-ms
+      - "10000"
+      - --max-task-cpu-quota-us
+      - "200000"
+      - --max-task-cpu-period-us
+      - "100000"
+      - --max-task-memory-bytes
+      - "2147483648"
+      - --max-task-pids
+      - "128"
+      - --max-task-timeout-ms
+      - "900000"
+      - --max-task-stdout-tail-bytes
+      - "65536"
+      - --max-task-stderr-tail-bytes
+      - "65536"
+      - --profile-artifact-root
+      - /taskcage-work/artifacts
+      - --profile-artifact-max-bytes
+      - "104857600"
     volumes:
       - taskcage-runtime:/run/taskcage
       - taskcage-work:/taskcage-work

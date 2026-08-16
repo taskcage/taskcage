@@ -7,6 +7,8 @@ result_dir="${script_dir}/results"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 result_file="${result_dir}/local-${timestamp}.json"
 concurrency="${BENCHMARK_CONCURRENCY:-2}"
+max_concurrent_tasks="${BENCHMARK_MAX_CONCURRENT_TASKS:-${concurrency}}"
+scenarios="${BENCHMARK_SCENARIOS:-normal timeout_child memory_limit}"
 
 cleanup() {
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
@@ -23,15 +25,22 @@ run_mode() {
 
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   if [[ "${mode}" == "taskcage" ]]; then
-    "${compose[@]}" up --detach --wait taskcaged >&2
+    BENCHMARK_MAX_CONCURRENT_TASKS="${max_concurrent_tasks}" "${compose[@]}" up --detach --wait taskcaged >&2
   fi
 
   local result
-  result="$("${compose[@]}" run --rm --no-deps \
+  if ! result="$("${compose[@]}" run --rm --no-deps \
     -e "BENCHMARK_MODE=${mode}" \
     -e "BENCHMARK_SCENARIO=${scenario}" \
     -e "BENCHMARK_CONCURRENCY=${concurrency}" \
-    benchmark-worker | tail -n 1)"
+    benchmark-worker)"; then
+    echo "ERROR: ${mode} runner failed for ${scenario}" >&2
+    return 1
+  fi
+  if [[ "${result}" != \{*\} ]]; then
+    echo "ERROR: ${mode} runner did not return a JSON object for ${scenario}" >&2
+    return 1
+  fi
 
   if [[ "${mode}" == "taskcage" ]]; then
     local daemon_peak cleanup_verified
@@ -47,9 +56,9 @@ run_mode() {
 
 printf '{\n  "environment":{"kind":"local-docker-poc","concurrency":%s},\n  "scenarios":[' "${concurrency}" >"${result_file}"
 separator=""
-for scenario in normal timeout_child memory_limit; do
-  process_builder="$(run_mode processbuilder "${scenario}")"
-  taskcage="$(run_mode taskcage "${scenario}")"
+for scenario in ${scenarios}; do
+  if ! process_builder="$(run_mode processbuilder "${scenario}")"; then exit 1; fi
+  if ! taskcage="$(run_mode taskcage "${scenario}")"; then exit 1; fi
   printf '%s\n    {"name":"%s","processBuilder":%s,"taskCage":%s}' \
     "${separator}" "${scenario}" "${process_builder}" "${taskcage}" >>"${result_file}"
   separator=','

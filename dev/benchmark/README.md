@@ -29,6 +29,15 @@ The default concurrency is two. Override it only on a development machine with e
 BENCHMARK_CONCURRENCY=4 bash dev/benchmark/run-local.sh
 ```
 
+To focus on concurrent normal work without running the cleanup and memory scenarios:
+
+```bash
+BENCHMARK_CONCURRENCY=16 BENCHMARK_SCENARIOS=normal bash dev/benchmark/run-local.sh
+```
+
+The script sets the benchmark daemon's task capacity to the requested concurrency unless
+`BENCHMARK_MAX_CONCURRENT_TASKS` is explicitly supplied. This avoids measuring admission rejection as execution time.
+
 The script writes one JSON document under `dev/benchmark/results/` and removes containers and volumes when it exits.
 
 ## Scenarios
