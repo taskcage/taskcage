@@ -2,13 +2,14 @@
 
 TaskCage는 신뢰된 외부 프로세스를 작업 단위로 실행하고, Linux cgroup v2로 자원과 수명주기를 관리하는 경량 런타임이다.
 
-> **상태:** 공개된 최신 Local 릴리스는 daemon `0.3.0`, Java SDK `0.2.0`이다. `main`에는 다음
-> 컴포넌트 릴리스에 포함될 Remote Protocol v1 구현과 Docker Compose E2E가 추가되어 있다. Remote 기능은
-> 아직 공개 artifact로 배포되지 않았으므로, 설치·운영 기준은 각 공개 GitHub Release와 Maven Central
-> 버전을 따른다. `0.x`는 초기 개발 버전이며 공개 API와 운영 계약이 이후 minor 버전에서 변경될 수 있다.
+> **상태:** 현재 설치 가능한 최신 버전은 daemon `0.4.0`과 Java SDK `0.3.0`이다. daemon은
+> [`taskcaged-v0.4.0`](https://github.com/taskcage/taskcage/releases/tag/taskcaged-v0.4.0) GitHub Release에서,
+> Java SDK는 Maven Central의 `org.taskcage:taskcage-java-sdk:0.3.0` 좌표에서 설치한다. Local UDS의
+> Raw Command·Profile과 opt-in Remote TLS Profile·Artifact API를 제공한다. `0.x`는 초기 개발 버전이며
+> 공개 API와 운영 계약이 이후 minor 버전에서 변경될 수 있다.
 
 제품의 장기 방향과 표준 용어는 [제품 철학과 용어](docs/product-philosophy.md)에서 정의한다. 이 README는
-현재 구현하고 공개한 Local Public Alpha 범위를 설명한다.
+현재 설치 가능한 Local 및 opt-in Remote Public Alpha 범위를 설명한다.
 
 ## 해결하려는 문제
 
@@ -33,9 +34,12 @@ Java application
     │
     ▼
 TaskCage Java SDK
-    │ Unix domain socket / Protocol v1
-    ▼
-taskcaged (Rust)
+    │
+    ├─ Local UDS / Protocol v1·v2
+    └─ Remote TLS / Protocol v1 (승인된 Profile 전용)
+                    │
+                    ▼
+              taskcaged (Rust)
     │
     ├─ task cgroup: CPU · memory · PID · wall time
     ├─ external process tree
@@ -53,6 +57,8 @@ taskcaged (Rust)
 - `submitTask`, `getTask`, `cancelTask` 비동기 API
 - 요청 ID 기반의 데몬 생존 기간 내 멱등 제출
 - Ubuntu FFmpeg package를 사용하는 Local Raw Command 정상·timeout reference workflow
+- TLS 1.3과 service-account 인증을 사용하는 opt-in Remote Profile 실행
+- Remote Artifact upload/download와 principal별 Profile·자원 override authorization
 
 ## 안전 보장
 
@@ -81,7 +87,7 @@ Ubuntu 24.04 x86-64 또는 ARM64 host에서는 버전이 고정된 GitHub Releas
 바로 시작할 수 있다. 내려받은 스크립트의 내용을 확인한 뒤 root로 실행한다.
 
 ```bash
-VERSION=0.1.0
+VERSION=0.4.0
 RELEASE_URL="https://github.com/taskcage/taskcage/releases/download/taskcaged-v${VERSION}"
 
 curl --fail --location --output install-taskcaged.sh \
@@ -134,7 +140,7 @@ target/debug/taskcaged serve \
 
 ### Opt-in Local Profile daemon 설정
 
-v0.2의 Local Profile은 기본적으로 꺼져 있다. 위의 두 Artifact 옵션을 **함께** 지정한 daemon만 정적
+Local Profile은 기본적으로 꺼져 있다. 위의 두 Artifact 옵션을 **함께** 지정한 daemon만 정적
 `file-copy@1.0.0` Profile과 Protocol v2 capability를 공개한다. 이 Profile은 Runtime Package, Bundle,
 임의 executable 또는 caller-provided argv를 허용하지 않는다.
 
@@ -177,11 +183,11 @@ cgroup fail-stop으로 `UNREADY`인 경우 종료 코드는 `0`이 아니다. Ub
 
 ## Java SDK 사용
 
-Java SDK `0.1.0`은 Maven Central에 공개됐다. Gradle 프로젝트에서는 다음 좌표를 추가한다.
+Java SDK `0.3.0`은 Maven Central에 공개됐다. Gradle 프로젝트에서는 다음 좌표를 추가한다.
 
 ```kotlin
 dependencies {
-    implementation("org.taskcage:taskcage-java-sdk:0.1.0")
+    implementation("org.taskcage:taskcage-java-sdk:0.3.0")
 }
 ```
 
@@ -236,8 +242,8 @@ bash integration-tests/preflight-fail-closed.sh
 bash integration-tests/cgroup-runner-smoke.sh
 bash integration-tests/ffmpeg-reference-workflow.sh
 bash integration-tests/release-artifact-smoke.sh \
-  0.1.0 path/to/taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz \
-  path/to/taskcage-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+  0.4.0 path/to/taskcage-v0.4.0-x86_64-unknown-linux-gnu.tar.gz \
+  path/to/taskcage-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256 \
   path/to/install-taskcaged.sh
 ```
 
@@ -247,6 +253,8 @@ bash integration-tests/release-artifact-smoke.sh \
 
 - [제품 철학과 용어](docs/product-philosophy.md)
 - [Protocol v1 API 명세](docs/api-mvp.md)
+- [Remote Protocol v1](docs/remote-protocol-v1.md)
+- [Remote daemon 설정](daemon/REMOTE.md)
 - [Local Runtime Package cache](docs/runtime-package-cache.md)
 - [Java SDK](java-sdk/README.md)
 - [Ubuntu daemon 설치](docs/install-ubuntu.md)
@@ -261,20 +269,20 @@ bash integration-tests/release-artifact-smoke.sh \
 
 ## 단계별 제품 방향
 
-`0.1.0`은 Local UDS와 Raw Command를 실제 Ubuntu 호스트에서 사용할 수 있는 Local Public Alpha 기준선이다.
-다음 목표는 외부 사용자의 설치 시간, 실제 workload와 운영 피드백을 수집하고 호환되는 결함은 patch
+`0.1.0`은 Local UDS와 Raw Command 기준선을, `0.2.0`은 opt-in Local Profile·Artifact·Runtime Package를,
+`0.4.0` daemon과 `0.3.0` Java SDK는 인증된 Remote Profile·Artifact 전송을 추가했다. 다음 목표는 기능을
+넓히기보다 외부 사용자의 설치 시간, 실제 workload와 운영 피드백을 수집하고 호환되는 결함을 patch
 버전으로 수정하는 것이다.
 
-v0.2는 opt-in `file-copy@1.0.0`, 정적으로 Package digest를 등록하는 `ffmpeg-audio-to-wav@1.0.0`과 Local
-Artifact 계약을 제한적으로 검증한다. Profile·Package·Artifact를 일반화하거나 Profile을 더 늘리기 전에는
-이 경로를 Public Alpha의 외부 사용자와 반복 요구로 검증한다. 재현 가능한 실행은 버전 관리되는 Execution
-Profile과 digest로 고정한 Runtime Package를 사용한다.
+Profile·Package·Artifact를 일반화하거나 Profile을 더 늘리기 전에는 현재 경로를 Public Alpha의 외부
+사용자와 반복 요구로 검증한다. 재현 가능한 실행은 버전 관리되는 Execution Profile과 digest로 고정한
+Runtime Package를 사용한다.
 Bundle은 Package binary가 아니라 Profile, Runtime Package ref + digest, 플랫폼·정책·무결성 정보를
 담으며, 여러 Bundle이 같은 Package digest를 공유할 수 있다.
 
-Remote는 Local Public Alpha나 Local Product Alpha의 선행 조건이 아니다. Local 계약과 실제 원격 수요가
-검증된 뒤 topology·wire·인증·권한·Artifact 전달·backpressure·응답 유실 의미를 별도 설계와 API 계약으로
-결정한다. 중앙 Hub server도 이 단계들의 구성요소가 아니며, 임의 URL에서 임의 binary를 받아 실행하는
+Remote Protocol v1은 Local UDS를 대체하지 않는 opt-in 경로다. TLS 1.3, service-account 인증,
+principal별 Profile authorization과 관리되는 Artifact 전달을 사용하며 Remote Raw Command와 Local fallback을
+허용하지 않는다. 중앙 Hub server는 현재 구성요소가 아니며, 임의 URL에서 임의 binary를 받아 실행하는
 기능을 제공하지 않는다.
 
 ## 기여

@@ -1,7 +1,7 @@
 # Local Artifact 계약 초안
 
-> 상태: `v0.2 Local Product Alpha`를 위한 승인된 설계 경계다. 현재 공개된 Raw Command Protocol v1의
-> 동작이나 입력은 바꾸지 않는다. 이 문서는 #149의 Artifact 계약이며 Profile request/result Core는
+> 상태: `taskcaged 0.2.0`과 Java SDK `0.2.0`부터 구현·공개된 Local Artifact 계약이다. Raw Command
+> Protocol v1의 동작이나 입력은 바꾸지 않는다. 이 문서는 #149의 Artifact 계약이며 Profile request/result Core는
 > [Local Profile Core API v2](api-profile-v2.md)에서, Profile 실행 경로는 #150에서 연결한다.
 
 ## 범위
