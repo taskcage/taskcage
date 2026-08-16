@@ -9,6 +9,8 @@ result_file="${result_dir}/local-${timestamp}.json"
 concurrency="${BENCHMARK_CONCURRENCY:-2}"
 max_concurrent_tasks="${BENCHMARK_MAX_CONCURRENT_TASKS:-${concurrency}}"
 scenarios="${BENCHMARK_SCENARIOS:-normal timeout_child memory_limit}"
+warmup_batches="${BENCHMARK_WARMUP:-0}"
+measured_batches="${BENCHMARK_ITERATIONS:-1}"
 
 cleanup() {
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
@@ -33,6 +35,8 @@ run_mode() {
     -e "BENCHMARK_MODE=${mode}" \
     -e "BENCHMARK_SCENARIO=${scenario}" \
     -e "BENCHMARK_CONCURRENCY=${concurrency}" \
+    -e "BENCHMARK_WARMUP=${warmup_batches}" \
+    -e "BENCHMARK_ITERATIONS=${measured_batches}" \
     benchmark-worker)"; then
     echo "ERROR: ${mode} runner failed for ${scenario}" >&2
     return 1
@@ -54,7 +58,8 @@ run_mode() {
   fi
 }
 
-printf '{\n  "environment":{"kind":"local-docker-poc","concurrency":%s},\n  "scenarios":[' "${concurrency}" >"${result_file}"
+printf '{\n  "environment":{"kind":"local-docker-poc","concurrency":%s,"warmupBatches":%s,"measuredBatches":%s},\n  "scenarios":[' \
+  "${concurrency}" "${warmup_batches}" "${measured_batches}" >"${result_file}"
 separator=""
 for scenario in ${scenarios}; do
   if ! process_builder="$(run_mode processbuilder "${scenario}")"; then exit 1; fi

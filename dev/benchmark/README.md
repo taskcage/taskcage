@@ -38,6 +38,15 @@ BENCHMARK_CONCURRENCY=16 BENCHMARK_SCENARIOS=normal bash dev/benchmark/run-local
 The script sets the benchmark daemon's task capacity to the requested concurrency unless
 `BENCHMARK_MAX_CONCURRENT_TASKS` is explicitly supplied. This avoids measuring admission rejection as execution time.
 
+For a local repeatability check, warm up five batches and measure 30 more:
+
+```bash
+BENCHMARK_CONCURRENCY=16 BENCHMARK_SCENARIOS=normal \
+  BENCHMARK_WARMUP=5 BENCHMARK_ITERATIONS=30 bash dev/benchmark/run-local.sh
+```
+
+The output reports batch and individual-task p50/p95 latency, container memory peak, and container CPU usage.
+
 The script writes one JSON document under `dev/benchmark/results/` and removes containers and volumes when it exits.
 
 ## Scenarios

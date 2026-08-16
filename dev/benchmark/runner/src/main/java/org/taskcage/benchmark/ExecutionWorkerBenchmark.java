@@ -41,13 +41,18 @@ public final class ExecutionWorkerBenchmark {
         Mode mode = Mode.parse(requiredEnv("BENCHMARK_MODE"));
         Scenario scenario = Scenario.parse(requiredEnv("BENCHMARK_SCENARIO"));
         int concurrency = positiveInt(System.getenv().getOrDefault("BENCHMARK_CONCURRENCY", "2"));
-        Path workDirectory = WORK_ROOT.resolve(mode.jsonName + "-" + scenario.jsonName + "-" + UUID.randomUUID());
-        Files.createDirectories(workDirectory);
+        int warmupBatches = nonNegativeInt(System.getenv().getOrDefault("BENCHMARK_WARMUP", "0"));
+        int measuredBatches = positiveInt(System.getenv().getOrDefault("BENCHMARK_ITERATIONS", "1"));
 
-        long startedNanos = System.nanoTime();
-        List<TaskMetric> tasks = run(mode, scenario, concurrency, workDirectory);
-        long totalMillis = elapsedMillis(startedNanos);
-        System.out.println(render(mode, scenario, concurrency, totalMillis, tasks));
+        List<BatchMetric> measured = new ArrayList<>();
+        for (int batch = 0; batch < warmupBatches + measuredBatches; batch++) {
+            Path workDirectory = WORK_ROOT.resolve(mode.jsonName + "-" + scenario.jsonName + "-" + UUID.randomUUID());
+            Files.createDirectories(workDirectory);
+            long startedNanos = System.nanoTime();
+            List<TaskMetric> tasks = run(mode, scenario, concurrency, workDirectory);
+            if (batch >= warmupBatches) measured.add(new BatchMetric(elapsedMillis(startedNanos), tasks));
+        }
+        System.out.println(render(mode, scenario, concurrency, warmupBatches, measured));
     }
 
     private static List<TaskMetric> run(Mode mode, Scenario scenario, int concurrency, Path workDirectory)
@@ -105,7 +110,7 @@ public final class ExecutionWorkerBenchmark {
         descendants.forEach(handle -> {
             if (handle.isAlive()) handle.destroyForcibly();
         });
-        return new TaskMetric(elapsedMillis(startedNanos), termination, null, residual, true);
+        return new TaskMetric(elapsedMillis(startedNanos), termination, null, null, residual, true);
     }
 
     private static TaskMetric runTaskCage(Scenario scenario, int index, Path workDirectory) throws Exception {
@@ -122,7 +127,7 @@ public final class ExecutionWorkerBenchmark {
                     Duration.ofSeconds(25));
             ExecutionResult result = finished.result();
             return new TaskMetric(elapsedMillis(startedNanos), result.terminationReason().name(),
-                    result.usage().memoryPeakBytes(), 0, true);
+                    result.usage().cpuTimeMicros(), result.usage().memoryPeakBytes(), 0, true);
         }
     }
 
@@ -165,22 +170,32 @@ public final class ExecutionWorkerBenchmark {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
     }
 
-    private static String render(Mode mode, Scenario scenario, int concurrency, long totalMillis, List<TaskMetric> tasks) {
+    private static String render(Mode mode, Scenario scenario, int concurrency, int warmupBatches,
+                                 List<BatchMetric> batches) {
+        List<TaskMetric> tasks = batches.stream().flatMap(batch -> batch.tasks.stream()).toList();
+        List<Long> batchLatencies = batches.stream().map(BatchMetric::latencyMillis).sorted().toList();
         List<Long> latencies = tasks.stream().map(TaskMetric::latencyMillis).sorted().toList();
         Map<String, Integer> reasons = new LinkedHashMap<>();
         for (TaskMetric task : tasks) reasons.merge(task.termination, 1, Integer::sum);
+        long totalMillis = batchLatencies.stream().mapToLong(Long::longValue).sum();
         long taskPeak = tasks.stream().map(TaskMetric::taskMemoryPeakBytes).filter(value -> value != null)
                 .mapToLong(Long::longValue).max().orElse(0);
+        long taskCpu = tasks.stream().map(TaskMetric::taskCpuTimeMicros).filter(value -> value != null)
+                .mapToLong(Long::longValue).sum();
         int residual = tasks.stream().mapToInt(TaskMetric::residualProcesses).sum();
         return "{"
                 + "\"mode\":\"" + mode.jsonName + "\","
                 + "\"scenario\":\"" + scenario.jsonName + "\","
                 + "\"concurrency\":" + concurrency + ","
-                + "\"latencyMs\":{\"total\":" + totalMillis + ",\"p50\":" + percentile(latencies, 0.50)
-                + ",\"p95\":" + percentile(latencies, 0.95) + "},"
-                + "\"tasks\":{\"submitted\":" + tasks.size() + ",\"terminationReasons\":" + reasonsJson(reasons) + "},"
-                + "\"taskMemoryPeakBytes\":" + taskPeak + ","
-                + "\"executorContainerMemoryPeakBytes\":" + cgroupMemoryPeak() + ","
+                + "\"batches\":{\"warmup\":" + warmupBatches + ",\"measured\":" + batches.size()
+                + ",\"latencyMs\":{\"total\":" + totalMillis + ",\"p50\":" + percentile(batchLatencies, 0.50)
+                + ",\"p95\":" + percentile(batchLatencies, 0.95) + ",\"max\":" + max(batchLatencies) + "}},"
+                + "\"tasks\":{\"submitted\":" + tasks.size() + ",\"latencyMs\":{\"p50\":"
+                + percentile(latencies, 0.50) + ",\"p95\":" + percentile(latencies, 0.95) + ",\"max\":"
+                + max(latencies) + "},\"terminationReasons\":" + reasonsJson(reasons) + "},"
+                + "\"taskResources\":{\"memoryPeakBytes\":" + taskPeak + ",\"cpuTimeMicros\":" + taskCpu + "},"
+                + "\"executorContainer\":{\"memoryPeakBytes\":" + cgroupMemoryPeak()
+                + ",\"cpuUsageMicros\":" + cgroupCpuUsageMicros() + "},"
                 + "\"cleanup\":{\"residualProcesses\":" + residual
                 + ",\"cleanupConfirmed\":" + tasks.stream().allMatch(TaskMetric::cleanupConfirmed) + "}"
                 + "}";
@@ -189,6 +204,10 @@ public final class ExecutionWorkerBenchmark {
     private static long percentile(List<Long> values, double percentile) {
         if (values.isEmpty()) return 0;
         return values.get((int) Math.ceil(percentile * values.size()) - 1);
+    }
+
+    private static long max(List<Long> values) {
+        return values.stream().mapToLong(Long::longValue).max().orElse(0);
     }
 
     private static String reasonsJson(Map<String, Integer> reasons) {
@@ -201,6 +220,18 @@ public final class ExecutionWorkerBenchmark {
         catch (IOException | NumberFormatException ignored) { return -1; }
     }
 
+    private static long cgroupCpuUsageMicros() {
+        try {
+            return Files.readAllLines(Path.of("/sys/fs/cgroup/cpu.stat")).stream()
+                    .filter(line -> line.startsWith("usage_usec "))
+                    .map(line -> line.substring("usage_usec ".length()))
+                    .mapToLong(Long::parseLong)
+                    .findFirst().orElse(-1);
+        } catch (IOException | NumberFormatException ignored) {
+            return -1;
+        }
+    }
+
     private static String requiredEnv(String name) {
         String value = System.getenv(name);
         if (value == null || value.isBlank()) throw new IllegalArgumentException(name + " is required");
@@ -210,6 +241,12 @@ public final class ExecutionWorkerBenchmark {
     private static int positiveInt(String value) {
         int parsed = Integer.parseInt(value);
         if (parsed < 1) throw new IllegalArgumentException("BENCHMARK_CONCURRENCY must be positive");
+        return parsed;
+    }
+
+    private static int nonNegativeInt(String value) {
+        int parsed = Integer.parseInt(value);
+        if (parsed < 0) throw new IllegalArgumentException("BENCHMARK_WARMUP must not be negative");
         return parsed;
     }
 
@@ -237,6 +274,7 @@ public final class ExecutionWorkerBenchmark {
     }
 
     private record Command(Path program, List<String> arguments, Path readyPath) {}
-    private record TaskMetric(long latencyMillis, String termination, Long taskMemoryPeakBytes,
+    private record BatchMetric(long latencyMillis, List<TaskMetric> tasks) {}
+    private record TaskMetric(long latencyMillis, String termination, Long taskCpuTimeMicros, Long taskMemoryPeakBytes,
                               int residualProcesses, boolean cleanupConfirmed) {}
 }
