@@ -1,0 +1,43 @@
+name: taskcage-benchmark
+
+services:
+  taskcaged:
+    image: taskcage-benchmark/taskcaged:local
+    build:
+      context: ../..
+      dockerfile: dev/container/Dockerfile
+      target: daemon
+    privileged: true
+    cgroup: private
+    pid: host
+    network_mode: none
+    stop_grace_period: 15s
+    volumes:
+      - taskcage-runtime:/run/taskcage
+      - taskcage-work:/taskcage-work
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/taskcaged", "status", "--socket", "/run/taskcage/taskcaged.sock", "--timeout-ms", "1000"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  benchmark-worker:
+    image: taskcage-benchmark/worker:local
+    profiles: [benchmark]
+    build:
+      context: ../..
+      dockerfile: dev/container/Dockerfile
+      target: benchmark-worker
+    depends_on:
+      taskcaged:
+        condition: service_healthy
+    environment:
+      TASKCAGE_SOCKET: /run/taskcage/taskcaged.sock
+    volumes:
+      - taskcage-runtime:/run/taskcage
+      - taskcage-work:/taskcage-work
+
+volumes:
+  taskcage-runtime:
+  taskcage-work:
