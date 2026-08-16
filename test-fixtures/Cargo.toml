@@ -24,3 +24,7 @@ path = "src/bin/ffmpeg_tree.rs"
 [[bin]]
 name = "fake-ffmpeg"
 path = "src/bin/fake_ffmpeg.rs"
+
+[[bin]]
+name = "memory-hog"
+path = "src/bin/memory_hog.rs"
