@@ -1717,6 +1717,19 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn profile_policy_error_contract_is_not_retryable() {
+        let response = error_response_for(
+            PROFILE_PROTOCOL_VERSION,
+            REQUEST_ID.to_owned(),
+            ErrorCode::LimitExceedsPolicy,
+            "Bundle resource override exceeds policy",
+        );
+
+        assert_profile_error(response, ErrorCode::LimitExceedsPolicy, false);
+    }
+
     #[test]
     fn capabilities_preserve_request_id_and_use_actual_readiness_and_capacity() {
         let handlers = ready_handlers(FakeCore::default(), 3);

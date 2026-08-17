@@ -1,9 +1,8 @@
 //! 배포 단위가 허용하는 Task 하나의 최대 자원 예산을 검증한다.
 
-#[cfg(any(target_os = "linux", test))]
-use thiserror::Error;
-
 use crate::protocol::{OutputLimits, ResourceLimits};
+#[cfg(any(target_os = "linux", test))]
+use crate::resource_budget::ResourceMaximumViolation;
 use crate::resource_budget::{ResourceBudget, ResourceBudgetError};
 
 #[derive(Debug, Clone)]
@@ -23,48 +22,11 @@ impl DeploymentResourcePolicy {
     }
 
     #[cfg(any(target_os = "linux", test))]
-    pub(crate) fn validate(&self, requested: &ResourceBudget) -> Result<(), PolicyViolation> {
-        let actual = requested.cgroup_limits();
-        let maximum = self.maximum.cgroup_limits();
-        if !cpu_ratio_within_maximum(
-            actual.cpu.quota_micros.get(),
-            actual.cpu.period_micros.get(),
-            maximum.cpu.quota_micros.get(),
-            maximum.cpu.period_micros.get(),
-        ) {
-            return Err(PolicyViolation::Cpu {
-                actual_quota: actual.cpu.quota_micros.get(),
-                actual_period: actual.cpu.period_micros.get(),
-                maximum_quota: maximum.cpu.quota_micros.get(),
-                maximum_period: maximum.cpu.period_micros.get(),
-            });
-        }
-        require_within(
-            "limits.memoryMaxBytes",
-            actual.memory_max_bytes.get(),
-            maximum.memory_max_bytes.get(),
-        )?;
-        require_within(
-            "limits.pidsMax",
-            actual.max_processes.get(),
-            maximum.max_processes.get(),
-        )?;
-        require_within(
-            "limits.wallTimeLimitMs",
-            requested.wall_time_limit_ms(),
-            self.maximum.wall_time_limit_ms(),
-        )?;
-        require_within(
-            "output.stdoutTailMaxBytes",
-            requested.stdout_tail_max_bytes() as u64,
-            self.maximum.stdout_tail_max_bytes() as u64,
-        )?;
-        require_within(
-            "output.stderrTailMaxBytes",
-            requested.stderr_tail_max_bytes() as u64,
-            self.maximum.stderr_tail_max_bytes() as u64,
-        )?;
-        Ok(())
+    pub(crate) fn validate(
+        &self,
+        requested: &ResourceBudget,
+    ) -> Result<(), ResourceMaximumViolation> {
+        requested.validate_within_maximum(&self.maximum)
     }
 
     #[cfg(target_os = "linux")]
@@ -91,50 +53,6 @@ impl DeploymentResourcePolicy {
         )
         .expect("test deployment policy must be valid")
     }
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn cpu_ratio_within_maximum(
-    actual_quota: u64,
-    actual_period: u64,
-    maximum_quota: u64,
-    maximum_period: u64,
-) -> bool {
-    u128::from(actual_quota) * u128::from(maximum_period)
-        <= u128::from(maximum_quota) * u128::from(actual_period)
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn require_within(field: &'static str, actual: u64, maximum: u64) -> Result<(), PolicyViolation> {
-    if actual <= maximum {
-        Ok(())
-    } else {
-        Err(PolicyViolation::Limit {
-            field,
-            actual,
-            maximum,
-        })
-    }
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-#[cfg(any(target_os = "linux", test))]
-pub(crate) enum PolicyViolation {
-    #[error(
-        "limits.cpuMax 비율 {actual_quota}/{actual_period}이 deployment 최대 {maximum_quota}/{maximum_period}를 넘었습니다"
-    )]
-    Cpu {
-        actual_quota: u64,
-        actual_period: u64,
-        maximum_quota: u64,
-        maximum_period: u64,
-    },
-    #[error("{field} 값 {actual}이 deployment 최대 {maximum}을 넘었습니다")]
-    Limit {
-        field: &'static str,
-        actual: u64,
-        maximum: u64,
-    },
 }
 
 #[cfg(test)]
@@ -196,7 +114,7 @@ mod tests {
         let above = budget(limits(400_001, 200_000, 1, 1, 1), output(1, 1));
         assert!(matches!(
             policy().validate(&above),
-            Err(PolicyViolation::Cpu { .. })
+            Err(ResourceMaximumViolation::Cpu { .. })
         ));
     }
 
@@ -238,7 +156,7 @@ mod tests {
             };
             assert!(matches!(
                 selected.validate(&requested),
-                Err(PolicyViolation::Limit { field: actual, .. }) if actual == field
+                Err(ResourceMaximumViolation::Limit { field: actual, .. }) if actual == field
             ));
         }
     }

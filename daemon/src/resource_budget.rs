@@ -135,6 +135,53 @@ impl ResourceBudget {
         }
     }
 
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn validate_within_maximum(
+        &self,
+        maximum: &Self,
+    ) -> Result<(), ResourceMaximumViolation> {
+        let actual = self.cgroup_limits();
+        let maximum_cgroup = maximum.cgroup_limits();
+        if u128::from(actual.cpu.quota_micros.get())
+            * u128::from(maximum_cgroup.cpu.period_micros.get())
+            > u128::from(maximum_cgroup.cpu.quota_micros.get())
+                * u128::from(actual.cpu.period_micros.get())
+        {
+            return Err(ResourceMaximumViolation::Cpu {
+                actual_quota: actual.cpu.quota_micros.get(),
+                actual_period: actual.cpu.period_micros.get(),
+                maximum_quota: maximum_cgroup.cpu.quota_micros.get(),
+                maximum_period: maximum_cgroup.cpu.period_micros.get(),
+            });
+        }
+        require_within_maximum(
+            "limits.memoryMaxBytes",
+            actual.memory_max_bytes.get(),
+            maximum_cgroup.memory_max_bytes.get(),
+        )?;
+        require_within_maximum(
+            "limits.pidsMax",
+            actual.max_processes.get(),
+            maximum_cgroup.max_processes.get(),
+        )?;
+        require_within_maximum(
+            "limits.wallTimeLimitMs",
+            self.wall_time_limit_ms(),
+            maximum.wall_time_limit_ms(),
+        )?;
+        require_within_maximum(
+            "output.stdoutTailMaxBytes",
+            self.stdout_tail_max_bytes() as u64,
+            maximum.stdout_tail_max_bytes() as u64,
+        )?;
+        require_within_maximum(
+            "output.stderrTailMaxBytes",
+            self.stderr_tail_max_bytes() as u64,
+            maximum.stderr_tail_max_bytes() as u64,
+        )?;
+        Ok(())
+    }
+
     #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
     pub(crate) fn verified_effective_limits(
         &self,
@@ -173,6 +220,26 @@ pub enum ResourceBudgetError {
     NotRepresentable { field: &'static str, value: u64 },
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", test))]
+pub(crate) enum ResourceMaximumViolation {
+    #[error(
+        "limits.cpuMax 비율 {actual_quota}/{actual_period}이 최대 {maximum_quota}/{maximum_period}를 넘었습니다"
+    )]
+    Cpu {
+        actual_quota: u64,
+        actual_period: u64,
+        maximum_quota: u64,
+        maximum_period: u64,
+    },
+    #[error("{field} 값 {actual}이 최대 {maximum}을 넘었습니다")]
+    Limit {
+        field: &'static str,
+        actual: u64,
+        maximum: u64,
+    },
+}
+
 fn nonzero_u64(field: &'static str, value: u64) -> Result<NonZeroU64, ResourceBudgetError> {
     NonZeroU64::new(value).ok_or(ResourceBudgetError::Zero { field })
 }
@@ -195,6 +262,23 @@ fn output_tail_bytes(field: &'static str, value: u32) -> Result<NonZeroUsize, Re
     }
     let value = checked_output_size::<usize>(field, value)?;
     NonZeroUsize::new(value).ok_or(ResourceBudgetError::Zero { field })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn require_within_maximum(
+    field: &'static str,
+    actual: u64,
+    maximum: u64,
+) -> Result<(), ResourceMaximumViolation> {
+    if actual <= maximum {
+        Ok(())
+    } else {
+        Err(ResourceMaximumViolation::Limit {
+            field,
+            actual,
+            maximum,
+        })
+    }
 }
 
 fn checked_output_size<T>(field: &'static str, value: u32) -> Result<T, ResourceBudgetError>
