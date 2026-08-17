@@ -4,7 +4,7 @@ This Java 17+ library maps one typed audio-to-WAV operation to the installed
 `ffmpeg-audio-to-wav@1.0.0` Execution Profile. It is a separate convenience layer over the
 TaskCage Java Core SDK and does not expose an FFmpeg executable path or caller-provided argv.
 
-The next release coordinates are:
+Version `0.1.0` is published at these coordinates:
 
 ```kotlin
 dependencies {
@@ -12,9 +12,10 @@ dependencies {
 }
 ```
 
-The Binding depends transitively on `org.taskcage:taskcage-java-sdk:0.3.0` and requires taskcaged
-`0.4.0` with the matching signed Bundle and verified FFmpeg Runtime Package imported. These
-coordinates are available from Maven Central and GitHub Release artifacts.
+The published Binding depends transitively on `org.taskcage:taskcage-java-sdk:0.2.0`. It works with
+the released taskcaged `0.4.0` when the matching static FFmpeg Profile and verified Runtime Package
+are configured; daemon `0.4.0` does not require a signed Bundle and does not provide the `bundle`
+command or `--bundle-cache-root`.
 
 ```java
 FfmpegAudioToWavRequest request = new FfmpegAudioToWavRequest(
@@ -32,10 +33,33 @@ if (result instanceof FfmpegAudioToWavSuccess success) {
 }
 ```
 
-The Binding requires a daemon with the matching signed Bundle and verified FFmpeg Runtime Package.
-The repository's development container imports both into a local catalog and runs the Java-to-daemon
-E2E. A production deployment imports its approved Bundle and Package artifacts using the daemon's
-Bundle and Package commands.
+## Released daemon 0.4.0 setup
+
+Import the FFmpeg Runtime Package as the daemon service UID, then register its digest with the two
+static Profile options alongside the required Artifact options:
+
+```bash
+sudo -u taskcage taskcaged import-package \
+  --source /srv/taskcage-import/ffmpeg-7.1.1 \
+  --cache-root /var/lib/taskcage
+
+taskcaged serve \
+  <required serve and Artifact options> \
+  --runtime-package-cache-root /var/lib/taskcage \
+  --ffmpeg-audio-to-wav-package-digest sha256:<64-lowercase-hex>
+```
+
+See the [Runtime Package cache contract](../../docs/runtime-package-cache.md) for the package and
+static registration requirements.
+
+## Bundle catalog on `main` (not yet released)
+
+After the `taskcaged-v0.4.0` tag, `main` added signed Bundle import, the local catalog and
+`--bundle-cache-root`. No public daemon release contains that path yet, and no minimum release
+version has been assigned. The repository's current development container imports the Package and
+Bundle into the local catalog for its Java-to-daemon E2E; released daemon `0.4.0` deployments must
+use the static Profile setup above. The `main`-only contract is documented in
+[TaskCage Bundle format v0alpha1](../../docs/bundle-format.md).
 
 Run the local unit tests from the repository root:
 

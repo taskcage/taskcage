@@ -12,6 +12,10 @@ TaskCage는 신뢰된 외부 프로세스를 작업 단위로 실행하고, Linu
 > 기존 릴리스의 호환 경로이며, 새 실행 경험은 Bundle import → generic Profile request 또는 language
 > Binding 호출을 목표로 한다.
 
+> **`main` 개발 상태(미출시):** Bundle import, `--bundle-cache-root`와 catalog 기반 Profile 실행은
+> `taskcaged-v0.4.0` tag 이후 `main`에 구현됐다. 현재 설치 가능한 daemon `0.4.0`에는 이 기능과 명령이
+> 포함되지 않으며, Bundle 기능을 포함할 최소 공개 daemon version은 아직 정해지지 않았다.
+
 제품의 장기 방향과 표준 용어는 [제품 철학과 용어](docs/product-philosophy.md)에서 정의한다. 이 README는
 현재 설치 가능한 Local 및 opt-in Remote Public Alpha 범위를 설명한다.
 
@@ -142,14 +146,39 @@ target/debug/taskcaged serve \
 
 상위 디렉터리와 서비스 계정은 배포 환경이 준비한다. 데몬은 소켓을 owner-only `0600`으로 생성한다. 위 값은 예시이며 프로토콜 기본값이 아니다.
 
-### Opt-in Local Profile daemon 설정
+### daemon 0.4.0의 Opt-in Local Profile 설정
 
-Local Profile은 기본적으로 꺼져 있다. 위의 두 Artifact 옵션을 **함께** 지정한 daemon만 정적
+daemon `0.4.0`의 Local Profile은 기본적으로 꺼져 있다. 위의 두 Artifact 옵션을 **함께** 지정한 daemon만 정적
 `file-copy@1.0.0` Profile과 Protocol v2 capability를 공개한다. 이 Profile은 Runtime Package, Bundle,
 임의 executable 또는 caller-provided argv를 허용하지 않는다.
 
-Bundle-first Profile을 실행하려면 daemon과 같은 service UID로 Runtime Package와 signed Bundle을 같은 cache에
-차례로 import하고, Artifact 설정에 Bundle cache root를 지정한다.
+`ffmpeg-audio-to-wav@1.0.0`을 추가로 등록하려면 daemon과 같은 service UID로 Runtime Package를 먼저
+import하고, Artifact 설정에 cache root와 digest를 함께 지정한다.
+
+```bash
+sudo -u taskcage taskcaged import-package \
+  --source /srv/taskcage-import/ffmpeg-7.1.1 \
+  --cache-root /var/lib/taskcage
+
+taskcaged serve \
+  <필수 serve 옵션과 Artifact 옵션> \
+  --runtime-package-cache-root /var/lib/taskcage \
+  --ffmpeg-audio-to-wav-package-digest sha256:<64-lowercase-hex>
+```
+
+daemon은 등록된 Package가 없거나 손상됐거나 host와 호환되지 않거나 manifest의 `id`가
+`org.taskcage.ffmpeg`, `entrypoint`가 `bin/ffmpeg`가 아니면 시작을 거부한다. 새 FFmpeg Task마다 Package를
+다시 검증하고 entrypoint descriptor를 고정한 채 shell과 PATH lookup 없이 실행한다. 자세한 cache와 정적
+등록 계약은 [Local Runtime Package cache](docs/runtime-package-cache.md)를 따른다.
+
+#### `main`의 미출시 Bundle catalog 경로
+
+아래 경로는 `taskcaged-v0.4.0` 이후 `main`에 구현된 개발 상태다. 공개 daemon `0.4.0`에서는 `bundle`
+명령과 `--bundle-cache-root`를 사용할 수 없다. Bundle 기능을 포함할 최소 공개 daemon version은 아직
+정해지지 않았다.
+
+`main` checkout에서 build한 daemon을 검증할 때는 Runtime Package와 signed Bundle을 같은 cache에 차례로
+import하고, Artifact 설정에 Bundle cache root를 지정한다.
 
 ```bash
 sudo -u taskcage taskcaged import-package \
@@ -166,12 +195,9 @@ taskcaged serve \
   --bundle-cache-root /var/lib/taskcage
 ```
 
-daemon은 요청한 Bundle이 없거나, Bundle이 참조한 Package가 손상됐거나 host와 호환되지 않으면 Task를 시작하지
-않는다. 새 Profile Task마다 Package를 다시 검증하고 entrypoint descriptor를 고정한 채 선언된 argv만 shell과
-PATH lookup 없이 실행한다.
-
-기존 `--runtime-package-cache-root`와 `--ffmpeg-audio-to-wav-package-digest` 정적 FFmpeg 등록은 호환성을
-위해 남아 있지만, 새 Profile은 Bundle import와 `--bundle-cache-root`를 사용한다.
+이 `main` 경로에서 daemon은 요청한 Bundle이 없거나, Bundle이 참조한 Package가 손상됐거나 host와 호환되지
+않으면 Task를 시작하지 않는다. 새 Profile Task마다 Package를 다시 검증하고 entrypoint descriptor를 고정한
+채 선언된 argv만 shell과 PATH lookup 없이 실행한다.
 
 Artifact root는 daemon service UID 소유의 기존 absolute directory여야 하며, symlink가 아니고
 group/other writable이면 안 된다. daemon은 시작 시 이 조건과 descriptor-relative staging/publish 권한을
@@ -285,8 +311,10 @@ bash integration-tests/release-artifact-smoke.sh \
 `0.4.0` daemon과 `0.3.0` Java SDK는 인증된 Remote Profile·Artifact 전송을 추가했다. 이들은 현재
 설치 가능한 공개 계약이다.
 
-현재 Bundle-first MVP는 중앙 Hub 없이 Local Bundle import, Runtime Package 검증, generic
-`ProfileRequest`, Artifact 입출력, 첫 FFmpeg Binding을 하나의 흐름으로 제공한다.
+`main`에는 Bundle-first MVP가 중앙 Hub 없이 Local Bundle import, Runtime Package 검증, generic
+`ProfileRequest`, Artifact 입출력, 첫 FFmpeg Binding을 하나의 흐름으로 제공하도록 구현됐다. 이 구현은
+`taskcaged-v0.4.0` 이후에 병합됐으며 아직 공개 daemon 릴리스에 포함되지 않았다. 최소 릴리스 version도
+아직 정해지지 않았다.
 
 Bundle은 Profile, Runtime Package ref + digest, 플랫폼·정책·무결성 정보를 담는 불변 실행 계약이다.
 Package는 daemon cache에서 digest 기준으로 공유한다. archive 검증·catalog import·Profile 실행의

@@ -1,8 +1,14 @@
 # TaskCage Bundle format v0alpha1
 
-> 상태: **Local Bundle 실행 계약**. 이 문서는 `taskcaged bundle import`의 archive 검증, immutable local
-> catalog와 catalog 기반 Profile 실행을 고정한다. Profile Task wire API는 [Local Profile Core API v2](api-profile-v2.md)를 계속 사용한다.
-> Hub, 자동 다운로드, Bundle payload 안의 Runtime Package와 Remote Bundle 설치는 포함하지 않는다.
+> **릴리스 상태:** 이 계약과 `taskcaged bundle import`, immutable local catalog, `--bundle-cache-root` 기반
+> Profile 실행은 `taskcaged-v0.4.0` tag 이후 `main`에 구현됐지만 아직 공개 daemon 릴리스에는 포함되지
+> 않았다. 공개 daemon `0.4.0`에는 `bundle` 명령과 `--bundle-cache-root`가 없으며, Bundle 기능을 포함할
+> 최소 공개 daemon version은 아직 정해지지 않았다. `0.4.0`의 FFmpeg Profile은
+> [정적 Runtime Package 등록](runtime-package-cache.md#daemon-040의-ffmpeg-profile-정적-등록)을 사용한다.
+>
+> **범위:** 이 문서는 `main`의 Local Bundle 실행 계약을 고정한다. Profile Task wire API는
+> [Local Profile Core API v2](api-profile-v2.md)를 계속 사용한다. Hub, 자동 다운로드, Bundle payload 안의
+> Runtime Package와 Remote Bundle 설치는 포함하지 않는다.
 
 ## 목적
 
@@ -164,10 +170,11 @@ Java FFmpeg Binding
   → Generic ProfileRequest
 ```
 
-## Local execution
+## Local execution on `main` (unreleased)
 
-After importing the referenced Runtime Package and Bundle into the same daemon-owned cache, start the daemon with the
-Profile Artifact root and Bundle cache root.
+This section applies only to a daemon built from `main` after `taskcaged-v0.4.0`; it is not an operator path for the
+released daemon `0.4.0`. After importing the referenced Runtime Package and Bundle into the same daemon-owned cache,
+start that development daemon with the Profile Artifact root and Bundle cache root.
 
 ```text
 --profile-artifact-root /var/lib/taskcage/artifacts
@@ -197,9 +204,11 @@ Application developer
   → Task 결과와 output Artifact 수신
 ```
 
-## Local import and catalog
+## Local import and catalog on `main` (unreleased)
 
-The operator first imports the referenced Runtime Package, then imports the Bundle archive using the same service UID:
+These commands are implemented on `main` but are not available in a public daemon release. When testing a daemon built
+from `main`, the operator first imports the referenced Runtime Package, then imports the Bundle archive using the same
+service UID:
 
 ```bash
 taskcaged import-package --source /srv/import/ffmpeg-7.1.1 --cache-root /var/lib/taskcage

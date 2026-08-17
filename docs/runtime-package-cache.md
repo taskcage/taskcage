@@ -5,10 +5,14 @@
 이 문서는 TaskCage v0.2 Local Product Alpha의 Runtime Package import와 digest cache 계약이다.
 Runtime Package는 신뢰된 Linux 실행 파일과 필요한 library·license·SBOM을 하나의 검증 가능한 file set으로
 고정한다. 이 기능은 Hub, URL download, 자동 update, eviction 또는 container image를 제공하지 않는다. Bundle은
-이 cache의 이미 검증된 digest를 참조하며, 별도의 Local Bundle import 계약으로 제공한다.
+이 cache의 이미 검증된 digest를 참조한다.
 
-Bundle archive의 import와 signature 검증은 [Bundle 형식](bundle-format.md)에서 정의한다. Bundle 실행은 이
-cache 계약을 우회하거나 Package를 mutable path로 실행하게 해서는 안 된다.
+> **릴리스 구분:** Runtime Package import와 정적 FFmpeg Profile 등록은 공개 daemon `0.4.0`에서 사용할 수
+> 있다. Local Bundle import와 `--bundle-cache-root`는 `taskcaged-v0.4.0` tag 이후 `main`에 구현됐지만 아직
+> 공개 daemon 릴리스에는 포함되지 않았으며, Bundle 기능의 최소 공개 version은 정해지지 않았다.
+
+`main`의 미출시 Bundle archive import와 signature 검증은 [Bundle 형식](bundle-format.md)에서 정의한다.
+Bundle 실행은 이 cache 계약을 우회하거나 Package를 mutable path로 실행하게 해서는 안 된다.
 
 지원 platform은 현재 `linux/x86_64/gnu`, `linux/aarch64/gnu`와 glibc다. Package architecture는 daemon이
 실행 중인 host architecture와 정확히 일치해야 하며, Package가 요구하는 최소 glibc version이 host보다 높으면
@@ -129,7 +133,7 @@ Task 실행 경로는 Package를 digest로 열고 manifest, platform과 전체 c
 rootfs와 entrypoint file descriptor를 실행 준비가 끝날 때까지 보유하므로 cache path가 바뀌어도 검증하지
 않은 inode로 전환되지 않는다. Protocol v1 Raw Command의 absolute executable 동작은 변경하지 않는다.
 
-## Legacy FFmpeg Profile 정적 등록
+## daemon 0.4.0의 FFmpeg Profile 정적 등록
 
 `ffmpeg-audio-to-wav@1.0.0`은 generic registry 없이 하나의 cache root와 digest를 정적으로 등록한다.
 AMD64와 ARM64 FFmpeg Package는 서로 다른 binary content와 digest를 가지므로, 각 host에는 자신의
@@ -146,5 +150,6 @@ daemon은 시작할 때 등록 digest를 resolve하고 package `id`가 `org.task
 각 새 Task도 같은 digest의 manifest, platform, 전체 content를 다시 검증하고 고정 entrypoint descriptor를
 `execveat(AT_EMPTY_PATH)`로 실행한다. shell과 PATH lookup은 사용하지 않는다.
 
-새 Bundle-first 설치는 정적 digest flag 대신 `--bundle-cache-root /var/lib/taskcage`를 사용한다. 설치된
-Bundle catalog가 `ProfileRequest`의 name/version을 Runtime Package digest와 선언형 argv로 해석한다.
+`main`의 미출시 Bundle catalog 경로는 정적 digest flag 대신 `--bundle-cache-root /var/lib/taskcage`를
+사용한다. 설치된 Bundle catalog가 `ProfileRequest`의 name/version을 Runtime Package digest와 선언형
+argv로 해석한다. 이 flag는 공개 daemon `0.4.0`에서 사용할 수 없다.
