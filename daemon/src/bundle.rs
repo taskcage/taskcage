@@ -21,6 +21,7 @@ use thiserror::Error;
 
 use crate::codec;
 use crate::digest::Sha256Digest;
+use crate::protocol::{OutputLimits, ResourceLimits};
 use crate::runtime_package::{RuntimePackageCache, RuntimePackageError};
 
 const BUNDLES_DIRECTORY: &str = "bundles";
@@ -159,8 +160,18 @@ pub struct BundleProfile {
     pub inputs: Vec<BundleInput>,
     pub output: BundleOutput,
     pub argv: Vec<serde_json::Value>,
-    pub policy: serde_json::Value,
+    pub policy: BundleResourcePolicy,
     pub allowed_overrides: Vec<String>,
+}
+
+/// Bundle-owned default task limits.  Keeping this wire shape identical to the
+/// Profile API makes a Bundle executable without letting a caller supply an
+/// unconstrained resource policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BundleResourcePolicy {
+    pub limits: ResourceLimits,
+    pub output: OutputLimits,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -678,11 +689,33 @@ fn validate_bundle(
     for argument in &profile.argv {
         validate_argv(argument, &profile.inputs, &profile.output)?;
     }
-    if !profile.policy.is_object() || profile.allowed_overrides.iter().any(|item| item.is_empty()) {
+    if profile.allowed_overrides.len() > 6 {
         return Err(BundleError::Manifest(
             "policy와 allowedOverrides가 잘못되었습니다".to_owned(),
         ));
     }
+    let mut overrides = BTreeSet::new();
+    for field in &profile.allowed_overrides {
+        if !matches!(
+            field.as_str(),
+            "limits.cpuMax"
+                | "limits.memoryMaxBytes"
+                | "limits.pidsMax"
+                | "limits.wallTimeLimitMs"
+                | "output.stdoutTailMaxBytes"
+                | "output.stderrTailMaxBytes"
+        ) || !overrides.insert(field)
+        {
+            return Err(BundleError::Manifest(
+                "allowedOverrides에는 지원되는 unique resource field만 허용됩니다".to_owned(),
+            ));
+        }
+    }
+    crate::resource_budget::ResourceBudget::try_from_protocol(
+        profile.policy.limits.clone(),
+        profile.policy.output.clone(),
+    )
+    .map_err(|error| BundleError::Manifest(format!("policy가 잘못되었습니다: {error}")))?;
     Ok(())
 }
 
@@ -941,6 +974,7 @@ fn io_error(operation: &'static str, path: PathBuf, source: io::Error) -> Bundle
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
@@ -949,6 +983,12 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
+    use crate::profile::LocalProfileRuntime;
+    use crate::protocol::{
+        CpuMax, OutputLimits, ProfileIdentity, ProfileInputValue, ProfileRequestPayload,
+        ResourceLimits,
+    };
+    use crate::resource_budget::ResourceBudget;
 
     fn profile_bytes() -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
@@ -961,7 +1001,10 @@ mod tests {
             ],
             "output": {"name":"audio","fileName":"result.wav","mediaType":"audio/wav","maximumBytes":1024},
             "argv": ["-i", {"input":"source"}, {"int64":"sample_rate_hz"}, {"output":"audio"}],
-            "policy": {},
+            "policy": {
+                "limits": {"cpuMax":{"quotaMicros":100000,"periodMicros":100000},"memoryMaxBytes":536870912,"pidsMax":32,"wallTimeLimitMs":120000},
+                "output": {"stdoutTailMaxBytes":1024,"stderrTailMaxBytes":1024}
+            },
             "allowedOverrides": []
         })).unwrap()
     }
@@ -1166,5 +1209,72 @@ mod tests {
             catalog.import(archive.path(), &keys).unwrap().outcome,
             BundleImportOutcome::AlreadyPresent
         );
+    }
+
+    #[test]
+    fn installed_bundle_resolves_a_generic_profile_request() {
+        let root = tempfile::tempdir().unwrap();
+        let cache_root = root.path().join("cache");
+        fs::create_dir(&cache_root).unwrap();
+        fs::set_permissions(&cache_root, fs::Permissions::from_mode(0o755)).unwrap();
+        let package = RuntimePackageCache::open(&cache_root)
+            .unwrap()
+            .import(&runtime_package_source(root.path()))
+            .unwrap();
+        let profile = profile_bytes();
+        let bundle = bundle_bytes(&profile, &package.digest.to_string());
+        let (entries, keys) = signed_entries(bundle, profile);
+        let archive = write_archive(entries);
+        BundleCatalog::open(&cache_root)
+            .unwrap()
+            .import(archive.path(), &keys)
+            .unwrap();
+
+        let artifacts = root.path().join("artifacts");
+        fs::create_dir(&artifacts).unwrap();
+        fs::set_permissions(&artifacts, fs::Permissions::from_mode(0o700)).unwrap();
+        let source = b"source";
+        fs::write(artifacts.join("source.txt"), source).unwrap();
+        let budget = ResourceBudget::try_from_protocol(
+            ResourceLimits {
+                cpu_max: CpuMax {
+                    quota_micros: 100_000,
+                    period_micros: 100_000,
+                },
+                memory_max_bytes: 1_048_576,
+                pids_max: 16,
+                wall_time_limit_ms: 60_000,
+            },
+            OutputLimits {
+                stdout_tail_max_bytes: 1024,
+                stderr_tail_max_bytes: 1024,
+            },
+        )
+        .unwrap();
+        let runtime =
+            LocalProfileRuntime::open(&artifacts, 1024, budget, None, Some(&cache_root)).unwrap();
+        let request = ProfileRequestPayload {
+            client_request_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+            profile: ProfileIdentity {
+                name: "ffmpeg-audio-to-wav".to_owned(),
+                version: "1.0.0".to_owned(),
+            },
+            inputs: BTreeMap::from([
+                (
+                    "source".to_owned(),
+                    ProfileInputValue::LocalInput {
+                        path: "source.txt".to_owned(),
+                        digest: format!("sha256:{:x}", Sha256::digest(source)),
+                        size_bytes: source.len() as u64,
+                    },
+                ),
+                (
+                    "sample_rate_hz".to_owned(),
+                    ProfileInputValue::Int64 { value: 16_000 },
+                ),
+            ]),
+            resource_overrides: None,
+        };
+        assert!(runtime.validate(&request).is_ok());
     }
 }

@@ -1,6 +1,6 @@
 # FFmpeg Audio-to-WAV Profile Binding
 
-> 상태: Java Binding, Runtime Package cache와 daemon FFmpeg Profile이 구현됐다. 실제 사용자 경로는
+> 상태: Java Binding, Runtime Package cache와 Bundle catalog 기반 daemon Profile 실행이 구현됐다. 실제 사용자 경로는
 > container Java-to-daemon E2E와 [`examples/ffmpeg-java`](../examples/ffmpeg-java/)로 검증한다.
 
 ## 목적
@@ -23,9 +23,9 @@ try (TaskCageClient taskCage = TaskCageClient.connect(config)) {
 Binding은 별도 Java 편의 계층이다. Task 제출·조회·취소, transport, Profile wire model과 Artifact value
 type은 기존 TaskCage Core SDK가 계속 소유한다.
 
-이 첫 Binding은 Bundle import가 구현되기 전 Profile/Binding 경험을 검증하는 현재 기준선이다. 다음
-Bundle-first 단계에서는 이 Profile이 FFmpeg Runtime Package digest를 참조하는 Bundle로 배포되고, Binding은
-그 Bundle/Profile version 범위를 선언하는 독립 Java package로 유지한다.
+Binding은 `ffmpeg-audio-to-wav@1.0.0` Bundle을 설치한 daemon에 generic `ProfileRequest`를 보낸다. Bundle은
+FFmpeg Runtime Package digest와 고정 argv·Artifact·정책 계약을 제공하고, Binding은 그 Bundle/Profile
+version 범위를 선언하는 독립 Java package로 유지한다.
 
 ## 확정된 경계
 
@@ -36,7 +36,7 @@ Bundle-first 단계에서는 이 Profile이 FFmpeg Runtime Package digest를 참
 - 자원 override는 Core SDK의 `ProfileResourceOverrides`를 그대로 사용하며 Binding이 daemon 정책을
   추측하지 않는다.
 - Binding은 Java Core SDK artifact에 포함하지 않고 별도 artifact와 package로 제공한다.
-- Runtime Package import/cache와 FFmpeg Package digest 등록은 daemon이 소유한다.
+- Runtime Package와 signed Bundle import/cache는 daemon이 소유한다.
 - Hub, Remote transport, URL input, 여러 input/output, 전체 FFmpeg option 노출은 포함하지 않는다.
 
 Binding은 daemon의 trust boundary가 아니다. Binding이 만든 `ProfileRequest`도 daemon이 설치된 Profile,

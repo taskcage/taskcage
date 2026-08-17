@@ -1,7 +1,7 @@
 # TaskCage Bundle format v0alpha1
 
-> 상태: **Local Bundle import 계약**. 이 문서는 `taskcaged bundle import`의 archive 검증과 local catalog
-> 의미를 고정한다. Profile Task wire API는 [Local Profile Core API v2](api-profile-v2.md)를 계속 사용한다.
+> 상태: **Local Bundle 실행 계약**. 이 문서는 `taskcaged bundle import`의 archive 검증, immutable local
+> catalog와 catalog 기반 Profile 실행을 고정한다. Profile Task wire API는 [Local Profile Core API v2](api-profile-v2.md)를 계속 사용한다.
 > Hub, 자동 다운로드, Bundle payload 안의 Runtime Package와 Remote Bundle 설치는 포함하지 않는다.
 
 ## 목적
@@ -133,6 +133,11 @@ caller-supplied executable.
 what the daemon deployment allows. Unsupported profile schema or platform makes the Bundle unavailable; it does not
 cause a Raw Command fallback.
 
+`policy` must contain complete `limits` and `output` objects using the Profile API v2 resource shape. `allowedOverrides`
+is a unique subset of `limits.cpuMax`, `limits.memoryMaxBytes`, `limits.pidsMax`, `limits.wallTimeLimitMs`,
+`output.stdoutTailMaxBytes`, and `output.stderrTailMaxBytes`. A request that supplies a field outside this set is
+rejected before an Artifact is staged or a Task is created.
+
 ## Runtime Package 관계
 
 Bundle은 Runtime Package digest를 항상 참조한다. daemon은 digest와 platform compatibility를 검증한
@@ -158,6 +163,22 @@ Java FFmpeg Binding
   → ffmpeg-transcode Bundle/Profile
   → Generic ProfileRequest
 ```
+
+## Local execution
+
+After importing the referenced Runtime Package and Bundle into the same daemon-owned cache, start the daemon with the
+Profile Artifact root and Bundle cache root.
+
+```text
+--profile-artifact-root /var/lib/taskcage/artifacts
+--profile-artifact-max-bytes 1073741824
+--bundle-cache-root /var/lib/taskcage
+```
+
+For each `submitProfile`, the daemon resolves the exact installed `name@version`, revalidates the referenced Runtime
+Package digest and platform, pins its entrypoint descriptor, stages the one declared input Artifact, materializes only
+the declared argv placeholders, and applies the Bundle policy plus permitted request overrides. Missing, corrupt or
+incompatible Bundles never fall back to a caller command or to a mutable executable path.
 
 Binding은 Bundle의 trust boundary가 아니다. daemon은 Bundle signature, allowlist, Profile input, Artifact와
 resource override를 다시 검증한다. Binding은 지원하는 Bundle/Profile version 범위와 필요한 Core SDK·Protocol

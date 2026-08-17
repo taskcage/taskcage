@@ -2402,7 +2402,7 @@ mod tests {
         let environment = SystemProbe::from_environment().check().unwrap();
         let jobs_path = environment.report().delegated_root.join("jobs");
         let profile_runtime =
-            LocalProfileRuntime::open(&root, 1_024 * 1_024, profile_budget(), None)
+            LocalProfileRuntime::open(&root, 1_024 * 1_024, profile_budget(), None, None)
                 .expect("safe local Artifact root enables file-copy");
         let handlers = ProtocolHandlers::initialize(
             Ok(environment),
@@ -2621,6 +2621,7 @@ mod tests {
             16 * 1024 * 1024,
             profile_budget(),
             Some((&cache, package_digest)),
+            None,
         )
         .expect("service UID가 import한 FFmpeg package를 daemon이 resolve해야 합니다");
         let handlers = ProtocolHandlers::initialize(
@@ -2870,6 +2871,7 @@ mod tests {
             32 * 1024 * 1024,
             profile_budget(),
             Some((&cache, package_digest)),
+            None,
         )
         .expect("service UID import와 daemon resolve가 같은 ownership 계약을 사용해야 합니다");
         let handlers = ProtocolHandlers::initialize(
