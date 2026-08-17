@@ -10,6 +10,10 @@ TaskCage는 신뢰된 외부 프로세스를 호출 코드의 부수 효과가 �
 Profile authorization과 관리되는 Artifact 전송을 사용하는 별도 opt-in 경로이며 Local framing을 그대로
 network에 노출하지 않는다.
 
+> **전환 상태:** 현재 공개 릴리스에는 Local Raw Command와 Local Profile이 함께 존재한다. 다음
+> Bundle-first 공개 계약의 목표는 일반 실행을 Bundle/Profile로 한정하고 Raw Command를 공개 API에서
+> 제거하는 것이다. 이 문서는 그 목표 모델과 현재 구현의 경계를 함께 기록한다.
+
 ## 우리가 믿는 것
 
 ### 1. 외부 프로세스는 단순한 child process가 아니다
@@ -55,9 +59,10 @@ Execution Profile은 어떤 도구를 어떤 입력으로, 어떤 자원 정책 
 결과물로 실행하는지를 정의한 버전 관리 선언이다. daemon은 이 계약을 최종 검증하고 shell을 거치지
 않는 argv와 Task의 cgroup 경계를 구성한다.
 
-일반 사용자는 타입 안전한 Profile Binding으로 의미 있는 작업을 호출한다. 고급 사용자는 Custom
-Profile 또는 Raw Command를 사용할 수 있지만, Raw Command는 제한을 우회하는 경로가 아니며 특히
-Remote에서는 별도 authorization이 필요하다.
+일반 사용자는 타입 안전한 Profile Binding 또는 범용 `ProfileRequest`로 의미 있는 작업을 호출한다.
+Bundle 제작자는 Custom Profile을 만들어 배포할 수 있다. 다음 Bundle-first 공개 계약에는 실행 파일과
+argv를 직접 지정하는 Raw Command를 포함하지 않는다. 현재 Local Raw Command는 기존 공개 릴리스의
+호환 경로이며, 제한을 우회하는 경로는 아니다.
 
 ### 4. 재현성과 이식성은 선언해야 얻어진다
 
@@ -85,9 +90,11 @@ Runtime Package
 └─ Package digest/signature
 ```
 
-TaskCage Bundle은 Package binary를 포함하지 않는다. Runtime Package는 별도 cache에 digest 기준으로
-저장하며, 여러 Bundle이 같은 digest의 Runtime Package를 공유할 수 있다. Bundle과 Package의 무결성
-검증이 끝나기 전에는 Task를 시작하지 않는다.
+Bundle은 Profile, Package digest, platform, policy와 서명을 가진 불변 실행 계약이다. 초기 배포물은
+사람이 검토 가능한 `.tcbundle.tar.gz` archive로 만들 수 있으며, Package payload를 포함하는 배포 archive도
+허용할 수 있다. 다만 실행 계약은 항상 Package digest를 참조하며, daemon cache에서는 Package를 별도
+entry로 관리해 여러 Bundle이 같은 digest를 공유한다. Bundle과 Package의 무결성 검증이 끝나기 전에는
+Task를 시작하지 않는다. archive와 manifest의 상세 형식은 [Bundle 형식 초안](bundle-format.md)을 따른다.
 
 ### 5. 안전은 제한 없는 fallback보다 중요하다
 
@@ -95,27 +102,49 @@ cgroup controller, 권한, 원자적 task cgroup entry 또는 제한값 read-bac
 상태로 실행하지 않는다. whole-task cleanup을 증명할 수 없다면 새 Task를 시작하지 않고, 필요하면
 fail-stop과 시작 복구를 선택한다.
 
-### 6. Local Core 계약을 유지하고 Remote는 제한된 별도 경로로 제공한다
+### 6. Bundle과 Binding은 확장 가능한 생태계다
+
+Bundle은 공식 도구 목록이 아니라 외부 제작자도 만들 수 있는 배포 단위다. Bundle 제작자는 Runtime
+Package와 Execution Profile을 만들고, manifest·digest·서명으로 하나의 실행 계약을 배포한다. Binding
+제작자는 그 Profile input/output schema를 Java 등의 타입 안전한 도메인 API로 매핑해 각 언어의 package
+registry에 독립 배포할 수 있다.
+
+Bundle과 Binding은 권장되는 조합이지만 강하게 결합하지 않는다.
+
+```text
+Bundle only
+  → Generic ProfileRequest로 실행
+
+Bundle + Java Binding
+  → Java domain API로 실행
+```
+
+Binding은 Bundle의 신뢰를 부여하지 않는다. daemon은 Binding이 보낸 요청도 Bundle 서명, allowlist,
+Profile schema, Artifact와 정책을 최종 검증한다. Binding은 지원하는 Bundle/Profile, Core SDK와 Protocol
+버전 범위를 공개해야 한다.
+
+### 7. Local Core 계약을 유지하고 Remote는 제한된 별도 경로로 제공한다
 
 Core SDK는 장기적으로 transport와 상관없이 같은 Task·결과·종료 원인 계약을 제공한다.
 
 ```text
 TaskCage Core SDK
-├─ Local Transport (UDS): Raw Command와 Profile
+├─ Current Local Transport (UDS): Raw Command와 Profile
+├─ Target Local Transport (UDS): 승인된 Bundle/Profile
 └─ Remote Transport (TLS): 승인된 Profile과 관리되는 Artifact
 ```
 
 현재 공개 기준선은 Local UDS의 Raw Command·Profile과 인증된 Remote Profile 실행이다. Local과 Remote는
 같은 Task 결과·종료 원인·정리 계약을 유지하지만 transport와 허용된 실행 입력은 명시적으로 구분한다.
-Profile·Package·Artifact를 더 일반화하기 전에는 최소 3명의 외부 사용자가 현재 경로를 사용하고 반복 요구가
-확인되어야 한다.
+다음 Bundle-first 단계는 Local Bundle import, Runtime Package 검증, 범용 Profile API와 첫 Binding을
+하나의 완결된 사용자 흐름으로 검증한다. 중앙 Hub는 그 뒤 실제 공유·배포 요구가 확인된 경우에만 검토한다.
 
 Remote는 Local Protocol v1 framing을 network에 그대로 노출하지 않는다. 원격 Profile 실행의 TLS,
 service-account authentication, authorization, Artifact reference와 failure contract는
 [Remote Protocol v1](remote-protocol-v1.md)에서 별도로 정의한다. 이 계약은 Remote Raw Command와
 Local UDS fallback을 허용하지 않는다.
 
-### 7. 기존 인프라를 대체하지 않고 연결한다
+### 8. 기존 인프라를 대체하지 않고 연결한다
 
 TaskCage는 Kafka, Kubernetes, Docker 또는 Temporal의 대체재가 아니다.
 
@@ -132,7 +161,7 @@ TaskCage는 다음을 제공하는 것을 목표로 한다.
 
 - 외부 프로세스의 Task 단위 추상화
 - Linux cgroup v2 기반 자원·수명주기 관리
-- Execution Profile 기반 실행 계약
+- Bundle/Profile 기반 실행 계약
 - Local UDS와 인증된 Remote runtime 연결
 - 일관된 결과, Artifact와 종료 원인
 
@@ -155,13 +184,13 @@ Hub server를 구현하거나 운영하지 않는다.
 | TaskCage | 신뢰된 외부 프로세스를 제한된 실행 계약으로 다루는 Linux-native process runtime |
 | Task | 특정 실행 계약을 입력과 자원 정책으로 수행하는 일회성 작업이며, cgroup v2 실행 경계·프로세스 트리·상태·결과를 포함하는 공개 실행 단위 |
 | TaskCage Daemon (`taskcaged`) | Task를 검증하고 task cgroup을 생성해 외부 프로세스를 실행·관찰·정리하는 runtime |
-| TaskCage Core SDK | Task 제출·조회·취소와 Local Raw Command·Profile, 인증된 Remote Profile 연결을 제공하는 공통 SDK 계약 |
+| TaskCage Core SDK | 현재는 Local Raw Command·Profile과 인증된 Remote Profile 연결을 제공하며, 목표 공개 계약에서는 Bundle/Profile Task 제출·조회·취소를 제공하는 공통 SDK |
 | Execution Profile | 입력·출력 schema, argv 구성 규칙, Runtime Package 참조와 기본 자원 정책을 정의한 버전 관리 실행 계약 |
-| TaskCage Bundle | Execution Profile, Runtime Package ref + digest, 호환성·정책·무결성 정보를 담은 불변 실행 계약 |
+| TaskCage Bundle | Execution Profile, Runtime Package ref + digest, 호환성·정책·무결성 정보를 담은 불변 실행 계약이자 배포 단위 |
 | Runtime Package | 실행 binary와 필요한 library·codec·font·설정을 묶어 별도로 cache하는 플랫폼별 실행물 |
-| Profile Binding | Execution Profile을 Java 등의 타입 안전한 domain API로 제공하는 언어별 편의 library |
+| Profile Binding | Execution Profile을 Java 등의 타입 안전한 domain API로 매핑해 독립 배포하는 언어별 편의 library |
 | Artifact | Task가 입력으로 사용하거나 결과로 생성하는 file·URI·data 참조 |
-| Raw Command | Execution Profile 없이 실행 파일과 argv를 직접 지정하는 저수준 탈출구 API |
+| Raw Command | 현재 공개 Local 릴리스의 legacy 호환 API. 다음 Bundle-first 공개 계약에는 포함하지 않음 |
 | TaskCage Hub | Bundle·Profile·Binding metadata를 저장·검색·검증·배포할 수 있는 장기 Registry 후보. Local Public Alpha와 Local Product Alpha에는 포함하지 않음 |
 
 **TaskCage는 프로세스를 실행하는 도구가 아니라, 외부 프로세스를 신뢰 가능한 작업 계약으로 바꾸는 runtime이다.**
