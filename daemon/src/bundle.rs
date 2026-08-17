@@ -320,7 +320,15 @@ impl BundleCatalog {
     pub fn inspect(&self, name: &str, version: &str) -> BundleResult<BundleInspection> {
         validate_identity(name, version)?;
         let path = self.catalog.join(name).join(format!("{version}.json"));
-        let mapping = read_mapping(&path, self.device)?;
+        let mapping = read_mapping(&path, self.device).map_err(|error| match error {
+            BundleError::Io { source, .. } if source.kind() == io::ErrorKind::NotFound => {
+                BundleError::NotFound {
+                    name: name.to_owned(),
+                    version: version.to_owned(),
+                }
+            }
+            error => error,
+        })?;
         let installed = self.inspect_by_digest(mapping.digest)?;
         if installed.installed.name != name || installed.installed.version != version {
             return Err(BundleError::Manifest(
@@ -1209,6 +1217,23 @@ mod tests {
             catalog.import(archive.path(), &keys).unwrap().outcome,
             BundleImportOutcome::AlreadyPresent
         );
+    }
+
+    #[test]
+    fn missing_catalog_identity_is_a_profile_not_found_result() {
+        let root = tempfile::tempdir().unwrap();
+        let cache_root = root.path().join("cache");
+        fs::create_dir(&cache_root).unwrap();
+        fs::set_permissions(&cache_root, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = BundleCatalog::open(&cache_root)
+            .unwrap()
+            .inspect("file-copy", "1.0.0")
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            BundleError::NotFound { name, version }
+                if name == "file-copy" && version == "1.0.0"
+        ));
     }
 
     #[test]

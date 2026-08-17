@@ -12,9 +12,9 @@ dependencies {
 }
 ```
 
-The Binding depends transitively on `org.taskcage:taskcage-java-sdk:0.2.0` and requires taskcaged
-`0.2.0` with the matching Profile configured. These coordinates become installable after their
-Maven Central releases complete.
+The Binding depends transitively on `org.taskcage:taskcage-java-sdk:0.3.0` and requires taskcaged
+`0.4.0` with the matching signed Bundle and verified FFmpeg Runtime Package imported. These
+coordinates are available from Maven Central and GitHub Release artifacts.
 
 ```java
 FfmpegAudioToWavRequest request = new FfmpegAudioToWavRequest(
@@ -32,8 +32,10 @@ if (result instanceof FfmpegAudioToWavSuccess success) {
 }
 ```
 
-The Binding requires a daemon with the matching Profile and a verified FFmpeg Runtime Package.
-The repository's development container prepares that package and runs the Java-to-daemon E2E.
+The Binding requires a daemon with the matching signed Bundle and verified FFmpeg Runtime Package.
+The repository's development container imports both into a local catalog and runs the Java-to-daemon
+E2E. A production deployment imports its approved Bundle and Package artifacts using the daemon's
+Bundle and Package commands.
 
 Run the local unit tests from the repository root:
 
