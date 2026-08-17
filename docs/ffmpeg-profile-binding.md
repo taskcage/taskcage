@@ -63,6 +63,12 @@ format을 사용자가 자유 문자열로 전달하지 않으므로 Profile이 
 `2`만 허용한다. Profile은 input의 첫 audio stream 하나를 선택하고 video와 그 밖의 stream은 output에
 포함하지 않는다.
 
+정적 daemon 등록 경로와 Bundle catalog 경로는 같은 immutable `ffmpeg-audio-to-wav@1.0.0` 입력 계약을
+사용한다. Bundle `profile.json`은 `sample_rate_hz`에
+`allowedValues: [8000, 16000, 22050, 44100, 48000]`, `channels`에 `allowedValues: [1, 2]`를 선언한다.
+따라서 범위 안이더라도 목록에 없는 값(예: `12345`)이나 channel `3`은 두 경로 모두
+`INVALID_PROFILE_INPUT`으로 거절한다.
+
 개념적인 argv는 다음 의미를 가져야 한다. 실제 executable과 staging path는 daemon이 검증된 Runtime
 Package와 Artifact staging에서 resolve한다.
 

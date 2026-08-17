@@ -114,8 +114,8 @@ identity must match `bundle.json`. v0alpha1 intentionally supports only one inpu
   "version": "1.0.0",
   "inputs": [
     {"name": "source", "kind": "LOCAL_INPUT", "required": true},
-    {"name": "sample_rate_hz", "kind": "INT64", "required": true, "minimum": 8000, "maximum": 192000},
-    {"name": "channels", "kind": "INT64", "required": true, "minimum": 1, "maximum": 8}
+    {"name": "sample_rate_hz", "kind": "INT64", "required": true, "allowedValues": [8000, 16000, 22050, 44100, 48000]},
+    {"name": "channels", "kind": "INT64", "required": true, "allowedValues": [1, 2]}
   ],
   "output": {"name": "audio", "fileName": "result.wav", "mediaType": "audio/wav", "maximumBytes": 1073741824},
   "argv": ["-i", {"input": "source"}, "-ar", {"int64": "sample_rate_hz"}, "-ac", {"int64": "channels"}, {"output": "audio"}],
@@ -132,8 +132,14 @@ interpolation. The daemon executes only the verified Runtime Package entrypoint.
 exactly one placeholder object: `{ "input": "<LOCAL_INPUT slot>" }`, `{ "int64": "<INT64 slot>" }`,
 `{ "string": "<STRING slot>" }`, `{ "boolean": "<BOOLEAN slot>" }`, or `{ "output": "<declared output name>" }`.
 Placeholder names must identify a declared slot of the matching kind. Strings are individual argv elements, not shell text.
-v0alpha1 has no optional slots, arrays, arbitrary JSON, environment, custom working directory, multiple outputs, or
-caller-supplied executable.
+v0alpha1 has no optional slots, caller input arrays, arbitrary caller JSON, environment, custom working directory,
+multiple outputs, or caller-supplied executable.
+
+Each `INT64` input has exactly one validation contract: either `allowedValues` or a complete `minimum`/`maximum` range.
+`allowedValues` is valid only for `INT64`, contains 1 to 64 unique integers in strictly ascending canonical order, and
+cannot appear with `minimum` or `maximum`. A range must contain both bounds with `minimum <= maximum`. `LOCAL_INPUT`,
+`STRING`, and `BOOLEAN` inputs omit all three fields. An `INT64` request value outside its selected contract is rejected
+with `INVALID_PROFILE_INPUT`, retryable `false`.
 
 `policy` and `allowedOverrides` have the same effective-resource validation as Profile API v2. Each v0alpha1 `policy`
 value is both the Profile default and the Bundle maximum. A Bundle can only reduce what the daemon deployment allows.
