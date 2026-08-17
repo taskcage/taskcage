@@ -1188,17 +1188,16 @@ fn resolve_bundle_budget(
         return Ok(default);
     };
     let allowed = |field: &str| profile.allowed_overrides.iter().any(|value| value == field);
-    if let Some(limits) = &overrides.limits {
-        if limits.cpu_max.is_some() && !allowed("limits.cpuMax")
+    if let Some(limits) = &overrides.limits
+        && (limits.cpu_max.is_some() && !allowed("limits.cpuMax")
             || limits.memory_max_bytes.is_some() && !allowed("limits.memoryMaxBytes")
             || limits.pids_max.is_some() && !allowed("limits.pidsMax")
-            || limits.wall_time_limit_ms.is_some() && !allowed("limits.wallTimeLimitMs")
-        {
-            return Err(ProfileError::new(
-                ErrorCode::InvalidProfileInput,
-                "resourceOverrides contains a field not allowed by the Bundle",
-            ));
-        }
+            || limits.wall_time_limit_ms.is_some() && !allowed("limits.wallTimeLimitMs"))
+    {
+        return Err(ProfileError::new(
+            ErrorCode::InvalidProfileInput,
+            "resourceOverrides contains a field not allowed by the Bundle",
+        ));
     }
     if let Some(output) = &overrides.output
         && (output.stdout_tail_max_bytes.is_some() && !allowed("output.stdoutTailMaxBytes")
