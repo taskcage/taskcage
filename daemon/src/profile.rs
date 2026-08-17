@@ -969,13 +969,15 @@ fn validate_bundle_inputs(
             ("LOCAL_INPUT", ProfileInputValue::LocalInput { .. }) => {
                 source = Some(parse_local_input(request, &input.name)?);
             }
-            ("INT64", ProfileInputValue::Int64 { value })
-                if input.minimum.is_none_or(|minimum| *value >= minimum)
-                    && input.maximum.is_none_or(|maximum| *value <= maximum) => {}
+            ("INT64", ProfileInputValue::Int64 { value }) if bundle_int64_allows(input, *value) => {
+            }
             ("INT64", ProfileInputValue::Int64 { .. }) => {
                 return Err(ProfileError::new(
                     ErrorCode::InvalidProfileInput,
-                    format!("inputs.{} is outside the Bundle INT64 range", input.name),
+                    format!(
+                        "inputs.{} is not allowed by the Bundle INT64 contract",
+                        input.name
+                    ),
                 ));
             }
             ("STRING", ProfileInputValue::String { value })
@@ -1040,6 +1042,16 @@ fn validate_bundle_inputs(
         }
     }
     Ok((source, arguments))
+}
+
+fn bundle_int64_allows(input: &BundleInput, value: i64) -> bool {
+    if let Some(allowed_values) = &input.allowed_values {
+        return allowed_values.binary_search(&value).is_ok();
+    }
+    matches!(
+        (input.minimum, input.maximum),
+        (Some(minimum), Some(maximum)) if (minimum..=maximum).contains(&value)
+    )
 }
 
 fn validate_ffmpeg_inputs(
@@ -1549,6 +1561,54 @@ mod tests {
         }
     }
 
+    fn ffmpeg_bundle_profile() -> BundleProfile {
+        serde_json::from_value(json!({
+            "schemaVersion": "taskcage.profile/v0alpha1",
+            "name": FFMPEG_PROFILE_NAME,
+            "version": FFMPEG_PROFILE_VERSION,
+            "inputs": [
+                {"name":"source","kind":"LOCAL_INPUT","required":true},
+                {"name":"sample_rate_hz","kind":"INT64","required":true,"allowedValues":[8000,16000,22050,44100,48000]},
+                {"name":"channels","kind":"INT64","required":true,"allowedValues":[1,2]}
+            ],
+            "output": {
+                "name": FFMPEG_OUTPUT_SLOT,
+                "fileName": FFMPEG_OUTPUT_FILE,
+                "mediaType": FFMPEG_OUTPUT_MEDIA_TYPE,
+                "maximumBytes": 1024
+            },
+            "argv": [
+                "-hide_banner", "-loglevel", "error", "-nostdin", "-i", {"input":"source"},
+                "-map", "0:a:0", "-vn", "-c:a", "pcm_s16le", "-ar", {"int64":"sample_rate_hz"},
+                "-ac", {"int64":"channels"}, {"output":"audio"}
+            ],
+            "policy": {
+                "limits": {
+                    "cpuMax": {"quotaMicros": 100000, "periodMicros": 100000},
+                    "memoryMaxBytes": 536870912,
+                    "pidsMax": 32,
+                    "wallTimeLimitMs": 120000
+                },
+                "output": {"stdoutTailMaxBytes": 65536, "stderrTailMaxBytes": 65536}
+            },
+            "allowedOverrides": []
+        }))
+        .unwrap()
+    }
+
+    fn set_int64_input(request: &mut ProfileRequestPayload, slot: &str, value: i64) {
+        request
+            .inputs
+            .insert(slot.to_owned(), ProfileInputValue::Int64 { value });
+    }
+
+    fn validate_ffmpeg_bundle_inputs(
+        request: &ProfileRequestPayload,
+    ) -> Result<(LocalInputArtifact, Vec<BundleArgument>), ProfileError> {
+        let profile = ffmpeg_bundle_profile();
+        validate_bundle_inputs(request, &profile.inputs, &profile.argv)
+    }
+
     #[derive(Clone, Copy)]
     enum TestResourceOverride {
         Cpu {
@@ -1869,6 +1929,88 @@ mod tests {
     }
 
     #[test]
+    fn static_and_bundle_ffmpeg_profiles_share_the_sample_rate_allowlist() {
+        for rate in FFMPEG_SAMPLE_RATES {
+            let mut request = request();
+            set_int64_input(&mut request, "sample_rate_hz", *rate);
+            assert!(validate_ffmpeg_inputs(&request).is_ok(), "static {rate}");
+            assert!(
+                validate_ffmpeg_bundle_inputs(&request).is_ok(),
+                "Bundle {rate}"
+            );
+        }
+
+        let mut unsupported = request();
+        set_int64_input(&mut unsupported, "sample_rate_hz", 12_345);
+        assert_eq!(
+            validate_ffmpeg_inputs(&unsupported).unwrap_err().code(),
+            ErrorCode::InvalidProfileInput
+        );
+        assert_eq!(
+            validate_ffmpeg_bundle_inputs(&unsupported)
+                .unwrap_err()
+                .code(),
+            ErrorCode::InvalidProfileInput
+        );
+    }
+
+    #[test]
+    fn static_and_bundle_ffmpeg_profiles_share_the_channel_allowlist() {
+        for channels in FFMPEG_CHANNELS {
+            let mut request = request();
+            set_int64_input(&mut request, "channels", *channels);
+            assert!(
+                validate_ffmpeg_inputs(&request).is_ok(),
+                "static {channels}"
+            );
+            assert!(
+                validate_ffmpeg_bundle_inputs(&request).is_ok(),
+                "Bundle {channels}"
+            );
+        }
+
+        let mut unsupported = request();
+        set_int64_input(&mut unsupported, "channels", 3);
+        assert_eq!(
+            validate_ffmpeg_inputs(&unsupported).unwrap_err().code(),
+            ErrorCode::InvalidProfileInput
+        );
+        assert_eq!(
+            validate_ffmpeg_bundle_inputs(&unsupported)
+                .unwrap_err()
+                .code(),
+            ErrorCode::InvalidProfileInput
+        );
+    }
+
+    #[test]
+    fn identical_ffmpeg_requests_get_the_same_static_and_bundle_input_decision() {
+        for (sample_rate_hz, channels) in [
+            (8_000, 1),
+            (48_000, 2),
+            (12_345, 1),
+            (16_000, 3),
+            (12_345, 3),
+        ] {
+            let mut request = request();
+            set_int64_input(&mut request, "sample_rate_hz", sample_rate_hz);
+            set_int64_input(&mut request, "channels", channels);
+
+            let static_result = validate_ffmpeg_inputs(&request);
+            let bundle_result = validate_ffmpeg_bundle_inputs(&request);
+            assert_eq!(
+                static_result.is_ok(),
+                bundle_result.is_ok(),
+                "sample_rate_hz={sample_rate_hz}, channels={channels}"
+            );
+            if let (Err(static_error), Err(bundle_error)) = (static_result, bundle_result) {
+                assert_eq!(static_error.code(), ErrorCode::InvalidProfileInput);
+                assert_eq!(bundle_error.code(), ErrorCode::InvalidProfileInput);
+            }
+        }
+    }
+
+    #[test]
     fn ffmpeg_inputs_reject_unsupported_values_and_wrong_slot_sets() {
         let mut unsupported_rate = request();
         unsupported_rate.inputs.insert(
@@ -1920,36 +2062,52 @@ mod tests {
         let output = Path::new(
             "/var/lib/taskcage/artifacts/.taskcage/staging/task/artifacts/out/result.wav",
         );
-        assert_eq!(
-            ffmpeg_arguments(input, 16_000, 1, output),
-            vec![
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostdin",
-                "-i",
-                input.to_str().unwrap(),
-                "-map",
-                "0:a:0",
-                "-vn",
-                "-c:a",
-                "pcm_s16le",
-                "-ar",
-                "16000",
-                "-ac",
-                "1",
-                output.to_str().unwrap(),
-            ]
+        let expected_argv = vec![
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-i",
+            input.to_str().unwrap(),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-c:a",
+            "pcm_s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            output.to_str().unwrap(),
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+        assert_eq!(ffmpeg_arguments(input, 16_000, 1, output), expected_argv);
+
+        let bundle_profile = ffmpeg_bundle_profile();
+        let (_, bundle_arguments) =
+            validate_bundle_inputs(&request(), &bundle_profile.inputs, &bundle_profile.argv)
+                .unwrap();
+        let bundle_argv = bundle_arguments
             .into_iter()
-            .map(OsString::from)
-            .collect::<Vec<_>>()
-        );
+            .map(|argument| match argument {
+                BundleArgument::Literal(value) => value,
+                BundleArgument::Input => input.as_os_str().to_owned(),
+                BundleArgument::Output => output.as_os_str().to_owned(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(bundle_argv, expected_argv);
+
         let declared =
             DeclaredOutputArtifact::new(FFMPEG_OUTPUT_FILE, FFMPEG_OUTPUT_MEDIA_TYPE, 1024)
                 .unwrap();
         assert_eq!(FFMPEG_OUTPUT_SLOT, "audio");
         assert_eq!(declared.file_name(), "result.wav");
         assert_eq!(declared.media_type(), "audio/wav");
+        assert_eq!(bundle_profile.output.name, FFMPEG_OUTPUT_SLOT);
+        assert_eq!(bundle_profile.output.file_name, FFMPEG_OUTPUT_FILE);
+        assert_eq!(bundle_profile.output.media_type, FFMPEG_OUTPUT_MEDIA_TYPE);
     }
 
     #[test]

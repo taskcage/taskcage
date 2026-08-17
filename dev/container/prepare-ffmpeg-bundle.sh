@@ -32,8 +32,8 @@ printf '%s\n' \
   '  "version": "1.0.0",' \
   '  "inputs": [' \
   '    {"name":"source","kind":"LOCAL_INPUT","required":true},' \
-  '    {"name":"sample_rate_hz","kind":"INT64","required":true,"minimum":8000,"maximum":48000},' \
-  '    {"name":"channels","kind":"INT64","required":true,"minimum":1,"maximum":2}' \
+  '    {"name":"sample_rate_hz","kind":"INT64","required":true,"allowedValues":[8000,16000,22050,44100,48000]},' \
+  '    {"name":"channels","kind":"INT64","required":true,"allowedValues":[1,2]}' \
   '  ],' \
   '  "output": {"name":"audio","fileName":"result.wav","mediaType":"audio/wav","maximumBytes":104857600},' \
   '  "argv": [' \

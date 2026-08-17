@@ -181,6 +181,8 @@ pub struct BundleInput {
     pub kind: String,
     pub required: bool,
     #[serde(default)]
+    pub allowed_values: Option<Vec<i64>>,
+    #[serde(default)]
     pub minimum: Option<i64>,
     #[serde(default)]
     pub maximum: Option<i64>,
@@ -669,13 +671,7 @@ fn validate_bundle(
                 ));
             }
         }
-        if (input.minimum.is_some() || input.maximum.is_some())
-            && (input.kind != "INT64" || input.minimum > input.maximum)
-        {
-            return Err(BundleError::Manifest(
-                "minimum/maximum은 ordered INT64 input에만 허용됩니다".to_owned(),
-            ));
-        }
+        validate_input_schema(input)?;
     }
     if local_inputs != 1 {
         return Err(BundleError::Manifest(
@@ -725,6 +721,31 @@ fn validate_bundle(
     )
     .map_err(|error| BundleError::Manifest(format!("policy가 잘못되었습니다: {error}")))?;
     Ok(())
+}
+
+fn validate_input_schema(input: &BundleInput) -> BundleResult<()> {
+    if input.kind != "INT64" {
+        if input.allowed_values.is_some() || input.minimum.is_some() || input.maximum.is_some() {
+            return Err(BundleError::Manifest(
+                "allowedValues와 minimum/maximum은 INT64 input에만 허용됩니다".to_owned(),
+            ));
+        }
+        return Ok(());
+    }
+
+    match (&input.allowed_values, input.minimum, input.maximum) {
+        (Some(values), None, None)
+            if (1..=64).contains(&values.len())
+                && values.windows(2).all(|pair| pair[0] < pair[1]) =>
+        {
+            Ok(())
+        }
+        (None, Some(minimum), Some(maximum)) if minimum <= maximum => Ok(()),
+        _ => Err(BundleError::Manifest(
+            "INT64 input은 1..=64개의 strictly ascending allowedValues 또는 완전한 ordered minimum/maximum 중 하나만 가져야 합니다"
+                .to_owned(),
+        )),
+    }
 }
 
 fn validate_argv(
@@ -1005,16 +1026,40 @@ mod tests {
             "version": "1.0.0",
             "inputs": [
                 {"name":"source","kind":"LOCAL_INPUT","required":true},
-                {"name":"sample_rate_hz","kind":"INT64","required":true,"minimum":8000,"maximum":192000}
+                {"name":"sample_rate_hz","kind":"INT64","required":true,"allowedValues":[8000,16000,22050,44100,48000]},
+                {"name":"channels","kind":"INT64","required":true,"allowedValues":[1,2]}
             ],
             "output": {"name":"audio","fileName":"result.wav","mediaType":"audio/wav","maximumBytes":1024},
-            "argv": ["-i", {"input":"source"}, {"int64":"sample_rate_hz"}, {"output":"audio"}],
+            "argv": ["-hide_banner", "-loglevel", "error", "-nostdin", "-i", {"input":"source"}, "-map", "0:a:0", "-vn", "-c:a", "pcm_s16le", "-ar", {"int64":"sample_rate_hz"}, "-ac", {"int64":"channels"}, {"output":"audio"}],
             "policy": {
                 "limits": {"cpuMax":{"quotaMicros":100000,"periodMicros":100000},"memoryMaxBytes":536870912,"pidsMax":32,"wallTimeLimitMs":120000},
                 "output": {"stdoutTailMaxBytes":1024,"stderrTailMaxBytes":1024}
             },
             "allowedOverrides": []
         })).unwrap()
+    }
+
+    fn profile_value() -> serde_json::Value {
+        serde_json::from_slice(&profile_bytes()).unwrap()
+    }
+
+    fn validate_profile_manifest(profile: serde_json::Value) -> BundleResult<()> {
+        let profile_raw = serde_json::to_vec(&profile).unwrap();
+        let bundle_raw = bundle_bytes(
+            &profile_raw,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let bundle: BundleManifest = serde_json::from_slice(&bundle_raw).unwrap();
+        let profile: BundleProfile = serde_json::from_slice(&profile_raw).unwrap();
+
+        validate_bundle(&bundle, &profile, &profile_raw)
+    }
+
+    fn assert_profile_manifest_rejected(profile: serde_json::Value) {
+        assert!(matches!(
+            validate_profile_manifest(profile),
+            Err(BundleError::Manifest(_))
+        ));
     }
 
     fn bundle_bytes(profile: &[u8], runtime_digest: &str) -> Vec<u8> {
@@ -1137,6 +1182,61 @@ mod tests {
         let verified = VerifiedArchive::read(file.path(), &keys).unwrap();
         assert_eq!(verified.bundle.name, "ffmpeg-audio-to-wav");
         assert_eq!(verified.bundle.version, "1.0.0");
+    }
+
+    #[test]
+    fn accepts_a_complete_int64_range_instead_of_allowed_values() {
+        let mut profile = profile_value();
+        let sample_rate = profile["inputs"][1].as_object_mut().unwrap();
+        sample_rate.remove("allowedValues");
+        sample_rate.insert("minimum".to_owned(), serde_json::json!(8_000));
+        sample_rate.insert("maximum".to_owned(), serde_json::json!(48_000));
+
+        assert!(validate_profile_manifest(profile).is_ok());
+    }
+
+    #[test]
+    fn rejects_empty_duplicate_unsorted_or_oversized_int64_allowed_values() {
+        let invalid_values = [
+            serde_json::json!([]),
+            serde_json::json!([8_000, 8_000]),
+            serde_json::json!([16_000, 8_000]),
+            serde_json::json!((0..65).collect::<Vec<_>>()),
+        ];
+
+        for values in invalid_values {
+            let mut profile = profile_value();
+            profile["inputs"][1]["allowedValues"] = values;
+            assert_profile_manifest_rejected(profile);
+        }
+    }
+
+    #[test]
+    fn rejects_allowed_values_on_non_int64_or_together_with_a_range() {
+        let mut non_int64 = profile_value();
+        non_int64["inputs"][0]["allowedValues"] = serde_json::json!([1]);
+        assert_profile_manifest_rejected(non_int64);
+
+        let mut mixed = profile_value();
+        mixed["inputs"][1]["minimum"] = serde_json::json!(8_000);
+        mixed["inputs"][1]["maximum"] = serde_json::json!(48_000);
+        assert_profile_manifest_rejected(mixed);
+    }
+
+    #[test]
+    fn rejects_int64_without_one_complete_validation_contract() {
+        let mut missing = profile_value();
+        missing["inputs"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("allowedValues");
+        assert_profile_manifest_rejected(missing);
+
+        let mut partial_range = profile_value();
+        let sample_rate = partial_range["inputs"][1].as_object_mut().unwrap();
+        sample_rate.remove("allowedValues");
+        sample_rate.insert("minimum".to_owned(), serde_json::json!(8_000));
+        assert_profile_manifest_rejected(partial_range);
     }
 
     #[test]
@@ -1297,6 +1397,7 @@ mod tests {
                     "sample_rate_hz".to_owned(),
                     ProfileInputValue::Int64 { value: 16_000 },
                 ),
+                ("channels".to_owned(), ProfileInputValue::Int64 { value: 1 }),
             ]),
             resource_overrides: None,
         };
