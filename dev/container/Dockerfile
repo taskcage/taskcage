@@ -11,7 +11,7 @@ RUN cargo build --workspace --release --locked
 FROM ubuntu:24.04 AS daemon
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg openssl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=rust-builder /workspace/target/release/taskcaged /usr/local/bin/taskcaged
@@ -22,6 +22,7 @@ COPY daemon/tests/data/remote-chain.pem daemon/tests/data/remote-end.key daemon/
 COPY --chmod=0755 dev/container/entrypoint.sh /usr/local/bin/taskcage-container-entrypoint
 COPY --chmod=0755 dev/container/remote-entrypoint.sh /usr/local/bin/taskcage-container-remote-entrypoint
 COPY --chmod=0755 dev/container/prepare-ffmpeg-package.sh /usr/local/bin/taskcage-container-prepare-ffmpeg-package
+COPY --chmod=0755 dev/container/prepare-ffmpeg-bundle.sh /usr/local/bin/taskcage-container-prepare-ffmpeg-bundle
 COPY --chmod=0755 dev/container/verify-cleanup.sh /usr/local/bin/taskcage-container-verify-cleanup
 
 ENV RUST_LOG=taskcaged=info \
