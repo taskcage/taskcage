@@ -8,6 +8,10 @@ TaskCage는 신뢰된 외부 프로세스를 작업 단위로 실행하고, Linu
 > Raw Command·Profile과 opt-in Remote TLS Profile·Artifact API를 제공한다. `0.x`는 초기 개발 버전이며
 > 공개 API와 운영 계약이 이후 minor 버전에서 변경될 수 있다.
 
+> **다음 방향:** 다음 breaking 공개 계약은 Bundle/Profile 중심으로 전환한다. 현재 Local Raw Command는
+> 기존 릴리스의 호환 경로이며, 새 실행 경험은 Bundle import → generic Profile request 또는 language
+> Binding 호출을 목표로 한다.
+
 제품의 장기 방향과 표준 용어는 [제품 철학과 용어](docs/product-philosophy.md)에서 정의한다. 이 README는
 현재 설치 가능한 Local 및 opt-in Remote Public Alpha 범위를 설명한다.
 
@@ -252,6 +256,7 @@ bash integration-tests/release-artifact-smoke.sh \
 ## 문서
 
 - [제품 철학과 용어](docs/product-philosophy.md)
+- [Bundle 형식 초안](docs/bundle-format.md)
 - [Protocol v1 API 명세](docs/api-mvp.md)
 - [Remote Protocol v1](docs/remote-protocol-v1.md)
 - [Remote daemon 설정](daemon/REMOTE.md)
@@ -270,15 +275,16 @@ bash integration-tests/release-artifact-smoke.sh \
 ## 단계별 제품 방향
 
 `0.1.0`은 Local UDS와 Raw Command 기준선을, `0.2.0`은 opt-in Local Profile·Artifact·Runtime Package를,
-`0.4.0` daemon과 `0.3.0` Java SDK는 인증된 Remote Profile·Artifact 전송을 추가했다. 다음 목표는 기능을
-넓히기보다 외부 사용자의 설치 시간, 실제 workload와 운영 피드백을 수집하고 호환되는 결함을 patch
-버전으로 수정하는 것이다.
+`0.4.0` daemon과 `0.3.0` Java SDK는 인증된 Remote Profile·Artifact 전송을 추가했다. 이들은 현재
+설치 가능한 공개 계약이다.
 
-Profile·Package·Artifact를 일반화하거나 Profile을 더 늘리기 전에는 현재 경로를 Public Alpha의 외부
-사용자와 반복 요구로 검증한다. 재현 가능한 실행은 버전 관리되는 Execution Profile과 digest로 고정한
-Runtime Package를 사용한다.
-Bundle은 Package binary가 아니라 Profile, Runtime Package ref + digest, 플랫폼·정책·무결성 정보를
-담으며, 여러 Bundle이 같은 Package digest를 공유할 수 있다.
+다음 제품 단계는 임의 executable과 argv를 받는 API를 더 넓히는 대신, Bundle/Profile 실행 경험을
+완결하는 것이다. MVP는 중앙 Hub 없이 Local Bundle import, Runtime Package 검증, generic
+`ProfileRequest`, Artifact 입출력, 첫 FFmpeg Binding을 하나의 흐름으로 제공한다.
+
+Bundle은 Profile, Runtime Package ref + digest, 플랫폼·정책·무결성 정보를 담는 불변 실행 계약이다.
+Package는 daemon cache에서 digest 기준으로 공유한다. 초기 archive와 검증 방향은
+[Bundle 형식 초안](docs/bundle-format.md)에 정리되어 있으며, 아직 구현된 wire 계약은 아니다.
 
 Remote Protocol v1은 Local UDS를 대체하지 않는 opt-in 경로다. TLS 1.3, service-account 인증,
 principal별 Profile authorization과 관리되는 Artifact 전달을 사용하며 Remote Raw Command와 Local fallback을

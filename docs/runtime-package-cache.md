@@ -7,6 +7,10 @@ Runtime Package는 신뢰된 Linux 실행 파일과 필요한 library·license·
 고정한다. 이 기능은 Hub, URL download, 자동 update, eviction, Bundle import 또는 container image를
 제공하지 않는다.
 
+다음 Bundle-first 단계에서는 Bundle이 이 문서의 immutable Package digest를 참조한다. Bundle archive의
+import와 signature 검증은 별도 계약이며, 이 cache 계약을 우회하거나 Package를 mutable path로 실행하게
+해서는 안 된다. 계획상 형식은 [Bundle 형식 초안](bundle-format.md)에 있다.
+
 지원 platform은 현재 `linux/x86_64/gnu`, `linux/aarch64/gnu`와 glibc다. Package architecture는 daemon이
 실행 중인 host architecture와 정확히 일치해야 하며, Package가 요구하는 최소 glibc version이 host보다 높으면
 import와 resolve가 모두 실패한다.
