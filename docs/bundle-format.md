@@ -135,14 +135,24 @@ Placeholder names must identify a declared slot of the matching kind. Strings ar
 v0alpha1 has no optional slots, arrays, arbitrary JSON, environment, custom working directory, multiple outputs, or
 caller-supplied executable.
 
-`policy` and `allowedOverrides` have the same effective-resource validation as Profile API v2. A Bundle can only reduce
-what the daemon deployment allows. Unsupported profile schema or platform makes the Bundle unavailable; it does not
-cause a Raw Command fallback.
+`policy` and `allowedOverrides` have the same effective-resource validation as Profile API v2. Each v0alpha1 `policy`
+value is both the Profile default and the Bundle maximum. A Bundle can only reduce what the daemon deployment allows.
+Unsupported profile schema or platform makes the Bundle unavailable; it does not cause a Raw Command fallback.
 
 `policy` must contain complete `limits` and `output` objects using the Profile API v2 resource shape. `allowedOverrides`
 is a unique subset of `limits.cpuMax`, `limits.memoryMaxBytes`, `limits.pidsMax`, `limits.wallTimeLimitMs`,
 `output.stdoutTailMaxBytes`, and `output.stderrTailMaxBytes`. A request that supplies a field outside this set is
-rejected before an Artifact is staged or a Task is created.
+rejected with `LIMIT_EXCEEDS_POLICY`, retryable `false`.
+
+An allowed override must be equal to or more restrictive than the corresponding `policy` value. CPU quota/period ratios
+are compared exactly with integer cross-multiplication; memory, PID, wall time and stdout/stderr tail values must be less
+than or equal to the Bundle value. The resulting effective budget is then checked independently against the daemon
+deployment maximum. A Bundle or deployment maximum violation returns `LIMIT_EXCEEDS_POLICY`, retryable `false`.
+An empty override or a value that does not satisfy the positive integral resource shape returns
+`INVALID_PROFILE_INPUT`, retryable `false`.
+
+All override and maximum checks finish before Artifact staging, Task or Registry records, task cgroups and target
+processes are created. A rejected request leaves none of those execution side effects.
 
 ## Runtime Package 관계
 

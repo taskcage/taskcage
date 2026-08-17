@@ -24,7 +24,9 @@ use crate::codec::{FrameError, decode_json, read_frame_or_eof, write_json_frame}
 use crate::deadline::MonotonicDeadline;
 use crate::fail_stop::FailStopCoordinator;
 use crate::handlers::{ProtocolHandlers, SubmitContext};
-use crate::protocol::{ErrorCode, ErrorPayload, PROTOCOL_VERSION, Request, Response};
+use crate::protocol::{
+    ErrorCode, ErrorPayload, PROFILE_PROTOCOL_VERSION, PROTOCOL_VERSION, Request, Response,
+};
 use crate::startup::StartupOwnership;
 #[cfg(test)]
 use crate::submit::TaskRegistrySettings;
@@ -615,7 +617,11 @@ async fn handle_connection(
                     return Err(ConnectionError::InvalidRequest);
                 };
                 audit::log_invalid_request(&request_id);
-                let response = invalid_request_response(request_id);
+                let response = if has_malformed_profile_resource_number(&value) {
+                    invalid_profile_input_response(request_id)
+                } else {
+                    invalid_request_response(request_id)
+                };
                 write_json_frame(&mut stream, &response).await?;
                 continue;
             }
@@ -643,6 +649,52 @@ fn invalid_request_response(request_id: String) -> Response {
         payload: ErrorPayload {
             code: ErrorCode::InvalidRequest,
             message: "request does not match the protocol v1 schema".to_owned(),
+            retryable: false,
+        },
+    }
+}
+
+fn has_malformed_profile_resource_number(value: &Value) -> bool {
+    if value.get("type").and_then(Value::as_str) != Some("submitProfile")
+        || value.get("protocolVersion").and_then(Value::as_u64)
+            != Some(u64::from(PROFILE_PROTOCOL_VERSION))
+    {
+        return false;
+    }
+
+    const U64_PATHS: [&str; 5] = [
+        "/payload/resourceOverrides/limits/cpuMax/quotaMicros",
+        "/payload/resourceOverrides/limits/cpuMax/periodMicros",
+        "/payload/resourceOverrides/limits/memoryMaxBytes",
+        "/payload/resourceOverrides/limits/pidsMax",
+        "/payload/resourceOverrides/limits/wallTimeLimitMs",
+    ];
+    const U32_PATHS: [&str; 2] = [
+        "/payload/resourceOverrides/output/stdoutTailMaxBytes",
+        "/payload/resourceOverrides/output/stderrTailMaxBytes",
+    ];
+
+    U64_PATHS.iter().any(|path| {
+        value
+            .pointer(path)
+            .is_some_and(|number| number.as_u64().is_none())
+    }) || U32_PATHS.iter().any(|path| {
+        value.pointer(path).is_some_and(|number| {
+            number
+                .as_u64()
+                .and_then(|number| u32::try_from(number).ok())
+                .is_none()
+        })
+    })
+}
+
+fn invalid_profile_input_response(request_id: String) -> Response {
+    Response::Error {
+        protocol_version: PROFILE_PROTOCOL_VERSION,
+        request_id,
+        payload: ErrorPayload {
+            code: ErrorCode::InvalidProfileInput,
+            message: "resourceOverrides contains a malformed resource number".to_owned(),
             retryable: false,
         },
     }
@@ -1585,6 +1637,57 @@ mod tests {
                 ..
             } if request_id == FIRST_REQUEST_ID
         ));
+        assert!(matches!(
+            exchange(&mut stream, &capability_request(SECOND_REQUEST_ID)).await,
+            Response::Capabilities { .. }
+        ));
+
+        shutdown.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_profile_resource_numbers_return_profile_input_error_before_dispatch() {
+        let path = TestSocketPath::new("invalid-profile-resource-number");
+        let dispatch_calls = Arc::new(AtomicUsize::new(0));
+        let dispatch: Dispatch = {
+            let dispatch_calls = Arc::clone(&dispatch_calls);
+            Arc::new(move |request| {
+                dispatch_calls.fetch_add(1, Ordering::Relaxed);
+                let request_id = request.request_id().to_owned();
+                Box::pin(async move { capabilities(request_id) })
+            })
+        };
+        let (shutdown, server) = start_server(path.socket.clone(), dispatch).await;
+        let mut stream = connect(&path.socket).await;
+
+        for resource_overrides in [
+            r#"{"limits":{"memoryMaxBytes":1.5}}"#,
+            r#"{"limits":{"pidsMax":1e3}}"#,
+            r#"{"output":{"stdoutTailMaxBytes":4294967296}}"#,
+        ] {
+            let payload = format!(
+                r#"{{"protocolVersion":2,"requestId":"{FIRST_REQUEST_ID}","type":"submitProfile","payload":{{"clientRequestId":"33333333-3333-3333-3333-333333333333","profile":{{"name":"copy","version":"1.0.0"}},"inputs":{{}},"resourceOverrides":{resource_overrides}}}}}"#
+            );
+            let mut frame = (payload.len() as u32).to_be_bytes().to_vec();
+            frame.extend_from_slice(payload.as_bytes());
+            stream.write_all(&frame).await.unwrap();
+
+            let response: Response = read_json_frame(&mut stream).await.unwrap();
+            assert!(matches!(
+                response,
+                Response::Error {
+                    protocol_version: PROFILE_PROTOCOL_VERSION,
+                    request_id,
+                    payload: ErrorPayload {
+                        code: ErrorCode::InvalidProfileInput,
+                        retryable: false,
+                        ..
+                    },
+                } if request_id == FIRST_REQUEST_ID
+            ));
+        }
+        assert_eq!(dispatch_calls.load(Ordering::Relaxed), 0);
         assert!(matches!(
             exchange(&mut stream, &capability_request(SECOND_REQUEST_ID)).await,
             Response::Capabilities { .. }

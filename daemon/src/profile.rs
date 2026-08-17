@@ -1179,36 +1179,74 @@ fn resolve_bundle_budget(
     profile: &BundleProfile,
     overrides: Option<&ProfileResourceOverrides>,
 ) -> Result<ResourceBudget, ProfileError> {
-    let default = ResourceBudget::try_from_protocol(
+    let maximum = ResourceBudget::try_from_protocol(
         profile.policy.limits.clone(),
         profile.policy.output.clone(),
     )
     .map_err(profile_input_budget_error)?;
     let Some(overrides) = overrides else {
-        return Ok(default);
+        return Ok(maximum);
     };
-    let allowed = |field: &str| profile.allowed_overrides.iter().any(|value| value == field);
-    if let Some(limits) = &overrides.limits
-        && (limits.cpu_max.is_some() && !allowed("limits.cpuMax")
-            || limits.memory_max_bytes.is_some() && !allowed("limits.memoryMaxBytes")
-            || limits.pids_max.is_some() && !allowed("limits.pidsMax")
-            || limits.wall_time_limit_ms.is_some() && !allowed("limits.wallTimeLimitMs"))
-    {
+    let requested = resolve_budget(&maximum, Some(overrides))?;
+    validate_bundle_override_allowlist(profile, overrides)?;
+    requested
+        .validate_within_maximum(&maximum)
+        .map_err(|error| {
+            ProfileError::new(
+                ErrorCode::LimitExceedsPolicy,
+                format!("resourceOverrides exceeds the Bundle policy: {error}"),
+            )
+        })?;
+    Ok(requested)
+}
+
+fn validate_bundle_override_allowlist(
+    profile: &BundleProfile,
+    overrides: &ProfileResourceOverrides,
+) -> Result<(), ProfileError> {
+    let limits = overrides.limits.as_ref();
+    let output = overrides.output.as_ref();
+    let requested_fields = [
+        (
+            "limits.cpuMax",
+            limits.is_some_and(|value| value.cpu_max.is_some()),
+        ),
+        (
+            "limits.memoryMaxBytes",
+            limits.is_some_and(|value| value.memory_max_bytes.is_some()),
+        ),
+        (
+            "limits.pidsMax",
+            limits.is_some_and(|value| value.pids_max.is_some()),
+        ),
+        (
+            "limits.wallTimeLimitMs",
+            limits.is_some_and(|value| value.wall_time_limit_ms.is_some()),
+        ),
+        (
+            "output.stdoutTailMaxBytes",
+            output.is_some_and(|value| value.stdout_tail_max_bytes.is_some()),
+        ),
+        (
+            "output.stderrTailMaxBytes",
+            output.is_some_and(|value| value.stderr_tail_max_bytes.is_some()),
+        ),
+    ];
+    let disallowed = requested_fields.iter().find_map(|(field, requested)| {
+        (*requested
+            && !profile
+                .allowed_overrides
+                .iter()
+                .any(|allowed| allowed == *field))
+        .then_some(*field)
+    });
+    if let Some(field) = disallowed {
         return Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
-            "resourceOverrides contains a field not allowed by the Bundle",
+            ErrorCode::LimitExceedsPolicy,
+            format!("resourceOverrides field {field} is not allowed by the Bundle"),
         ));
     }
-    if let Some(output) = &overrides.output
-        && (output.stdout_tail_max_bytes.is_some() && !allowed("output.stdoutTailMaxBytes")
-            || output.stderr_tail_max_bytes.is_some() && !allowed("output.stderrTailMaxBytes"))
-    {
-        return Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
-            "resourceOverrides contains a field not allowed by the Bundle",
-        ));
-    }
-    resolve_budget(&default, Some(overrides))
+    Ok(())
 }
 
 fn profile_input_budget_error(error: ResourceBudgetError) -> ProfileError {
@@ -1320,6 +1358,7 @@ fn validate_uuid(field: &'static str, value: &str) -> Result<(), ProfileError> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1327,7 +1366,11 @@ mod tests {
     use serde_json::json;
     use sha2::{Digest, Sha256};
 
-    use crate::protocol::{CpuMax, OutputLimits, ResourceLimits};
+    use crate::deployment_policy::DeploymentResourcePolicy;
+    use crate::protocol::{
+        CpuMax, OutputLimits, PartialOutputLimits, PartialResourceLimits, ProfileResourceOverrides,
+        ResourceLimits,
+    };
     use crate::runtime_package::import_for_service_uid;
 
     use super::*;
@@ -1504,6 +1547,317 @@ mod tests {
             ]),
             resource_overrides: None,
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestResourceOverride {
+        Cpu {
+            quota_micros: u64,
+            period_micros: u64,
+        },
+        Memory(u64),
+        Pids(u64),
+        WallTime(u64),
+        Stdout(u32),
+        Stderr(u32),
+    }
+
+    impl TestResourceOverride {
+        fn field(self) -> &'static str {
+            match self {
+                Self::Cpu { .. } => "limits.cpuMax",
+                Self::Memory(_) => "limits.memoryMaxBytes",
+                Self::Pids(_) => "limits.pidsMax",
+                Self::WallTime(_) => "limits.wallTimeLimitMs",
+                Self::Stdout(_) => "output.stdoutTailMaxBytes",
+                Self::Stderr(_) => "output.stderrTailMaxBytes",
+            }
+        }
+
+        fn request(self) -> ProfileResourceOverrides {
+            let mut limits = PartialResourceLimits::default();
+            let mut output = PartialOutputLimits::default();
+            match self {
+                Self::Cpu {
+                    quota_micros,
+                    period_micros,
+                } => {
+                    limits.cpu_max = Some(CpuMax {
+                        quota_micros,
+                        period_micros,
+                    });
+                }
+                Self::Memory(value) => limits.memory_max_bytes = Some(value),
+                Self::Pids(value) => limits.pids_max = Some(value),
+                Self::WallTime(value) => limits.wall_time_limit_ms = Some(value),
+                Self::Stdout(value) => output.stdout_tail_max_bytes = Some(value),
+                Self::Stderr(value) => output.stderr_tail_max_bytes = Some(value),
+            }
+            ProfileResourceOverrides {
+                limits: (limits != PartialResourceLimits::default()).then_some(limits),
+                output: (output != PartialOutputLimits::default()).then_some(output),
+            }
+        }
+    }
+
+    fn bundle_profile(allowed_overrides: &[&str]) -> BundleProfile {
+        serde_json::from_value(json!({
+            "schemaVersion": "taskcage.profile/v0alpha1",
+            "name": "ffmpeg-audio-to-wav",
+            "version": "1.0.0",
+            "inputs": [
+                {"name": "source", "kind": "LOCAL_INPUT", "required": true}
+            ],
+            "output": {
+                "name": "audio",
+                "fileName": "result.wav",
+                "mediaType": "audio/wav",
+                "maximumBytes": 1024
+            },
+            "argv": [{"input": "source"}, {"output": "audio"}],
+            "policy": {
+                "limits": {
+                    "cpuMax": {"quotaMicros": 100, "periodMicros": 100},
+                    "memoryMaxBytes": 1000,
+                    "pidsMax": 10,
+                    "wallTimeLimitMs": 1000
+                },
+                "output": {
+                    "stdoutTailMaxBytes": 1000,
+                    "stderrTailMaxBytes": 1000
+                }
+            },
+            "allowedOverrides": allowed_overrides
+        }))
+        .unwrap()
+    }
+
+    fn all_bundle_override_fields() -> [&'static str; 6] {
+        [
+            "limits.cpuMax",
+            "limits.memoryMaxBytes",
+            "limits.pidsMax",
+            "limits.wallTimeLimitMs",
+            "output.stdoutTailMaxBytes",
+            "output.stderrTailMaxBytes",
+        ]
+    }
+
+    #[test]
+    fn bundle_policy_values_are_the_default_without_overrides() {
+        let resolved = resolve_bundle_budget(&bundle_profile(&[]), None).unwrap();
+
+        assert_eq!(
+            resolved.protocol_limits(),
+            ResourceLimits {
+                cpu_max: CpuMax {
+                    quota_micros: 100,
+                    period_micros: 100,
+                },
+                memory_max_bytes: 1000,
+                pids_max: 10,
+                wall_time_limit_ms: 1000,
+            }
+        );
+        assert_eq!(
+            resolved.protocol_output(),
+            OutputLimits {
+                stdout_tail_max_bytes: 1000,
+                stderr_tail_max_bytes: 1000,
+            }
+        );
+    }
+
+    #[test]
+    fn bundle_rejects_each_override_missing_from_the_allowlist() {
+        let profile = bundle_profile(&[]);
+        let overrides = [
+            TestResourceOverride::Cpu {
+                quota_micros: 100,
+                period_micros: 100,
+            },
+            TestResourceOverride::Memory(1000),
+            TestResourceOverride::Pids(10),
+            TestResourceOverride::WallTime(1000),
+            TestResourceOverride::Stdout(1000),
+            TestResourceOverride::Stderr(1000),
+        ];
+
+        for value in overrides {
+            let error = resolve_bundle_budget(&profile, Some(&value.request())).unwrap_err();
+            assert_eq!(
+                error.code(),
+                ErrorCode::LimitExceedsPolicy,
+                "{}",
+                value.field()
+            );
+        }
+    }
+
+    #[test]
+    fn bundle_accepts_each_override_equal_to_its_policy_maximum() {
+        let profile = bundle_profile(&all_bundle_override_fields());
+        for value in [
+            TestResourceOverride::Cpu {
+                quota_micros: 100,
+                period_micros: 100,
+            },
+            TestResourceOverride::Memory(1000),
+            TestResourceOverride::Pids(10),
+            TestResourceOverride::WallTime(1000),
+            TestResourceOverride::Stdout(1000),
+            TestResourceOverride::Stderr(1000),
+        ] {
+            assert!(
+                resolve_bundle_budget(&profile, Some(&value.request())).is_ok(),
+                "{}",
+                value.field()
+            );
+        }
+    }
+
+    #[test]
+    fn bundle_accepts_each_more_restrictive_override() {
+        let profile = bundle_profile(&all_bundle_override_fields());
+        for value in [
+            TestResourceOverride::Cpu {
+                quota_micros: 50,
+                period_micros: 100,
+            },
+            TestResourceOverride::Memory(999),
+            TestResourceOverride::Pids(9),
+            TestResourceOverride::WallTime(999),
+            TestResourceOverride::Stdout(999),
+            TestResourceOverride::Stderr(999),
+        ] {
+            assert!(
+                resolve_bundle_budget(&profile, Some(&value.request())).is_ok(),
+                "{}",
+                value.field()
+            );
+        }
+    }
+
+    #[test]
+    fn bundle_rejects_each_override_above_its_policy_maximum() {
+        let profile = bundle_profile(&all_bundle_override_fields());
+        for value in [
+            TestResourceOverride::Cpu {
+                quota_micros: 101,
+                period_micros: 100,
+            },
+            TestResourceOverride::Memory(1001),
+            TestResourceOverride::Pids(11),
+            TestResourceOverride::WallTime(1001),
+            TestResourceOverride::Stdout(1001),
+            TestResourceOverride::Stderr(1001),
+        ] {
+            let error = resolve_bundle_budget(&profile, Some(&value.request())).unwrap_err();
+            assert_eq!(
+                error.code(),
+                ErrorCode::LimitExceedsPolicy,
+                "{}",
+                value.field()
+            );
+        }
+    }
+
+    #[test]
+    fn bundle_compares_cpu_ratios_exactly_without_floating_point() {
+        let profile = bundle_profile(&["limits.cpuMax"]);
+        let equal_ratio = TestResourceOverride::Cpu {
+            quota_micros: 200,
+            period_micros: 200,
+        }
+        .request();
+        assert!(resolve_bundle_budget(&profile, Some(&equal_ratio)).is_ok());
+
+        let above_ratio = TestResourceOverride::Cpu {
+            quota_micros: 201,
+            period_micros: 200,
+        }
+        .request();
+        assert_eq!(
+            resolve_bundle_budget(&profile, Some(&above_ratio))
+                .unwrap_err()
+                .code(),
+            ErrorCode::LimitExceedsPolicy
+        );
+    }
+
+    #[test]
+    fn bundle_keeps_empty_and_invalid_numeric_overrides_as_profile_input_errors() {
+        let profile = bundle_profile(&all_bundle_override_fields());
+        let empty = ProfileResourceOverrides {
+            limits: Some(PartialResourceLimits::default()),
+            output: None,
+        };
+        assert_eq!(
+            resolve_bundle_budget(&profile, Some(&empty))
+                .unwrap_err()
+                .code(),
+            ErrorCode::InvalidProfileInput
+        );
+
+        let zero = TestResourceOverride::Memory(0).request();
+        assert_eq!(
+            resolve_bundle_budget(&profile, Some(&zero))
+                .unwrap_err()
+                .code(),
+            ErrorCode::InvalidProfileInput
+        );
+    }
+
+    #[test]
+    fn deployment_maximum_is_checked_after_the_bundle_maximum() {
+        let profile = bundle_profile(&["limits.memoryMaxBytes"]);
+        let requested =
+            resolve_bundle_budget(&profile, Some(&TestResourceOverride::Memory(900).request()))
+                .unwrap();
+        let deployment = DeploymentResourcePolicy::try_new(
+            ResourceLimits {
+                cpu_max: CpuMax {
+                    quota_micros: 100,
+                    period_micros: 100,
+                },
+                memory_max_bytes: 800,
+                pids_max: 10,
+                wall_time_limit_ms: 1000,
+            },
+            OutputLimits {
+                stdout_tail_max_bytes: 1000,
+                stderr_tail_max_bytes: 1000,
+            },
+        )
+        .unwrap();
+
+        assert!(deployment.validate(&requested).is_err());
+    }
+
+    #[test]
+    fn bundle_policy_rejection_precedes_all_execution_side_effects() {
+        let profile = bundle_profile(&[]);
+        let artifact_staging = Cell::new(0);
+        let task_records = Cell::new(0);
+        let cgroup_creations = Cell::new(0);
+        let target_starts = Cell::new(0);
+
+        let result = resolve_bundle_budget(
+            &profile,
+            Some(&TestResourceOverride::Memory(1000).request()),
+        )
+        .map(|_| {
+            artifact_staging.set(artifact_staging.get() + 1);
+            task_records.set(task_records.get() + 1);
+            cgroup_creations.set(cgroup_creations.get() + 1);
+            target_starts.set(target_starts.get() + 1);
+        });
+
+        assert_eq!(result.unwrap_err().code(), ErrorCode::LimitExceedsPolicy);
+        assert_eq!(artifact_staging.get(), 0);
+        assert_eq!(task_records.get(), 0);
+        assert_eq!(cgroup_creations.get(), 0);
+        assert_eq!(target_starts.get(), 0);
     }
 
     #[test]

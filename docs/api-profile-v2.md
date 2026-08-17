@@ -182,12 +182,20 @@ Registry reservation, task cgroup 또는 executable process는 만들지 않으�
 - `cpuMax`는 quota와 period를 함께 가져야 하며, 비율은 integer cross-multiplication으로 비교한다.
 - output tail은 v1과 같이 stream마다 1~65,536 bytes, 합계 131,072 bytes 이하다.
 - unspecified value는 Profile ResourcePolicy default를 사용한다.
-- 지정된 field는 Profile의 allowed override이면서 그 maximum과 daemon deployment maximum을 모두 넘지
-  않아야 한다. default보다 크거나 작은 override를 허용할지는 Profile이 정한 maximum으로만 결정한다.
+- Bundle v0alpha1에서 `profile.policy`의 각 값은 default이면서 Bundle이 허용하는 maximum이다.
+- 지정된 field는 `allowedOverrides`에 포함돼야 하며, 허용된 override도 Bundle maximum과 같거나 더
+  제한적이어야 한다. CPU는 quota/period 비율을 부동소수점 없이 정확히 비교하고, memory, PID, wall time,
+  stdout/stderr tail은 해당 Bundle policy 값 이하여야 한다.
+- Bundle policy를 통과한 완성 예산도 daemon deployment maximum을 다시 검증한다. Bundle과 deployment 중
+  어느 하나라도 넘으면 실행하지 않는다.
 - 모든 완성 effective value는 target 시작 전에 검증하며, v1과 같은 cgroup read-back 불일치는 target을
   시작하지 않고 `INTERNAL_ERROR`로 끝낸다.
 
-허용되지 않았거나 policy를 넘은 override는 `LIMIT_EXCEEDS_POLICY`, retryable `false`다.
+허용되지 않은 field, Bundle maximum 초과 또는 daemon deployment maximum 초과는
+`LIMIT_EXCEEDS_POLICY`, retryable `false`다. 비어 있는 `resourceOverrides`, 0, fraction, exponent, 범위 밖
+integer처럼 positive integral number 계약을 만족하지 않는 값은 `INVALID_PROFILE_INPUT`, retryable `false`다.
+이 거절은 Artifact staging·snapshot, Task record·Registry reservation, task cgroup 생성과 target 시작 전에
+끝나며, 거절된 요청의 실행 side effect를 남기지 않는다.
 
 ## v2 operation과 결과
 
