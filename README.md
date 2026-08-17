@@ -148,23 +148,30 @@ Local Profile은 기본적으로 꺼져 있다. 위의 두 Artifact 옵션을 **
 `file-copy@1.0.0` Profile과 Protocol v2 capability를 공개한다. 이 Profile은 Runtime Package, Bundle,
 임의 executable 또는 caller-provided argv를 허용하지 않는다.
 
-`ffmpeg-audio-to-wav@1.0.0`을 추가로 등록하려면 daemon과 같은 service UID로 Package를 먼저 import하고
-Artifact 설정에 cache root와 digest를 함께 지정한다.
+Bundle-first Profile을 실행하려면 daemon과 같은 service UID로 Runtime Package와 signed Bundle을 같은 cache에
+차례로 import하고, Artifact 설정에 Bundle cache root를 지정한다.
 
 ```bash
 sudo -u taskcage taskcaged import-package \
   --source /srv/taskcage-import/ffmpeg-7.1.1 \
   --cache-root /var/lib/taskcage
 
+sudo -u taskcage taskcaged bundle import \
+  --source /srv/taskcage-import/ffmpeg-audio-to-wav-1.0.0.tcbundle.tar.gz \
+  --cache-root /var/lib/taskcage \
+  --trusted-key taskcage-release-2026=/etc/taskcage/keys/taskcage-release-2026.pub
+
 taskcaged serve \
   <필수 serve 옵션과 Artifact 옵션> \
-  --runtime-package-cache-root /var/lib/taskcage \
-  --ffmpeg-audio-to-wav-package-digest sha256:<64-lowercase-hex>
+  --bundle-cache-root /var/lib/taskcage
 ```
 
-daemon은 등록된 Package가 없거나 손상됐거나 host와 호환되지 않거나 manifest의 `id`가
-`org.taskcage.ffmpeg`, `entrypoint`가 `bin/ffmpeg`가 아니면 시작을 거부한다. 새 FFmpeg Task마다 Package를
-다시 검증하고 entrypoint descriptor를 고정한 채 shell과 PATH lookup 없이 실행한다.
+daemon은 요청한 Bundle이 없거나, Bundle이 참조한 Package가 손상됐거나 host와 호환되지 않으면 Task를 시작하지
+않는다. 새 Profile Task마다 Package를 다시 검증하고 entrypoint descriptor를 고정한 채 선언된 argv만 shell과
+PATH lookup 없이 실행한다.
+
+기존 `--runtime-package-cache-root`와 `--ffmpeg-audio-to-wav-package-digest` 정적 FFmpeg 등록은 호환성을
+위해 남아 있지만, 새 Profile은 Bundle import와 `--bundle-cache-root`를 사용한다.
 
 Artifact root는 daemon service UID 소유의 기존 absolute directory여야 하며, symlink가 아니고
 group/other writable이면 안 된다. daemon은 시작 시 이 조건과 descriptor-relative staging/publish 권한을
