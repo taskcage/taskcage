@@ -237,8 +237,19 @@ taskcaged bundle import \
 Import verifies archive structure, checksums, signature, manifest/profile schema, current host platform, and the already
 verified Package digest before writing anything runnable. It stages the exact verified `bundle.json` and `profile.json` under
 `bundles/sha256/<bundle-digest>/` and atomically activates the identity mapping
-`bundles/catalog/<name>/<version>.json`. The same archive/import returns `ALREADY_PRESENT` only after re-verifying the
-active content. An occupied `(name, version)` with a different digest is an error, never an overwrite.
+`bundles/catalog/<name>/<version>.json`. The mapping is created under a unique `.staging-<pid>-<sequence>` name with
+create-new semantics, written and file-fsynced, verified as a daemon-owned read-only regular file, then moved to the final
+name with `renameat2(RENAME_NOREPLACE)`. A successful activation fsyncs the identity directory. The final mapping is
+therefore either absent or a complete single-link file; activation never overwrites an existing identity.
+
+A process exit before the rename can leave only a staging file and an unreferenced content-addressed Bundle. A process exit
+after the rename but before the directory fsync can leave the complete final mapping visible without a confirmed durable
+directory update. Re-import is the recovery operation: it safely reads an existing final mapping, returns
+`ALREADY_PRESENT` and fsyncs the directory when the digest matches, or returns an identity conflict when it differs.
+`bundle list` and `bundle inspect` ignore a stale staging file only when its generated name, regular-file type, owner,
+device, link count, bounded size and read-only mode are safe. They do not automatically delete staging residue; malformed,
+symlink, unexpected-type, wrong-owner or wrong-device staging entries fail closed. An occupied `(name, version)` is never
+overwritten.
 
 `taskcaged bundle list --cache-root …` returns installed identities and digests; `taskcaged bundle inspect --cache-root …
 --name … --version …` returns the resolved manifest. Neither command executes a program or fetches from the network.
