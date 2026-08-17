@@ -23,6 +23,10 @@ try (TaskCageClient taskCage = TaskCageClient.connect(config)) {
 Binding은 별도 Java 편의 계층이다. Task 제출·조회·취소, transport, Profile wire model과 Artifact value
 type은 기존 TaskCage Core SDK가 계속 소유한다.
 
+이 첫 Binding은 Bundle import가 구현되기 전 Profile/Binding 경험을 검증하는 현재 기준선이다. 다음
+Bundle-first 단계에서는 이 Profile이 FFmpeg Runtime Package digest를 참조하는 Bundle로 배포되고, Binding은
+그 Bundle/Profile version 범위를 선언하는 독립 Java package로 유지한다.
+
 ## 확정된 경계
 
 - 첫 Binding은 FFmpeg CLI 전체가 아니라 하나의 고정된 작업만 제공한다.
@@ -34,6 +38,9 @@ type은 기존 TaskCage Core SDK가 계속 소유한다.
 - Binding은 Java Core SDK artifact에 포함하지 않고 별도 artifact와 package로 제공한다.
 - Runtime Package import/cache와 FFmpeg Package digest 등록은 daemon이 소유한다.
 - Hub, Remote transport, URL input, 여러 input/output, 전체 FFmpeg option 노출은 포함하지 않는다.
+
+Binding은 daemon의 trust boundary가 아니다. Binding이 만든 `ProfileRequest`도 daemon이 설치된 Profile,
+허용된 Package digest, Artifact와 resource override 정책을 다시 검증한다.
 
 ## 실행 계약
 
@@ -86,6 +93,10 @@ publish하지 않는다.
 | 공개 진입점 | `FfmpegAudioToWavBinding` |
 | request | `FfmpegAudioToWavRequest` |
 | result | `FfmpegAudioToWavResult` |
+
+Binding release는 지원하는 `ffmpeg-audio-to-wav` Profile version 범위와 필요한 Core SDK·Protocol version을
+명시해야 한다. Bundle과 Binding은 독립 버전으로 배포되며, Binding이 없더라도 같은 Profile은 Core SDK의
+generic `ProfileRequest`로 실행할 수 있어야 한다.
 
 Binding request는 `LocalInputArtifact`, `AudioSampleRate`, `AudioChannels`와 선택적인
 `ProfileResourceOverrides`만 받는다. Binding은 아래 내용을 고정한다.

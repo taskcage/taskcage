@@ -1,8 +1,8 @@
 # TaskCage Local Profile Core API v2
 
-> 상태: v0.2 Local Product Alpha를 위한 **승인된 Core 계약**이다. 현재 daemon과 Java SDK가 이
-> Protocol v2를 제공한다는 뜻은 아니다. #150과 #153은 이 문서와
-> [`protocol-fixtures/v2/`](../protocol-fixtures/v2/)를 함께 구현해야 한다.
+> 상태: Local Profile의 **현재 Core 계약**이다. Bundle import와 Bundle-first 공개 API는 이 Profile
+> request 의미를 재사용하는 다음 단계이며, 이 문서만으로 Bundle archive 형식이나 설치 절차를 정의하지
+> 않는다. 그 계획은 [Bundle 형식 초안](bundle-format.md)에 있다.
 
 ## 목적과 범위
 
@@ -21,7 +21,7 @@ Local Profile Core는 신뢰된 Linux host의 daemon에 이미 설치된 Executi
 다음은 이 문서의 범위가 아니다.
 
 - FFmpeg·Chromium 등의 Profile Binding과 domain type
-- Runtime Package cache, Bundle 형식, Profile import/install command
+- Runtime Package cache, Bundle archive 형식, Profile import/install command
 - Remote transport, TLS, object storage, Artifact upload/download
 - Spring Boot integration, 임의 JSON value, multi-output, output overwrite
 - Raw Command Protocol v1의 request, response, field 또는 오류 의미 변경

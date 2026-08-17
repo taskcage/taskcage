@@ -6,6 +6,10 @@ TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`�
 > 유지하면서 TLS 1.3 Remote Profile·Artifact API를 추가한다. Remote Profile 실행에는 `taskcaged` `0.4.0`
 > 이상이 필요하다. `0.x`는 초기 개발 버전이며 SDK는 Spring Boot에 의존하지 않는다.
 
+> **다음 방향:** 현재 Raw Command API는 호환성을 위해 유지되지만, 다음 breaking 공개 계약의 주력 API는
+> Bundle/Profile 실행이다. Java 사용자는 generic `ProfileRequest` 또는 도구별 Binding으로 등록된 Bundle을
+> 호출하며, 실행 파일 경로와 argv를 직접 지정하지 않는다.
+
 `0.3.0`은 Local UDS transport, Raw Command, opt-in [Local Profile Core API v2](../docs/api-profile-v2.md)와
 인증된 Remote transport를 구현한다. Remote는 `RemoteTaskCageClient`로 별도 제공하며, Remote Raw Command는
 의도적으로 노출하지 않는다.
@@ -53,9 +57,10 @@ try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(options)) {
 단 한 번만 소비된다. 제출 응답이 유실되면 같은 `clientRequestId`와 같은 `RemoteProfileRequest`로 재제출해야
 한다. output은 완료 snapshot의 `ManagedOutputArtifact`를 `download()`로 local `Path`에 받는다.
 
-첫 사용자 경로의 목표는 Java 개발자가 10분 안에 SDK를 설치하고, 같은 Linux
-호스트의 `taskcaged`를 통해 FFmpeg 작업 하나를 안전하게 실행하는 것이다. Profile·Bundle·Hub보다
-현재 검증된 Raw Command 실행, 자원 제한과 프로세스 트리 정리를 쉽게 사용하는 경험을 우선한다.
+현재 공개 릴리스의 FFmpeg reference workflow는 Raw Command의 자원 제한과 프로세스 트리 정리를 검증한다.
+다음 Bundle-first 사용자 경로의 목표는 Java 개발자가 10분 안에 Bundle을 import하고, 같은 Linux host의
+`taskcaged`에서 generic Profile request 또는 FFmpeg Binding으로 작업 하나를 안전하게 실행하는 것이다.
+Hub는 이 흐름의 필수 구성요소가 아니다.
 
 ## 현재 구현 기반
 
@@ -113,10 +118,19 @@ Artifact root, 실행 파일, working directory 또는 output file name을 선�
 유실 뒤 재시도가 필요하면 `run(UUID clientRequestId, ProfileRequest, Duration)` 또는
 `submitProfileHandle(UUID, ProfileRequest)` overload를 사용한다.
 
+다음 Bundle-first 공개 계약에서 `ProfileRequest`는 Bundle manifest가 등록한 Profile만 선택한다. Core SDK는
+Bundle의 signature나 Package를 신뢰하지 않으며, daemon이 Bundle allowlist, Package digest, input schema와
+resource override를 최종 검증한다. 도구별 Binding은 이 generic request를 Java domain object API로 매핑하는
+별도 artifact다. 자세한 계획은 [Bundle 형식 초안](../docs/bundle-format.md)을 따른다.
+
 현재 호출자는 필요할 때 자원 예산을 override하고 `run()`으로 동기 실행하거나 `TaskHandle`로 상태
 조회·완료 대기·취소를 수행할 수 있다. SDK는 Maven Central의 공개 좌표로 설치할 수 있다.
 
-## Local Raw Command 편의 API
+## Local Raw Command 호환 API
+
+이 절은 현재 공개된 Local Protocol v1과 SDK `0.3.0`의 호환 API를 설명한다. 다음 Bundle-first 공개 계약의
+새 사용자 경로에는 포함하지 않는다. 기존 사용자는 daemon과 SDK의 지원 기간 동안 이 API를 계속 사용할 수
+있지만, 새 integration은 Profile/Binding 경로를 사용해야 한다.
 
 ### 편의 API
 
