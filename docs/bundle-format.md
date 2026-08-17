@@ -1,7 +1,8 @@
-# TaskCage Bundle 형식 초안
+# TaskCage Bundle format v0alpha1
 
-> 상태: **계획 초안**. 이 문서는 아직 daemon, SDK 또는 Protocol의 구현 계약이 아니다. Local Bundle import와
-> Bundle-first 공개 API를 구현하기 전에 합의할 최소 배포 모델을 정의한다.
+> 상태: **Local Bundle import 계약**. 이 문서는 `taskcaged bundle import`의 archive 검증과 local catalog
+> 의미를 고정한다. Profile Task wire API는 [Local Profile Core API v2](api-profile-v2.md)를 계속 사용한다.
+> Hub, 자동 다운로드, Bundle payload 안의 Runtime Package와 Remote Bundle 설치는 포함하지 않는다.
 
 ## 목적
 
@@ -19,13 +20,13 @@ Task별 input/output data를 포함하지 않는다.
 
 ## 배포 archive
 
-초기 Bundle 배포물의 권장 이름은 다음과 같다.
+초기 Bundle 배포물의 이름은 다음 형식이다.
 
 ```text
 <bundle-name>-<bundle-version>.tcbundle.tar.gz
 ```
 
-archive는 최소한 다음 파일을 가진다.
+archive는 gzip으로 압축된 POSIX tar이며, 정확히 다음 네 regular file만 root에 가진다.
 
 ```text
 bundle.json
@@ -34,25 +35,103 @@ checksums.txt
 signature.sig
 ```
 
-archive reader는 압축 해제 전에 크기·file count 상한을 적용하고, absolute path, `..` path traversal, symlink,
-hardlink, device, FIFO, socket과 중복 경로를 거부해야 한다. daemon은 검증된 staging directory에서만 archive를
-처리하고, 검증이 끝난 Bundle만 immutable cache로 활성화한다.
+각 archive는 압축 해제 전 1 MiB, file 하나는 256 KiB, 전체 file 수는 4개를 넘을 수 없다. reader는 absolute
+path, 빈 path component, `.` 또는 `..`, backslash, non-UTF-8 name, duplicate path, symlink, hardlink,
+device, FIFO, socket, sparse file과 예상하지 않은 tar entry를 거부한다. daemon은 검증된 staging directory에서만
+archive를 처리하고, 검증이 끝난 Bundle만 immutable cache로 활성화한다.
 
-## `bundle.json`의 최소 의미
+## Archive integrity and signature
 
-구체 JSON schema는 후속 구현에서 고정한다. 다만 Bundle에는 다음 의미가 반드시 있어야 한다.
+`checksums.txt` is ASCII and contains exactly two lexicographically ordered lines:
+
+```text
+<64 lowercase SHA-256 hex>  bundle.json
+<64 lowercase SHA-256 hex>  profile.json
+```
+
+Each digest is calculated from the exact archive file bytes; trailing whitespace, an extra line, a different filename, or a
+mismatch is invalid. `signature.sig` is the unpadded base64 encoding of a 64-byte Ed25519 signature over the exact
+`checksums.txt` bytes. `bundle.json.signingKeyId` selects one configured trust anchor. The daemon accepts a Bundle only
+when that key id is configured and its 32-byte Ed25519 public key validates the signature. There is no unsigned or
+"accept any key" import mode.
+
+The service operator supplies the trust anchors outside the Bundle archive. A key file contains a single unpadded base64
+Ed25519 public key, and the daemon configuration maps a stable key id to that file. Rotating a signing key means adding a
+new key id and issuing a new Bundle version; changing an existing key id's public key is not allowed.
+
+## `bundle.json`
+
+`bundle.json` is UTF-8 JSON, at most 256 KiB, has no duplicate or unknown fields, and is canonicalized with RFC 8785
+before its catalog digest is calculated. Its schema is:
+
+```json
+{
+  "schemaVersion": "taskcage.bundle/v0alpha1",
+  "name": "ffmpeg-audio-to-wav",
+  "version": "1.0.0",
+  "signingKeyId": "taskcage-release-2026",
+  "runtime": {
+    "packageId": "org.taskcage.ffmpeg",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "profileDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}
+```
+
+`name` and `version` use the Local Profile v2 identity rules. `signingKeyId` is 1–64 ASCII bytes matching
+`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`. `runtime.packageId` must equal the referenced installed Package manifest `id`;
+`runtime.digest` is its immutable cache digest. `profileDigest` is the SHA-256 digest of exact `profile.json` bytes.
+
+The following fields have these meanings:
 
 | 항목 | 의미 |
 |---|---|
 | Bundle identity | name과 strict semantic version으로 구성한 불변 식별자 |
 | Profile | 입력·출력 schema, argv 구성 규칙, Artifact 규칙, 기본 자원 정책 |
 | Runtime reference | Runtime Package identity와 SHA-256 digest |
-| Platform requirements | Linux architecture, ABI, libc, 선택적 hardware requirement |
+| Platform requirements | referenced Runtime Package의 Linux architecture, ABI, libc requirement |
 | Policy | 기본 CPU·memory·PID·wall-time 제한과 허용 override 범위 |
 | Provenance | license, SBOM reference, 제작자 정보와 signature |
 
 Bundle version과 digest는 공개 후 변경하지 않는다. 계약, Runtime Package, 기본 정책 또는 platform requirement가
 바뀌면 새 Bundle version을 발행한다.
+
+## `profile.json`
+
+`profile.json` is UTF-8 JSON, at most 256 KiB, has no duplicate or unknown fields. It describes a single Profile whose
+identity must match `bundle.json`. v0alpha1 intentionally supports only one input Artifact and one output Artifact.
+
+```json
+{
+  "schemaVersion": "taskcage.profile/v0alpha1",
+  "name": "ffmpeg-audio-to-wav",
+  "version": "1.0.0",
+  "inputs": [
+    {"name": "source", "kind": "LOCAL_INPUT", "required": true},
+    {"name": "sample_rate_hz", "kind": "INT64", "required": true, "minimum": 8000, "maximum": 192000},
+    {"name": "channels", "kind": "INT64", "required": true, "minimum": 1, "maximum": 8}
+  ],
+  "output": {"name": "audio", "fileName": "result.wav", "mediaType": "audio/wav", "maximumBytes": 1073741824},
+  "argv": ["-i", {"input": "source"}, "-ar", {"int64": "sample_rate_hz"}, "-ac", {"int64": "channels"}, {"output": "audio"}],
+  "policy": {
+    "limits": {"cpuMax": {"quotaMicros": 100000, "periodMicros": 100000}, "memoryMaxBytes": 536870912, "pidsMax": 32, "wallTimeLimitMs": 120000},
+    "output": {"stdoutTailMaxBytes": 65536, "stderrTailMaxBytes": 65536}
+  },
+  "allowedOverrides": []
+}
+```
+
+`argv` never contains a program path, shell expression, environment assignment, working-directory path, glob, or string
+interpolation. The daemon executes only the verified Runtime Package entrypoint. An element is either a literal string or
+exactly one placeholder object: `{ "input": "<LOCAL_INPUT slot>" }`, `{ "int64": "<INT64 slot>" }`,
+`{ "string": "<STRING slot>" }`, `{ "boolean": "<BOOLEAN slot>" }`, or `{ "output": "<declared output name>" }`.
+Placeholder names must identify a declared slot of the matching kind. Strings are individual argv elements, not shell text.
+v0alpha1 has no optional slots, arrays, arbitrary JSON, environment, custom working directory, multiple outputs, or
+caller-supplied executable.
+
+`policy` and `allowedOverrides` have the same effective-resource validation as Profile API v2. A Bundle can only reduce
+what the daemon deployment allows. Unsupported profile schema or platform makes the Bundle unavailable; it does not
+cause a Raw Command fallback.
 
 ## Runtime Package 관계
 
@@ -96,6 +175,27 @@ Application developer
   → generic ProfileRequest 또는 language Binding 사용
   → Task 결과와 output Artifact 수신
 ```
+
+## Local import and catalog
+
+The operator first imports the referenced Runtime Package, then imports the Bundle archive using the same service UID:
+
+```bash
+taskcaged import-package --source /srv/import/ffmpeg-7.1.1 --cache-root /var/lib/taskcage
+taskcaged bundle import \
+  --source /srv/import/ffmpeg-audio-to-wav-1.0.0.tcbundle.tar.gz \
+  --cache-root /var/lib/taskcage \
+  --trusted-key taskcage-release-2026=/etc/taskcage/bundle-keys.d/taskcage-release-2026.pub
+```
+
+Import verifies archive structure, checksums, signature, manifest/profile schema, current host platform, and the already
+verified Package digest before writing anything runnable. It stages the exact verified `bundle.json` and `profile.json` under
+`bundles/sha256/<bundle-digest>/` and atomically activates the identity mapping
+`bundles/catalog/<name>/<version>.json`. The same archive/import returns `ALREADY_PRESENT` only after re-verifying the
+active content. An occupied `(name, version)` with a different digest is an error, never an overwrite.
+
+`taskcaged bundle list --cache-root …` returns installed identities and digests; `taskcaged bundle inspect --cache-root …
+--name … --version …` returns the resolved manifest. Neither command executes a program or fetches from the network.
 
 Hub는 이 형식의 필수 구성요소가 아니다. MVP에서는 local import와 조직의 기존 artifact 배포 경로만으로
 Bundle을 제공한다. Hub는 여러 호스트·조직이 Bundle과 Runtime Package를 공유해야 한다는 실제 요구가
