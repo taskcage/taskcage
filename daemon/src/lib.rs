@@ -3,6 +3,8 @@
 pub mod artifact;
 #[cfg(any(target_os = "linux", test))]
 mod audit;
+#[cfg(target_os = "linux")]
+pub mod bundle;
 #[cfg_attr(
     not(any(target_os = "linux", test)),
     allow(dead_code, reason = "protocol task 취소는 Linux에서만 제공됩니다")
@@ -113,6 +115,9 @@ pub enum Error {
     InvalidArgument(String),
     #[error(transparent)]
     RuntimePackage(#[from] runtime_package::RuntimePackageError),
+    #[cfg(target_os = "linux")]
+    #[error(transparent)]
+    Bundle(#[from] bundle::BundleError),
     #[error("실행 결과를 JSON으로 바꾸지 못했습니다")]
     Serialize(#[from] serde_json::Error),
     #[error("운영체제 종료 신호를 처리하지 못했습니다")]
