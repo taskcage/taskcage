@@ -228,6 +228,18 @@ impl BundleCatalog {
         source: &Path,
         keys: &[TrustedBundleKey],
     ) -> BundleResult<BundleImportReport> {
+        self.import_with_identity_hook(source, keys, |_| Ok(()))
+    }
+
+    fn import_with_identity_hook<F>(
+        &self,
+        source: &Path,
+        keys: &[TrustedBundleKey],
+        identity_hook: F,
+    ) -> BundleResult<BundleImportReport>
+    where
+        F: FnMut(IdentityActivationPoint) -> BundleResult<()>,
+    {
         if !source.is_absolute() {
             return Err(BundleError::Archive(
                 "source는 absolute path여야 합니다".to_owned(),
@@ -251,8 +263,16 @@ impl BundleCatalog {
 
         let digest = verified.digest;
         let mut staging = Staging::new(self.create_staging(digest)?);
-        write_readonly(&staging.path.join(BUNDLE_JSON), &verified.bundle_raw)?;
-        write_readonly(&staging.path.join(PROFILE_JSON), &verified.profile_raw)?;
+        write_readonly(
+            &staging.path.join(BUNDLE_JSON),
+            &verified.bundle_raw,
+            self.device,
+        )?;
+        write_readonly(
+            &staging.path.join(PROFILE_JSON),
+            &verified.profile_raw,
+            self.device,
+        )?;
         seal_directory(&staging.path)?;
 
         let entry = self.bundle_sha256.join(digest.hex());
@@ -271,7 +291,7 @@ impl BundleCatalog {
             }
             Err(error) => return Err(error),
         };
-        self.activate_identity(&verified.bundle, digest)?;
+        self.activate_identity_with_hook(&verified.bundle, digest, identity_hook)?;
         Ok(BundleImportReport {
             digest,
             name: verified.bundle.name,
@@ -291,6 +311,8 @@ impl BundleCatalog {
             if !metadata.is_dir()
                 || metadata.file_type().is_symlink()
                 || metadata.dev() != self.device
+                || metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.mode() & 0o022 != 0
             {
                 return Err(BundleError::UnsafeCacheRoot(name.path()));
             }
@@ -302,9 +324,21 @@ impl BundleCatalog {
             {
                 let version =
                     version.map_err(|e| io_error("catalog version entry", name.path(), e))?;
+                let version_path = version.path();
+                let version_metadata = fs::symlink_metadata(&version_path)
+                    .map_err(|e| io_error("catalog version metadata", version_path.clone(), e))?;
                 let version_text = version.file_name().into_string().map_err(|_| {
                     BundleError::Manifest("catalog version은 UTF-8이어야 합니다".to_owned())
                 })?;
+                if version_text.starts_with(".staging-") {
+                    validate_identity_staging_entry(
+                        &version_path,
+                        &version_text,
+                        &version_metadata,
+                        self.device,
+                    )?;
+                    continue;
+                }
                 if !version_text.ends_with(".json") {
                     return Err(BundleError::Manifest(
                         "catalog에는 .json identity mapping만 있어야 합니다".to_owned(),
@@ -331,6 +365,11 @@ impl BundleCatalog {
             }
             error => error,
         })?;
+        validate_identity_staging_entries(
+            path.parent()
+                .expect("catalog mapping has an identity parent"),
+            self.device,
+        )?;
         let installed = self.inspect_by_digest(mapping.digest)?;
         if installed.installed.name != name || installed.installed.version != version {
             return Err(BundleError::Manifest(
@@ -368,7 +407,15 @@ impl BundleCatalog {
         })
     }
 
-    fn activate_identity(&self, bundle: &BundleManifest, digest: Sha256Digest) -> BundleResult<()> {
+    fn activate_identity_with_hook<F>(
+        &self,
+        bundle: &BundleManifest,
+        digest: Sha256Digest,
+        mut identity_hook: F,
+    ) -> BundleResult<()>
+    where
+        F: FnMut(IdentityActivationPoint) -> BundleResult<()>,
+    {
         let directory = ensure_child(&self.catalog, &bundle.name, self.device)?;
         let final_path = directory.join(format!("{}.json", bundle.version));
         let mapping = CatalogMapping { digest };
@@ -378,19 +425,27 @@ impl BundleCatalog {
             std::process::id(),
             NEXT_STAGING.fetch_add(1, Ordering::Relaxed)
         ));
-        write_readonly(&temporary, &bytes)?;
-        match fs::hard_link(&temporary, &final_path) {
+        if let Err(error) = write_readonly(&temporary, &bytes, self.device) {
+            let _ = remove_identity_staging(&temporary, self.device);
+            return Err(error);
+        }
+        if let Err(error) = identity_hook(IdentityActivationPoint::BeforeRename) {
+            remove_identity_staging(&temporary, self.device)?;
+            return Err(error);
+        }
+        match rename_no_replace(&temporary, &final_path) {
             Ok(()) => {
-                fs::remove_file(&temporary)
-                    .map_err(|e| io_error("catalog staging cleanup", temporary, e))?;
+                identity_hook(IdentityActivationPoint::AfterRename)?;
                 sync_directory(&directory)?;
                 Ok(())
             }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                fs::remove_file(&temporary)
-                    .map_err(|e| io_error("catalog staging cleanup", temporary, e))?;
+            Err(BundleError::Io { source, .. })
+                if source.kind() == io::ErrorKind::AlreadyExists =>
+            {
                 let current = read_mapping(&final_path, self.device)?;
+                remove_identity_staging(&temporary, self.device)?;
                 if current.digest == digest {
+                    sync_directory(&directory)?;
                     Ok(())
                 } else {
                     Err(BundleError::IdentityConflict {
@@ -400,8 +455,8 @@ impl BundleCatalog {
                 }
             }
             Err(error) => {
-                let _ = fs::remove_file(&temporary);
-                Err(io_error("catalog identity activation", final_path, error))
+                remove_identity_staging(&temporary, self.device)?;
+                Err(error)
             }
         }
     }
@@ -424,6 +479,12 @@ impl BundleCatalog {
 #[serde(deny_unknown_fields)]
 struct CatalogMapping {
     digest: Sha256Digest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentityActivationPoint {
+    BeforeRename,
+    AfterRename,
 }
 
 struct Staging {
@@ -908,7 +969,7 @@ fn ensure_child(parent: &Path, name: &str, device: u64) -> BundleResult<PathBuf>
     }
     Ok(path)
 }
-fn write_readonly(path: &Path, bytes: &[u8]) -> BundleResult<()> {
+fn write_readonly(path: &Path, bytes: &[u8], device: u64) -> BundleResult<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -917,10 +978,97 @@ fn write_readonly(path: &Path, bytes: &[u8]) -> BundleResult<()> {
         .map_err(|e| io_error("cache file 생성", path.to_path_buf(), e))?;
     file.write_all(bytes)
         .map_err(|e| io_error("cache file 쓰기", path.to_path_buf(), e))?;
+    file.set_permissions(fs::Permissions::from_mode(0o444))
+        .map_err(|e| io_error("cache file mode", path.to_path_buf(), e))?;
     file.sync_all()
         .map_err(|e| io_error("cache file fsync", path.to_path_buf(), e))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o444))
-        .map_err(|e| io_error("cache file mode", path.to_path_buf(), e))
+    let opened = file
+        .metadata()
+        .map_err(|e| io_error("cache file metadata", path.to_path_buf(), e))?;
+    let linked = fs::symlink_metadata(path)
+        .map_err(|e| io_error("cache file metadata", path.to_path_buf(), e))?;
+    if !opened.is_file()
+        || opened.dev() != device
+        || opened.uid() != unsafe { libc::geteuid() }
+        || opened.nlink() != 1
+        || opened.mode() & 0o7777 != 0o444
+        || linked.file_type().is_symlink()
+        || linked.dev() != opened.dev()
+        || linked.ino() != opened.ino()
+    {
+        return Err(BundleError::Manifest(format!(
+            "cache file을 read-only regular file로 확인하지 못했습니다: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_identity_staging_entry(
+    path: &Path,
+    name: &str,
+    metadata: &fs::Metadata,
+    device: u64,
+) -> BundleResult<()> {
+    if !is_safe_identity_staging_name(name) {
+        return Err(BundleError::Manifest(
+            "catalog staging 이름이 잘못되었습니다".to_owned(),
+        ));
+    }
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.nlink() != 1
+        || metadata.dev() != device
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o7777 & !0o444 != 0
+        || metadata.len() > u64::try_from(MAX_FILE_BYTES).expect("limit fits")
+    {
+        return Err(BundleError::UnsafeCacheRoot(path.to_path_buf()));
+    }
+    Ok(())
+}
+
+fn validate_identity_staging_entries(directory: &Path, device: u64) -> BundleResult<()> {
+    for entry in fs::read_dir(directory)
+        .map_err(|e| io_error("catalog identity 열거", directory.to_path_buf(), e))?
+    {
+        let entry =
+            entry.map_err(|e| io_error("catalog identity entry", directory.to_path_buf(), e))?;
+        let name = entry.file_name().into_string().map_err(|_| {
+            BundleError::Manifest("catalog version은 UTF-8이어야 합니다".to_owned())
+        })?;
+        if !name.starts_with(".staging-") {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|e| io_error("catalog staging metadata", path.clone(), e))?;
+        validate_identity_staging_entry(&path, &name, &metadata, device)?;
+    }
+    Ok(())
+}
+
+fn is_safe_identity_staging_name(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(".staging-") else {
+        return false;
+    };
+    let mut fields = suffix.split('-');
+    matches!(
+        (fields.next(), fields.next(), fields.next()),
+        (Some(process), Some(sequence), None)
+            if process.parse::<u32>().is_ok() && sequence.parse::<u64>().is_ok()
+    )
+}
+
+fn remove_identity_staging(path: &Path, device: u64) -> BundleResult<()> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| BundleError::Manifest("catalog staging 이름이 잘못되었습니다".to_owned()))?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|e| io_error("catalog staging metadata", path.to_path_buf(), e))?;
+    validate_identity_staging_entry(path, name, &metadata, device)?;
+    fs::remove_file(path).map_err(|e| io_error("catalog staging cleanup", path.to_path_buf(), e))
 }
 fn seal_directory(path: &Path) -> BundleResult<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o555))
@@ -1005,11 +1153,11 @@ fn io_error(operation: &'static str, path: PathBuf, source: io::Error) -> Bundle
 mod tests {
     use std::collections::BTreeMap;
     use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     use ed25519_dalek::{Signer, SigningKey};
     use flate2::{Compression, write::GzEncoder};
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
     use crate::profile::LocalProfileRuntime;
@@ -1170,6 +1318,43 @@ mod tests {
         source
     }
 
+    fn catalog_with_runtime_package() -> (TempDir, BundleCatalog, Sha256Digest) {
+        let root = tempfile::tempdir().unwrap();
+        let cache_root = root.path().join("cache");
+        fs::create_dir(&cache_root).unwrap();
+        fs::set_permissions(&cache_root, fs::Permissions::from_mode(0o755)).unwrap();
+        let package = RuntimePackageCache::open(&cache_root)
+            .unwrap()
+            .import(&runtime_package_source(root.path()))
+            .unwrap();
+        let catalog = BundleCatalog::open(&cache_root).unwrap();
+        (root, catalog, package.digest)
+    }
+
+    fn signed_bundle_archive(
+        profile: &[u8],
+        package_digest: Sha256Digest,
+    ) -> (NamedTempFile, Vec<TrustedBundleKey>) {
+        let bundle = bundle_bytes(profile, &package_digest.to_string());
+        let (entries, keys) = signed_entries(bundle, profile.to_vec());
+        (write_archive(entries), keys)
+    }
+
+    fn identity_mapping_path(catalog: &BundleCatalog) -> PathBuf {
+        catalog
+            .catalog
+            .join("ffmpeg-audio-to-wav")
+            .join("1.0.0.json")
+    }
+
+    fn injected_identity_activation_failure(point: IdentityActivationPoint) -> BundleError {
+        io_error(
+            "injected identity activation failure",
+            PathBuf::from(format!("{point:?}")),
+            io::Error::other("injected identity activation failure"),
+        )
+    }
+
     #[test]
     fn accepts_a_signed_bundle_with_limited_argv_placeholders() {
         let profile = profile_bytes();
@@ -1309,10 +1494,178 @@ mod tests {
 
         let imported = catalog.import(archive.path(), &keys).unwrap();
         assert_eq!(imported.outcome, BundleImportOutcome::Imported);
+        assert_eq!(
+            fs::symlink_metadata(identity_mapping_path(&catalog))
+                .unwrap()
+                .nlink(),
+            1
+        );
         assert_eq!(catalog.list().unwrap().len(), 1);
         let installed = catalog.inspect("ffmpeg-audio-to-wav", "1.0.0").unwrap();
         assert_eq!(installed.installed.digest, imported.digest);
         assert_eq!(installed.installed.runtime_package_digest, package.digest);
+        assert_eq!(
+            catalog.import(archive.path(), &keys).unwrap().outcome,
+            BundleImportOutcome::AlreadyPresent
+        );
+    }
+
+    #[test]
+    fn conflicting_digest_never_replaces_an_installed_identity_mapping() {
+        let (_root, catalog, package_digest) = catalog_with_runtime_package();
+        let profile = profile_bytes();
+        let (first_archive, first_keys) = signed_bundle_archive(&profile, package_digest);
+        let first = catalog.import(first_archive.path(), &first_keys).unwrap();
+
+        let mut different_profile = profile_value();
+        different_profile["output"]["maximumBytes"] = serde_json::json!(2048);
+        let different_profile = serde_json::to_vec(&different_profile).unwrap();
+        let (conflicting_archive, conflicting_keys) =
+            signed_bundle_archive(&different_profile, package_digest);
+        let error = catalog
+            .import(conflicting_archive.path(), &conflicting_keys)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BundleError::IdentityConflict { name, version }
+                if name == "ffmpeg-audio-to-wav" && version == "1.0.0"
+        ));
+        assert_eq!(
+            read_mapping(&identity_mapping_path(&catalog), catalog.device)
+                .unwrap()
+                .digest,
+            first.digest
+        );
+        assert_eq!(
+            fs::symlink_metadata(identity_mapping_path(&catalog))
+                .unwrap()
+                .nlink(),
+            1
+        );
+    }
+
+    #[test]
+    fn safe_stale_identity_staging_does_not_hide_a_valid_mapping() {
+        let (_root, catalog, package_digest) = catalog_with_runtime_package();
+        let (archive, keys) = signed_bundle_archive(&profile_bytes(), package_digest);
+        let imported = catalog.import(archive.path(), &keys).unwrap();
+        let staging = identity_mapping_path(&catalog)
+            .parent()
+            .unwrap()
+            .join(".staging-4242-7");
+        write_readonly(&staging, b"incomplete crash residue", catalog.device).unwrap();
+
+        assert_eq!(catalog.list().unwrap().len(), 1);
+        assert_eq!(
+            catalog
+                .inspect("ffmpeg-audio-to-wav", "1.0.0")
+                .unwrap()
+                .installed
+                .digest,
+            imported.digest
+        );
+        assert!(staging.exists(), "reader must not delete stale staging");
+    }
+
+    #[test]
+    fn malformed_or_symlink_identity_staging_fails_closed_without_deletion() {
+        let (_root, catalog, package_digest) = catalog_with_runtime_package();
+        let (archive, keys) = signed_bundle_archive(&profile_bytes(), package_digest);
+        catalog.import(archive.path(), &keys).unwrap();
+        let identity_directory = identity_mapping_path(&catalog)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        let malformed = identity_directory.join(".staging-invalid");
+        write_readonly(&malformed, b"malformed", catalog.device).unwrap();
+        assert!(matches!(catalog.list(), Err(BundleError::Manifest(_))));
+        assert!(matches!(
+            catalog.inspect("ffmpeg-audio-to-wav", "1.0.0"),
+            Err(BundleError::Manifest(_))
+        ));
+        assert!(malformed.exists());
+        fs::remove_file(&malformed).unwrap();
+
+        let staging_symlink = identity_directory.join(".staging-4242-8");
+        symlink(identity_mapping_path(&catalog), &staging_symlink).unwrap();
+        assert!(matches!(
+            catalog.list(),
+            Err(BundleError::UnsafeCacheRoot(path)) if path == staging_symlink
+        ));
+        assert!(matches!(
+            catalog.inspect("ffmpeg-audio-to-wav", "1.0.0"),
+            Err(BundleError::UnsafeCacheRoot(path)) if path == staging_symlink
+        ));
+        assert!(
+            fs::symlink_metadata(&staging_symlink)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn failure_before_identity_rename_leaves_no_final_mapping_and_retry_recovers() {
+        let (_root, catalog, package_digest) = catalog_with_runtime_package();
+        let (archive, keys) = signed_bundle_archive(&profile_bytes(), package_digest);
+        let error = catalog
+            .import_with_identity_hook(archive.path(), &keys, |point| {
+                if point == IdentityActivationPoint::BeforeRename {
+                    Err(injected_identity_activation_failure(point))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, BundleError::Io { .. }));
+        assert!(!identity_mapping_path(&catalog).exists());
+        assert!(catalog.list().unwrap().is_empty());
+        assert_eq!(
+            catalog.import(archive.path(), &keys).unwrap().outcome,
+            BundleImportOutcome::AlreadyPresent
+        );
+        assert_eq!(
+            fs::symlink_metadata(identity_mapping_path(&catalog))
+                .unwrap()
+                .nlink(),
+            1
+        );
+    }
+
+    #[test]
+    fn failure_after_identity_rename_exposes_only_a_complete_mapping_and_retry_recovers() {
+        let (_root, catalog, package_digest) = catalog_with_runtime_package();
+        let profile = profile_bytes();
+        let (archive, keys) = signed_bundle_archive(&profile, package_digest);
+        let expected_digest = VerifiedArchive::read(archive.path(), &keys).unwrap().digest;
+        let error = catalog
+            .import_with_identity_hook(archive.path(), &keys, |point| {
+                if point == IdentityActivationPoint::AfterRename {
+                    Err(injected_identity_activation_failure(point))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, BundleError::Io { .. }));
+        let final_path = identity_mapping_path(&catalog);
+        assert_eq!(fs::symlink_metadata(&final_path).unwrap().nlink(), 1);
+        assert_eq!(
+            read_mapping(&final_path, catalog.device).unwrap().digest,
+            expected_digest
+        );
+        assert_eq!(
+            catalog
+                .inspect("ffmpeg-audio-to-wav", "1.0.0")
+                .unwrap()
+                .installed
+                .digest,
+            expected_digest
+        );
         assert_eq!(
             catalog.import(archive.path(), &keys).unwrap().outcome,
             BundleImportOutcome::AlreadyPresent
