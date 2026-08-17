@@ -187,6 +187,7 @@ pub struct LocalProfileConfig {
     artifact_root: PathBuf,
     maximum_artifact_bytes: u64,
     ffmpeg_audio_to_wav: Option<FfmpegRuntimePackageConfig>,
+    bundle_cache_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -305,6 +306,7 @@ impl DaemonConfig {
             artifact_root,
             maximum_artifact_bytes,
             ffmpeg_audio_to_wav: None,
+            bundle_cache_root: None,
         });
         Ok(self)
     }
@@ -336,6 +338,33 @@ impl DaemonConfig {
             ));
         }
         local_profile.ffmpeg_audio_to_wav = Some(FfmpegRuntimePackageConfig { cache_root, digest });
+        Ok(self)
+    }
+
+    /// 설치된 Bundle catalog에서 Profile을 resolve할 cache root를 등록한다.
+    /// Bundle과 Runtime Package는 같은 immutable cache root를 공유한다.
+    pub fn with_bundle_profile_catalog(mut self, cache_root: PathBuf) -> Result<Self> {
+        if !cache_root.is_absolute() {
+            return Err(Error::InvalidArgument(
+                "bundle-cache-root 경로는 절대 경로여야 합니다".to_owned(),
+            ));
+        }
+        if cache_root.to_str().is_none() {
+            return Err(Error::InvalidArgument(
+                "bundle-cache-root 경로는 UTF-8이어야 합니다".to_owned(),
+            ));
+        }
+        let local_profile = self.local_profile.as_mut().ok_or_else(|| {
+            Error::InvalidArgument(
+                "Bundle Profile catalog에는 완전한 Profile Artifact 설정이 필요합니다".to_owned(),
+            )
+        })?;
+        if local_profile.bundle_cache_root.is_some() {
+            return Err(Error::InvalidArgument(
+                "Bundle Profile catalog가 이미 등록되었습니다".to_owned(),
+            ));
+        }
+        local_profile.bundle_cache_root = Some(cache_root);
         Ok(self)
     }
 
@@ -419,6 +448,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
                 settings.maximum_artifact_bytes,
                 config.deployment_policy.maximum().clone(),
                 ffmpeg_registration,
+                settings.bundle_cache_root.as_deref(),
             )
             .map_err(|error| {
                 Error::InvalidArgument(format!("local profile 설정이 안전하지 않습니다: {error}"))

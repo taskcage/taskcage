@@ -818,8 +818,9 @@ mod tests {
 
         let environment = SystemProbe::from_environment().check().unwrap();
         let jobs_path = environment.report().delegated_root.join("jobs");
-        let runtime = LocalProfileRuntime::open(&local_root, 1_000_000, profile_budget(), None)
-            .expect("Local Profile runtime");
+        let runtime =
+            LocalProfileRuntime::open(&local_root, 1_000_000, profile_budget(), None, None)
+                .expect("Local Profile runtime");
         let handlers = Arc::new(
             ProtocolHandlers::initialize(
                 Ok(environment),

@@ -513,6 +513,7 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
     let mut profile_artifact_max_bytes = None;
     let mut runtime_package_cache_root = None;
     let mut ffmpeg_audio_to_wav_package_digest = None;
+    let mut bundle_cache_root = None;
     let mut remote_config = None;
     let mut index = 0;
     while index < args.len() {
@@ -585,6 +586,9 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
                     })?,
                 );
             }
+            "--bundle-cache-root" if bundle_cache_root.is_none() => {
+                bundle_cache_root = Some(PathBuf::from(value));
+            }
             "--remote-config" if remote_config.is_none() => {
                 remote_config = Some(PathBuf::from(value));
             }
@@ -605,6 +609,7 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             | "--profile-artifact-max-bytes"
             | "--runtime-package-cache-root"
             | "--ffmpeg-audio-to-wav-package-digest"
+            | "--bundle-cache-root"
             | "--remote-config" => {
                 return Err(Error::InvalidArgument(format!(
                     "serve 옵션이 중복되었습니다: {name}"
@@ -679,6 +684,10 @@ fn parse_serve(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             "FFmpeg Profile 등록에는 --runtime-package-cache-root와 --ffmpeg-audio-to-wav-package-digest를 함께 지정해야 합니다"
                 .to_owned(),
         )),
+    };
+    let config = match bundle_cache_root {
+        Some(cache_root) => config.with_bundle_profile_catalog(cache_root)?,
+        None => config,
     };
     match remote_config {
         Some(path) => config.with_remote_config(path),
@@ -1410,6 +1419,30 @@ mod tests {
         ]);
         let config = super::parse_serve(complete).expect("complete FFmpeg registration");
         assert!(format!("{config:?}").contains("ffmpeg_audio_to_wav: Some"));
+    }
+
+    #[test]
+    fn serve_requires_artifact_configuration_before_enabling_bundle_catalog() {
+        let args = with_deployment_policy(vec![
+            OsString::from("--socket"),
+            std::env::temp_dir()
+                .join("taskcaged-bundle.sock")
+                .into_os_string(),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("1"),
+            OsString::from("--max-registry-tasks"),
+            OsString::from("1"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("1"),
+            OsString::from("--cleanup-timeout-ms"),
+            OsString::from("1"),
+            OsString::from("--fail-stop-timeout-ms"),
+            OsString::from("1"),
+            OsString::from("--bundle-cache-root"),
+            std::env::temp_dir().into_os_string(),
+        ]);
+        let error = super::parse_serve(args).unwrap_err();
+        assert!(error.to_string().contains("Bundle Profile catalog"));
     }
 
     #[test]
