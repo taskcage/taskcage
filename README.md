@@ -263,7 +263,7 @@ bash integration-tests/release-artifact-smoke.sh \
 ## 문서
 
 - [제품 철학과 용어](docs/product-philosophy.md)
-- [Bundle 형식 초안](docs/bundle-format.md)
+- [Bundle 형식](docs/bundle-format.md)
 - [Protocol v1 API 명세](docs/api-mvp.md)
 - [Remote Protocol v1](docs/remote-protocol-v1.md)
 - [Remote daemon 설정](daemon/REMOTE.md)
@@ -285,13 +285,12 @@ bash integration-tests/release-artifact-smoke.sh \
 `0.4.0` daemon과 `0.3.0` Java SDK는 인증된 Remote Profile·Artifact 전송을 추가했다. 이들은 현재
 설치 가능한 공개 계약이다.
 
-다음 제품 단계는 임의 executable과 argv를 받는 API를 더 넓히는 대신, Bundle/Profile 실행 경험을
-완결하는 것이다. MVP는 중앙 Hub 없이 Local Bundle import, Runtime Package 검증, generic
+현재 Bundle-first MVP는 중앙 Hub 없이 Local Bundle import, Runtime Package 검증, generic
 `ProfileRequest`, Artifact 입출력, 첫 FFmpeg Binding을 하나의 흐름으로 제공한다.
 
 Bundle은 Profile, Runtime Package ref + digest, 플랫폼·정책·무결성 정보를 담는 불변 실행 계약이다.
-Package는 daemon cache에서 digest 기준으로 공유한다. 초기 archive와 검증 방향은
-[Bundle 형식 초안](docs/bundle-format.md)에 정리되어 있으며, 아직 구현된 wire 계약은 아니다.
+Package는 daemon cache에서 digest 기준으로 공유한다. archive 검증·catalog import·Profile 실행의
+현재 계약은 [Bundle 형식](docs/bundle-format.md)에 정리되어 있다.
 
 Remote Protocol v1은 Local UDS를 대체하지 않는 opt-in 경로다. TLS 1.3, service-account 인증,
 principal별 Profile authorization과 관리되는 Artifact 전달을 사용하며 Remote Raw Command와 Local fallback을

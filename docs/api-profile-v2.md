@@ -1,8 +1,8 @@
 # TaskCage Local Profile Core API v2
 
-> 상태: Local Profile의 **현재 Core 계약**이다. Bundle import와 Bundle-first 공개 API는 이 Profile
-> request 의미를 재사용하는 다음 단계이며, 이 문서만으로 Bundle archive 형식이나 설치 절차를 정의하지
-> 않는다. 그 계획은 [Bundle 형식 초안](bundle-format.md)에 있다.
+> 상태: Local Profile의 **현재 Core 계약**이다. installed Profile은 signed Bundle import로 catalog에
+> 등록될 수 있으며, Bundle archive 형식과 설치 절차는 [Bundle 형식](bundle-format.md)에 정의한다. 이
+> 문서는 archive 자체가 아니라 실행 request·result 의미를 정한다.
 
 ## 목적과 범위
 

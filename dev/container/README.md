@@ -32,7 +32,9 @@ daemon은 외부 TCP port를 열지 않는다. owner-only UDS는 Compose volume�
 `/run/taskcage/taskcaged.sock`에 있으며 같은 구성의 테스트 컨테이너만 사용한다. 개발 구성은
 `/taskcage-work/artifacts`를 owner-only Local Artifact root로 준비하고 opt-in `file-copy@1.0.0` Profile과
 Protocol v2도 활성화한다. 컨테이너의 Ubuntu FFmpeg는 시작할 때 검증 가능한 Runtime Package로 import되고
-그 digest가 `ffmpeg-audio-to-wav@1.0.0` Profile에 등록된다.
+그 Package를 참조하는 서명된 `ffmpeg-audio-to-wav@1.0.0` Bundle도 import된다. daemon은 Bundle catalog에서
+Profile을 찾아 실행한다. 이 Bundle과 서명 키는 개발 E2E 전용으로 컨테이너 기동 때 생성되며, 공개 배포 artifact가
+아니다.
 
 ## Java SDK E2E
 
