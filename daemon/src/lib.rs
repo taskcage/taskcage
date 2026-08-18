@@ -34,6 +34,8 @@ pub mod output;
 pub mod preflight;
 #[cfg(target_os = "linux")]
 mod profile;
+#[cfg(target_os = "linux")]
+mod profile_registry;
 pub mod protocol;
 pub mod remote_artifact;
 pub mod remote_auth;
