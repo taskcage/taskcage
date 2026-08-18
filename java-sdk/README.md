@@ -85,6 +85,9 @@ fallback하지 않는다. Core E2E는 opt-in `file-copy@1.0.0` Profile로 범용
 ## Local Profile API
 
 generic Core API는 실행 파일 경로나 argv 대신 설치된 Profile identity와 typed input을 전달한다.
+도구별 Local Binding은 연결·제출·조회·취소 전체 API가 아니라 동기 Profile 실행 두 경로만 제공하는
+`ProfileRuntime`에 의존할 수 있다. `TaskCageClient`가 이 계약을 구현하며 runtime과 client lifecycle은 항상
+호출자가 소유한다.
 
 ```java
 ProfileRequest request = new ProfileRequest(

@@ -33,6 +33,11 @@ if (result instanceof FfmpegAudioToWavSuccess success) {
 }
 ```
 
+`TaskCageClient` implements the smaller `ProfileRuntime` contract used internally by the Binding.
+Existing `using(TaskCageClient)` calls remain supported, while adapters and tests can supply only a
+`ProfileRuntime`. The Binding never closes either form; connection and runtime lifecycle remain
+caller-owned. Both forms retain the overload that accepts a caller-owned `clientRequestId`.
+
 ## Released daemon 0.4.0 setup
 
 Import the FFmpeg Runtime Package as the daemon service UID, then register its digest with the two
