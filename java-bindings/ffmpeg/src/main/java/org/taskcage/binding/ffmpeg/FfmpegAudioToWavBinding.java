@@ -10,6 +10,7 @@ import org.taskcage.sdk.Int64ProfileInput;
 import org.taskcage.sdk.ProfileIdentity;
 import org.taskcage.sdk.ProfileOutcome;
 import org.taskcage.sdk.ProfileRequest;
+import org.taskcage.sdk.ProfileRuntime;
 import org.taskcage.sdk.PublishedArtifact;
 import org.taskcage.sdk.TaskCageClient;
 import org.taskcage.sdk.TaskCageProtocolException;
@@ -21,10 +22,10 @@ public final class FfmpegAudioToWavBinding {
     private static final String OUTPUT_MEDIA_TYPE = "audio/wav";
     private static final String OUTPUT_FILE_NAME = "result.wav";
 
-    private final TaskCageClient client;
+    private final ProfileRuntime runtime;
 
-    private FfmpegAudioToWavBinding(TaskCageClient client) {
-        this.client = Objects.requireNonNull(client, "client");
+    private FfmpegAudioToWavBinding(ProfileRuntime runtime) {
+        this.runtime = Objects.requireNonNull(runtime, "runtime");
     }
 
     /**
@@ -34,7 +35,18 @@ public final class FfmpegAudioToWavBinding {
      * @return Binding backed by the supplied client
      */
     public static FfmpegAudioToWavBinding using(TaskCageClient client) {
-        return new FfmpegAudioToWavBinding(client);
+        Objects.requireNonNull(client, "client");
+        return using((ProfileRuntime) client);
+    }
+
+    /**
+     * Creates a lightweight Binding view without taking ownership of the Profile runtime.
+     *
+     * @param runtime caller-owned Local Profile runtime
+     * @return Binding backed by the supplied runtime
+     */
+    public static FfmpegAudioToWavBinding using(ProfileRuntime runtime) {
+        return new FfmpegAudioToWavBinding(runtime);
     }
 
     /**
@@ -49,7 +61,7 @@ public final class FfmpegAudioToWavBinding {
     public FfmpegAudioToWavResult run(
             FfmpegAudioToWavRequest request, Duration waitTimeout)
             throws InterruptedException, TimeoutException {
-        FinishedProfileTaskSnapshot task = client.run(toProfileRequest(request), waitTimeout);
+        FinishedProfileTaskSnapshot task = runtime.run(toProfileRequest(request), waitTimeout);
         return toBindingResult(task);
     }
 
@@ -70,7 +82,7 @@ public final class FfmpegAudioToWavBinding {
             throws InterruptedException, TimeoutException {
         Objects.requireNonNull(clientRequestId, "clientRequestId");
         FinishedProfileTaskSnapshot task =
-                client.run(clientRequestId, toProfileRequest(request), waitTimeout);
+                runtime.run(clientRequestId, toProfileRequest(request), waitTimeout);
         return toBindingResult(task);
     }
 

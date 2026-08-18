@@ -1,9 +1,11 @@
 package org.taskcage.binding.ffmpeg;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -21,6 +23,7 @@ import org.taskcage.sdk.ProfileIdentity;
 import org.taskcage.sdk.ProfileOutcome;
 import org.taskcage.sdk.ProfileRequest;
 import org.taskcage.sdk.ProfileResourceOverrides;
+import org.taskcage.sdk.ProfileRuntime;
 import org.taskcage.sdk.ProfileTaskSnapshot;
 import org.taskcage.sdk.ProfileTaskSubmission;
 import org.taskcage.sdk.PublishedArtifact;
@@ -42,6 +45,21 @@ class FfmpegAudioToWavBindingTest {
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private static final String OUTPUT_DIGEST =
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    @Test
+    void exposesRuntimeAndLegacyClientFactories() throws Exception {
+        assertEquals(
+                FfmpegAudioToWavBinding.class,
+                FfmpegAudioToWavBinding.class
+                        .getMethod("using", ProfileRuntime.class)
+                        .getReturnType());
+        assertEquals(
+                FfmpegAudioToWavBinding.class,
+                FfmpegAudioToWavBinding.class
+                        .getMethod("using", TaskCageClient.class)
+                        .getReturnType());
+        assertTrue(ProfileRuntime.class.isAssignableFrom(TaskCageClient.class));
+    }
 
     @Test
     void mapsTypedRequestToPinnedProfileAndSlots() {
@@ -66,43 +84,57 @@ class FfmpegAudioToWavBindingTest {
     void runReturnsTypedSuccessAndPreservesCoreTask() throws Exception {
         UUID taskId = UUID.randomUUID();
         FinishedProfileTaskSnapshot finished = succeeded(taskId, "audio", "audio/wav", "result.wav");
-        RecordingClient client = new RecordingClient(finished);
+        RecordingProfileRuntime runtime = new RecordingProfileRuntime(finished);
 
-        FfmpegAudioToWavResult result = FfmpegAudioToWavBinding.using(client)
+        FfmpegAudioToWavResult result = FfmpegAudioToWavBinding.using(runtime)
                 .run(request(), Duration.ofSeconds(5));
 
         FfmpegAudioToWavSuccess success =
                 assertInstanceOf(FfmpegAudioToWavSuccess.class, result);
         assertSame(finished, success.task());
         assertEquals(finished.artifacts().get("audio"), success.audio());
-        assertEquals(FfmpegAudioToWavBinding.PROFILE, client.request.profile());
+        assertEquals(FfmpegAudioToWavBinding.PROFILE, runtime.request.profile());
     }
 
     @Test
-    void callerOwnedIdempotencyKeyIsPassedToCoreClient() throws Exception {
+    void callerOwnedIdempotencyKeyIsPassedToCoreRuntime() throws Exception {
         UUID taskId = UUID.randomUUID();
         UUID clientRequestId = UUID.randomUUID();
-        RecordingClient client = new RecordingClient(
+        RecordingProfileRuntime runtime = new RecordingProfileRuntime(
                 succeeded(taskId, "audio", "audio/wav", "result.wav"));
 
-        FfmpegAudioToWavBinding.using(client)
+        FfmpegAudioToWavBinding.using(runtime)
                 .run(clientRequestId, request(), Duration.ofSeconds(5));
 
-        assertEquals(clientRequestId, client.clientRequestId);
+        assertEquals(clientRequestId, runtime.clientRequestId);
     }
 
     @Test
     void processFailureRemainsATypedResult() throws Exception {
         FinishedProfileTaskSnapshot finished = failed(UUID.randomUUID());
-        RecordingClient client = new RecordingClient(finished);
+        RecordingProfileRuntime runtime = new RecordingProfileRuntime(finished);
 
-        FfmpegAudioToWavResult result = FfmpegAudioToWavBinding.using(client)
+        FfmpegAudioToWavResult result = FfmpegAudioToWavBinding.using(runtime)
                 .run(request(), Duration.ofSeconds(5));
 
         FfmpegAudioToWavFailure failure =
                 assertInstanceOf(FfmpegAudioToWavFailure.class, result);
         assertSame(finished, failure.task());
         assertEquals("PROCESS_EXITED_NONZERO", failure.failure().code());
+    }
+
+    @Test
+    void legacyTaskCageClientFactoryRemainsUsableAndCallerOwned() throws Exception {
+        RecordingClient client = new RecordingClient(
+                succeeded(UUID.randomUUID(), "audio", "audio/wav", "result.wav"));
+
+        FfmpegAudioToWavResult result = FfmpegAudioToWavBinding.using(client)
+                .run(request(), Duration.ofSeconds(5));
+
+        assertInstanceOf(FfmpegAudioToWavSuccess.class, result);
+        assertFalse(client.closed);
+        client.close();
+        assertTrue(client.closed);
     }
 
     @Test
@@ -210,12 +242,12 @@ class FfmpegAudioToWavBindingTest {
         return new TaskTiming(started, started, started.plusSeconds(1), Duration.ofSeconds(1));
     }
 
-    private static final class RecordingClient implements TaskCageClient {
+    private static class RecordingProfileRuntime implements ProfileRuntime {
         private final FinishedProfileTaskSnapshot result;
         private UUID clientRequestId;
         private ProfileRequest request;
 
-        private RecordingClient(FinishedProfileTaskSnapshot result) {
+        private RecordingProfileRuntime(FinishedProfileTaskSnapshot result) {
             this.result = result;
         }
 
@@ -231,6 +263,15 @@ class FfmpegAudioToWavBindingTest {
             this.clientRequestId = clientRequestId;
             this.request = request;
             return result;
+        }
+    }
+
+    private static final class RecordingClient extends RecordingProfileRuntime
+            implements TaskCageClient {
+        private boolean closed;
+
+        private RecordingClient(FinishedProfileTaskSnapshot result) {
+            super(result);
         }
 
         @Override
@@ -270,6 +311,8 @@ class FfmpegAudioToWavBindingTest {
         }
 
         @Override
-        public void close() {}
+        public void close() {
+            closed = true;
+        }
     }
 }

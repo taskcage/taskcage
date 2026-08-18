@@ -8,7 +8,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeoutException;
 
 /** A client for the TaskCage daemon running on the local Linux host. */
-public interface TaskCageClient extends AutoCloseable {
+public interface TaskCageClient extends ProfileRuntime, AutoCloseable {
     /** Standard Unix domain socket path used by a packaged local {@code taskcaged} service. */
     Path DEFAULT_SOCKET_PATH = Path.of("/run/taskcage/taskcaged.sock");
 
@@ -84,6 +84,7 @@ public interface TaskCageClient extends AutoCloseable {
      *
      * <p>A wait timeout never cancels the daemon Task.
      */
+    @Override
     default FinishedProfileTaskSnapshot run(ProfileRequest request, Duration waitTimeout)
             throws InterruptedException, TimeoutException {
         Objects.requireNonNull(request, "request");
@@ -98,6 +99,7 @@ public interface TaskCageClient extends AutoCloseable {
     }
 
     /** Submits a Profile Task with a caller-owned idempotency key and waits for completion. */
+    @Override
     default FinishedProfileTaskSnapshot run(
             UUID clientRequestId, ProfileRequest request, Duration waitTimeout)
             throws InterruptedException, TimeoutException {

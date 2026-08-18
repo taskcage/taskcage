@@ -26,7 +26,7 @@ repositories {
 }
 
 dependencies {
-    api("org.taskcage:taskcage-java-sdk:0.2.0")
+    api("org.taskcage:taskcage-java-sdk:0.3.0")
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
 }
