@@ -1,6 +1,7 @@
 package org.taskcage.sdk;
 
 import org.taskcage.sdk.internal.client.DefaultTaskCageClient;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.UUID;
@@ -8,6 +9,29 @@ import java.util.concurrent.TimeoutException;
 
 /** A client for the TaskCage daemon running on the local Linux host. */
 public interface TaskCageClient extends AutoCloseable {
+    /** Standard Unix domain socket path used by a packaged local {@code taskcaged} service. */
+    Path DEFAULT_SOCKET_PATH = Path.of("/run/taskcage/taskcaged.sock");
+
+    /**
+     * Connects to the packaged daemon's standard Unix domain socket.
+     *
+     * <p>This method does not install or start a daemon. The socket is opened lazily on the first
+     * request, and a missing or inaccessible daemon is reported as {@link TaskCageConnectionException}.
+     */
+    static TaskCageClient localDefault() {
+        return connectUnixSocket(DEFAULT_SOCKET_PATH);
+    }
+
+    /**
+     * Connects to a daemon listening on a Unix domain socket with the SDK's default timeouts.
+     *
+     * <p>Use {@link #connect(TaskCageClientConfig)} when connection or request timeouts need to
+     * be customized.
+     */
+    static TaskCageClient connectUnixSocket(Path socketPath) {
+        return connect(TaskCageClientConfig.builder().socketPath(socketPath).build());
+    }
+
     /**
      * Creates a client. The Unix domain socket is opened lazily on the first request.
      */

@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RemoteConnectionOptionsTest {
@@ -24,6 +25,14 @@ class RemoteConnectionOptionsTest {
         assertEquals(Duration.ofSeconds(2), options.connectTimeout());
         assertEquals(Duration.ofSeconds(10), options.requestTimeout());
         assertFalse(options.credentials().toString().contains("fixture-secret"));
+    }
+
+    @Test
+    void connectsWithPlatformTrustByDefault() {
+        try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(
+                URI.create("taskcage+tls://taskcage.internal:7443"), CREDENTIALS)) {
+            assertNotNull(client);
+        }
     }
 
     @Test

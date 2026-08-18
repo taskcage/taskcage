@@ -21,6 +21,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TaskCageClientIntegrationTest {
     @Test
+    void connectUnixSocketUsesDefaultTimeouts() throws Exception {
+        try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::capabilitiesResponse);
+                TaskCageClient client = TaskCageClient.connectUnixSocket(server.socketPath())) {
+            assertTrue(client.capabilities().cgroupV2Ready());
+        }
+    }
+
+    @Test
+    void exposesThePackagedDaemonSocketAsTheLocalDefault() {
+        assertEquals(Path.of("/run/taskcage/taskcaged.sock"), TaskCageClient.DEFAULT_SOCKET_PATH);
+    }
+
+    @Test
     void capabilitiesUsesProtocolV1OverUnixDomainSocket() throws Exception {
         try (FakeTaskCageServer server = FakeTaskCageServer.start(TaskCageClientIntegrationTest::capabilitiesResponse);
                 TaskCageClient client = TaskCageClient.connect(configFor(server))) {

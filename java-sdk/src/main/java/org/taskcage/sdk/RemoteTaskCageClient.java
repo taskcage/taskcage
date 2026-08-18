@@ -1,12 +1,23 @@
 package org.taskcage.sdk;
 
 import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Path;
 import java.util.UUID;
 import org.taskcage.sdk.internal.remote.DefaultRemoteTaskCageClient;
 
 /** Authenticated TLS client for Profile-only execution on a Remote TaskCage daemon. */
 public interface RemoteTaskCageClient extends AutoCloseable {
+    /**
+     * Connects to a TLS-protected Remote Runtime using the platform's default trust configuration.
+     *
+     * <p>{@code endpoint} must use the {@code taskcage+tls://host:port} form. Use
+     * {@link #connect(RemoteConnectionOptions)} for custom TLS trust or timeout configuration.
+     */
+    static RemoteTaskCageClient connect(URI endpoint, ServiceCredentials credentials) {
+        return connect(RemoteConnectionOptions.builder(endpoint, credentials).build());
+    }
+
     static RemoteTaskCageClient connect(RemoteConnectionOptions options) {
         return new DefaultRemoteTaskCageClient(options);
     }

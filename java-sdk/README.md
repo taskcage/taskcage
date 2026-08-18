@@ -37,14 +37,9 @@ Remote daemon에는 TLS 1.3과 service-account 인증이 필수다. Local UDS용
 `RemoteTaskCageClient`는 의도적으로 분리되어 있어, 원격에서는 Raw Command를 호출할 수 없다.
 
 ```java
-RemoteConnectionOptions options = RemoteConnectionOptions.builder(
+try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(
         URI.create("taskcage+tls://taskcage.internal:7443"),
-        ServiceCredentials.of("document-worker", Secret.fromEnvironment("TASKCAGE_CLIENT_SECRET")))
-    .connectTimeout(Duration.ofSeconds(3))
-    .requestTimeout(Duration.ofSeconds(30))
-    .build();
-
-try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(options)) {
+        ServiceCredentials.of("document-worker", Secret.fromEnvironment("TASKCAGE_CLIENT_SECRET")))) {
     RemoteArtifactUpload source = client.upload(Path.of("input.mp3"), "audio/mpeg");
     RemoteProfileTask task = client.submitProfile(new RemoteProfileRequest(
         new ProfileIdentity("ffmpeg-audio-to-wav", "1.0.0"),
@@ -289,6 +284,30 @@ Central 배포 bundle의 재현과 서명 요구사항은 [릴리스 운영](../
 
 `TaskCageClient`는 `AutoCloseable`이다. 소켓 연결은 첫 요청에서 열리며, `close()`는 SDK의 연결만 닫고 이미 제출된 데몬 작업을 취소하지 않는다.
 
+일반적인 Linux host 설치에서는 표준 daemon socket에 가장 짧게 연결한다. `localDefault()`는 daemon을
+설치하거나 기동하지 않으며, `/run/taskcage/taskcaged.sock`에 이미 실행 중인 daemon으로 lazy connection을
+만든다.
+
+```java
+try (TaskCageClient client = TaskCageClient.localDefault()) {
+    TaskCageCapabilities capabilities = client.capabilities();
+}
+```
+
+사용자 지정 Local UDS는 경로만 전달한다.
+
+```java
+try (TaskCageClient client = TaskCageClient.connectUnixSocket(
+        Path.of("/custom/taskcaged.sock"))) {
+    TaskCageCapabilities capabilities = client.capabilities();
+}
+```
+
+원격 daemon은 별도 `RemoteTaskCageClient`로 연결한다. endpoint는 항상
+`taskcage+tls://host:port` 형식이어야 하며, SDK는 기본적으로 JVM의 platform trust configuration과 TLS 1.3을
+사용한다. 사설 CA, 별도 trust store 또는 timeout은 `RemoteConnectionOptions`로 명시한다. Local/Remote API를
+분리해 원격 endpoint에서 Raw Command를 실행할 수 없게 한다.
+
 ```java
 TaskCageClientConfig config = TaskCageClientConfig.builder()
     .socketPath(Path.of("/run/taskcage/taskcaged.sock"))
@@ -301,7 +320,7 @@ try (TaskCageClient client = TaskCageClient.connect(config)) {
 }
 ```
 
-소켓 경로는 필수다. SDK는 데몬 위치나 기본 경로를 추정하지 않는다.
+소켓 경로와 timeout을 제어해야 하는 경우에는 `TaskCageClientConfig`를 사용한다.
 
 ## 작업 제출
 
