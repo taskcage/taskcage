@@ -1150,8 +1150,7 @@ fn io_error(operation: &'static str, path: PathBuf, source: io::Error) -> Bundle
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
+pub(crate) mod test_support {
     use std::io::Write;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
@@ -1160,14 +1159,8 @@ mod tests {
     use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
-    use crate::profile::LocalProfileRuntime;
-    use crate::protocol::{
-        CpuMax, OutputLimits, ProfileIdentity, ProfileInputValue, ProfileRequestPayload,
-        ResourceLimits,
-    };
-    use crate::resource_budget::ResourceBudget;
 
-    fn profile_bytes() -> Vec<u8> {
+    pub(crate) fn profile_bytes() -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "schemaVersion": PROFILE_SCHEMA,
             "name": "ffmpeg-audio-to-wav",
@@ -1211,10 +1204,13 @@ mod tests {
     }
 
     fn bundle_bytes(profile: &[u8], runtime_digest: &str) -> Vec<u8> {
+        let profile_value: serde_json::Value = serde_json::from_slice(profile).unwrap();
+        let name = profile_value["name"].as_str().unwrap();
+        let version = profile_value["version"].as_str().unwrap();
         serde_json::to_vec(&serde_json::json!({
             "schemaVersion": BUNDLE_SCHEMA,
-            "name": "ffmpeg-audio-to-wav",
-            "version": "1.0.0",
+            "name": name,
+            "version": version,
             "signingKeyId": "test-release",
             "runtime": {"packageId":"org.taskcage.ffmpeg","digest":runtime_digest},
             "profileDigest": format!("sha256:{:x}", Sha256::digest(profile))
@@ -1318,7 +1314,7 @@ mod tests {
         source
     }
 
-    fn catalog_with_runtime_package() -> (TempDir, BundleCatalog, Sha256Digest) {
+    pub(crate) fn catalog_with_runtime_package() -> (TempDir, BundleCatalog, Sha256Digest) {
         let root = tempfile::tempdir().unwrap();
         let cache_root = root.path().join("cache");
         fs::create_dir(&cache_root).unwrap();
@@ -1331,7 +1327,7 @@ mod tests {
         (root, catalog, package.digest)
     }
 
-    fn signed_bundle_archive(
+    pub(crate) fn signed_bundle_archive(
         profile: &[u8],
         package_digest: Sha256Digest,
     ) -> (NamedTempFile, Vec<TrustedBundleKey>) {
@@ -1687,73 +1683,5 @@ mod tests {
             BundleError::NotFound { name, version }
                 if name == "file-copy" && version == "1.0.0"
         ));
-    }
-
-    #[test]
-    fn installed_bundle_resolves_a_generic_profile_request() {
-        let root = tempfile::tempdir().unwrap();
-        let cache_root = root.path().join("cache");
-        fs::create_dir(&cache_root).unwrap();
-        fs::set_permissions(&cache_root, fs::Permissions::from_mode(0o755)).unwrap();
-        let package = RuntimePackageCache::open(&cache_root)
-            .unwrap()
-            .import(&runtime_package_source(root.path()))
-            .unwrap();
-        let profile = profile_bytes();
-        let bundle = bundle_bytes(&profile, &package.digest.to_string());
-        let (entries, keys) = signed_entries(bundle, profile);
-        let archive = write_archive(entries);
-        BundleCatalog::open(&cache_root)
-            .unwrap()
-            .import(archive.path(), &keys)
-            .unwrap();
-
-        let artifacts = root.path().join("artifacts");
-        fs::create_dir(&artifacts).unwrap();
-        fs::set_permissions(&artifacts, fs::Permissions::from_mode(0o700)).unwrap();
-        let source = b"source";
-        fs::write(artifacts.join("source.txt"), source).unwrap();
-        let budget = ResourceBudget::try_from_protocol(
-            ResourceLimits {
-                cpu_max: CpuMax {
-                    quota_micros: 100_000,
-                    period_micros: 100_000,
-                },
-                memory_max_bytes: 1_048_576,
-                pids_max: 16,
-                wall_time_limit_ms: 60_000,
-            },
-            OutputLimits {
-                stdout_tail_max_bytes: 1024,
-                stderr_tail_max_bytes: 1024,
-            },
-        )
-        .unwrap();
-        let runtime =
-            LocalProfileRuntime::open(&artifacts, 1024, budget, None, Some(&cache_root)).unwrap();
-        let request = ProfileRequestPayload {
-            client_request_id: "11111111-1111-4111-8111-111111111111".to_owned(),
-            profile: ProfileIdentity {
-                name: "ffmpeg-audio-to-wav".to_owned(),
-                version: "1.0.0".to_owned(),
-            },
-            inputs: BTreeMap::from([
-                (
-                    "source".to_owned(),
-                    ProfileInputValue::LocalInput {
-                        path: "source.txt".to_owned(),
-                        digest: format!("sha256:{:x}", Sha256::digest(source)),
-                        size_bytes: source.len() as u64,
-                    },
-                ),
-                (
-                    "sample_rate_hz".to_owned(),
-                    ProfileInputValue::Int64 { value: 16_000 },
-                ),
-                ("channels".to_owned(), ProfileInputValue::Int64 { value: 1 }),
-            ]),
-            resource_overrides: None,
-        };
-        assert!(runtime.validate(&request).is_ok());
     }
 }
