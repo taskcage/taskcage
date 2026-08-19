@@ -11,8 +11,22 @@ Profile authorization과 관리되는 Artifact 전송을 사용하는 별도 opt
 network에 노출하지 않는다.
 
 > **전환 상태:** 현재 공개 릴리스에는 Local Raw Command와 Local Profile이 함께 존재한다. 다음
-> Bundle-first 공개 계약의 목표는 일반 실행을 Bundle/Profile로 한정하고 Raw Command를 공개 API에서
-> 제거하는 것이다. 이 문서는 그 목표 모델과 현재 구현의 경계를 함께 기록한다.
+> Capsule-first 공개 계약의 목표는 일반 실행을 Capsule/Profile로 한정하고 Raw Command를 공개 API에서
+> 제거하는 것이다. 현재 archive와 schema는 구현 호환성을 위해 Bundle 명칭을 유지할 수 있다.
+
+## 표준 용어
+
+| 용어 | 의미 |
+|---|---|
+| **Capsule** | 재현 가능한 외부 프로세스와 실행 계약을 함께 묶은 불변 실행 단위 |
+| **Runtime Package** | Capsule이 실행할 바이너리·라이브러리·폰트·설정과 플랫폼 metadata |
+| **Execution Profile** | typed input, argv mapping, output 규칙, 자원 정책과 검증을 선언한 계약 |
+| **Task** | Capsule을 한 번 실행한 작업 단위. 하나의 cgroup과 lifecycle을 소유한다 |
+| **Daemon** | Capsule을 검증하고 Task를 실행·관찰·정리하는 호스트 runtime |
+| **Capsule Hub** | Capsule과 Runtime Package를 검색·배포하는 향후 registry |
+
+Input과 output data는 실행 계약을 구성하는 데이터이며, daemon 내부에서는 digest·staging·publish를
+관리하는 기술 용어로 Artifact라고 부를 수 있다. Artifact는 독립된 실행 단위가 아니다.
 
 ## 우리가 믿는 것
 
@@ -53,16 +67,17 @@ VM·container·security sandbox가 아니며, 신뢰할 수 없는 code의 보�
 ### 3. 실행은 명령어가 아니라 계약이어야 한다
 
 실행 파일 경로와 shell 문자열은 환경에 묶여 있고 검증·공유·재현하기 어렵다. TaskCage는 제품
-계약에서 실행을 **Execution Profile**로 표현한다.
+계약에서 실행을 **Capsule의 Execution Profile**로 표현한다.
 
 Execution Profile은 어떤 도구를 어떤 입력으로, 어떤 자원 정책 아래, 어떤 Runtime Package로, 어떤
 결과물로 실행하는지를 정의한 버전 관리 선언이다. daemon은 이 계약을 최종 검증하고 shell을 거치지
 않는 argv와 Task의 cgroup 경계를 구성한다.
 
-일반 사용자는 타입 안전한 Profile Binding 또는 범용 `ProfileRequest`로 의미 있는 작업을 호출한다.
-Bundle 제작자는 Custom Profile을 만들어 배포할 수 있다. 다음 Bundle-first 공개 계약에는 실행 파일과
-argv를 직접 지정하는 Raw Command를 포함하지 않는다. 현재 Local Raw Command는 기존 공개 릴리스의
-호환 경로이며, 제한을 우회하는 경로는 아니다.
+일반 사용자는 Capsule 이름과 Profile이 선언한 입력으로 의미 있는 작업을 호출한다. 언어별 SDK는
+동일한 Profile schema를 각 언어의 값 객체로 노출하는 편의 계층이며, 프로세스별 Binding을 제품의
+필수 개념으로 만들지 않는다. 다음 Capsule-first 공개 계약에는 실행 파일과 argv를 직접 지정하는
+Raw Command를 포함하지 않는다. 현재 Local Raw Command는 기존 공개 릴리스의 호환 경로이며, 제한을
+우회하는 경로는 아니다.
 
 ### 4. 재현성과 이식성은 선언해야 얻어진다
 
@@ -75,12 +90,12 @@ Docker가 애플리케이션 전체를 Image로 배포한다면, TaskCage는 외
 참조로 구성된 실행 계약으로 만든다.
 
 ```text
-TaskCage Bundle
+TaskCage Capsule
 ├─ Execution Profile
 ├─ Runtime Package ref + digest
 ├─ Platform requirements
 ├─ Resource policy
-└─ Bundle signature
+└─ Capsule signature
 
 Runtime Package
 ├─ Executable
@@ -90,11 +105,11 @@ Runtime Package
 └─ Package digest/signature
 ```
 
-Bundle은 Profile, Package digest, platform, policy와 서명을 가진 불변 실행 계약이다. 초기 배포물은
-사람이 검토 가능한 `.tcbundle.tar.gz` archive로 만들 수 있으며, Package payload를 포함하는 배포 archive도
-허용할 수 있다. 다만 실행 계약은 항상 Package digest를 참조하며, daemon cache에서는 Package를 별도
-entry로 관리해 여러 Bundle이 같은 digest를 공유한다. Bundle과 Package의 무결성 검증이 끝나기 전에는
-Task를 시작하지 않는다. archive와 manifest의 상세 형식은 [Bundle 형식 초안](bundle-format.md)을 따른다.
+Capsule은 Profile, Package digest, platform, policy와 서명을 가진 불변 실행 계약이다. 초기 배포물은
+사람이 검토 가능한 `.tcbundle.tar.gz` archive로 만들 수 있으며, 현재 archive 내부 schema는 구현 호환성을
+위해 Bundle 명칭을 유지한다. 실행 계약은 항상 Package digest를 참조하며, daemon cache에서는 Package를
+별도 entry로 관리해 여러 Capsule이 같은 digest를 공유한다. Capsule과 Package의 무결성 검증이 끝나기
+전에는 Task를 시작하지 않는다. archive와 manifest의 상세 형식은 [Capsule archive 형식](bundle-format.md)을 따른다.
 
 ### 5. 안전은 제한 없는 fallback보다 중요하다
 
@@ -102,26 +117,19 @@ cgroup controller, 권한, 원자적 task cgroup entry 또는 제한값 read-bac
 상태로 실행하지 않는다. whole-task cleanup을 증명할 수 없다면 새 Task를 시작하지 않고, 필요하면
 fail-stop과 시작 복구를 선택한다.
 
-### 6. Bundle과 Binding은 확장 가능한 생태계다
+### 6. Capsule은 확장 가능한 실행 생태계다
 
-Bundle은 공식 도구 목록이 아니라 외부 제작자도 만들 수 있는 배포 단위다. Bundle 제작자는 Runtime
-Package와 Execution Profile을 만들고, manifest·digest·서명으로 하나의 실행 계약을 배포한다. Binding
-제작자는 그 Profile input/output schema를 Java 등의 타입 안전한 도메인 API로 매핑해 각 언어의 package
-registry에 독립 배포할 수 있다.
-
-Bundle과 Binding은 권장되는 조합이지만 강하게 결합하지 않는다.
+Capsule은 공식 도구 목록이 아니라 외부 제작자도 만들 수 있는 배포 단위다. 제작자는 Runtime Package와
+Execution Profile을 만들고, manifest·digest·서명으로 하나의 실행 계약을 배포한다. 언어별 SDK는 이
+선언된 schema를 공통 입력·출력 API로 노출하며, 특정 프로세스마다 별도 Binding을 요구하지 않는다.
 
 ```text
-Bundle only
-  → Generic ProfileRequest로 실행
-
-Bundle + Java Binding
-  → Java domain API로 실행
+Capsule
+  → Generic ProfileRequest 또는 언어별 typed input으로 실행
 ```
 
-Binding은 Bundle의 신뢰를 부여하지 않는다. daemon은 Binding이 보낸 요청도 Bundle 서명, allowlist,
-Profile schema, Artifact와 정책을 최종 검증한다. Binding은 지원하는 Bundle/Profile, Core SDK와 Protocol
-버전 범위를 공개해야 한다.
+언어별 SDK는 Capsule의 신뢰를 부여하지 않는다. daemon은 SDK가 보낸 요청도 Capsule 서명, allowlist,
+Profile schema, input/output data와 정책을 최종 검증한다.
 
 ### 7. Local Core 계약을 유지하고 Remote는 제한된 별도 경로로 제공한다
 
@@ -130,14 +138,14 @@ Core SDK는 장기적으로 transport와 상관없이 같은 Task·결과·종�
 ```text
 TaskCage Core SDK
 ├─ Current Local Transport (UDS): Raw Command와 Profile
-├─ Target Local Transport (UDS): 승인된 Bundle/Profile
+├─ Target Local Transport (UDS): 승인된 Capsule/Profile
 └─ Remote Transport (TLS): 승인된 Profile과 관리되는 Artifact
 ```
 
 현재 공개 기준선은 Local UDS의 Raw Command·Profile과 인증된 Remote Profile 실행이다. Local과 Remote는
 같은 Task 결과·종료 원인·정리 계약을 유지하지만 transport와 허용된 실행 입력은 명시적으로 구분한다.
-다음 Bundle-first 단계는 Local Bundle import, Runtime Package 검증, 범용 Profile API와 첫 Binding을
-하나의 완결된 사용자 흐름으로 검증한다. 중앙 Hub는 그 뒤 실제 공유·배포 요구가 확인된 경우에만 검토한다.
+다음 Capsule-first 단계는 Local Capsule import, Runtime Package 검증, 범용 Profile API를 하나의
+완결된 사용자 흐름으로 검증한다. 중앙 Capsule Hub는 그 뒤 실제 공유·배포 요구가 확인된 경우에만 검토한다.
 
 Remote는 Local Protocol v1 framing을 network에 그대로 노출하지 않는다. 원격 Profile 실행의 TLS,
 service-account authentication, authorization, Artifact reference와 failure contract는
@@ -161,7 +169,7 @@ TaskCage는 다음을 제공하는 것을 목표로 한다.
 
 - 외부 프로세스의 Task 단위 추상화
 - Linux cgroup v2 기반 자원·수명주기 관리
-- Bundle/Profile 기반 실행 계약
+- Capsule/Profile 기반 실행 계약
 - Local UDS와 인증된 Remote runtime 연결
 - 일관된 결과, Artifact와 종료 원인
 
@@ -173,7 +181,7 @@ TaskCage는 다음을 기본 제공하지 않는다.
 - 임의 URL에서 임의 binary를 받아 실행하는 기능
 - 중앙 Hub server 의존성
 
-Hub는 Bundle·Profile·Binding metadata를 배포할 수 있는 장기 후보일 뿐 Local Public Alpha나 Local
+Capsule Hub는 Capsule·Profile metadata를 배포할 수 있는 장기 후보일 뿐 Local Public Alpha나 Local
 Product Alpha 구성요소가 아니다. 제품은 Hub 없이 설치·검증된 계약으로 동작해야 하며, 이 저장소는 현재
 Hub server를 구현하거나 운영하지 않는다.
 
@@ -183,14 +191,13 @@ Hub server를 구현하거나 운영하지 않는다.
 |---|---|
 | TaskCage | 신뢰된 외부 프로세스를 제한된 실행 계약으로 다루는 Linux-native process runtime |
 | Task | 특정 실행 계약을 입력과 자원 정책으로 수행하는 일회성 작업이며, cgroup v2 실행 경계·프로세스 트리·상태·결과를 포함하는 공개 실행 단위 |
-| TaskCage Daemon (`taskcaged`) | Task를 검증하고 task cgroup을 생성해 외부 프로세스를 실행·관찰·정리하는 runtime |
-| TaskCage Core SDK | 현재는 Local Raw Command·Profile과 인증된 Remote Profile 연결을 제공하며, 목표 공개 계약에서는 Bundle/Profile Task 제출·조회·취소를 제공하는 공통 SDK |
+| TaskCage Daemon (`taskcaged`) | Capsule을 검증하고 Task cgroup을 생성해 외부 프로세스를 실행·관찰·정리하는 host runtime |
+| TaskCage Java SDK | Java 애플리케이션이 Capsule Task를 제출·조회·취소하는 client library |
 | Execution Profile | 입력·출력 schema, argv 구성 규칙, Runtime Package 참조와 기본 자원 정책을 정의한 버전 관리 실행 계약 |
-| TaskCage Bundle | Execution Profile, Runtime Package ref + digest, 호환성·정책·무결성 정보를 담은 불변 실행 계약이자 배포 단위 |
+| Capsule archive | Execution Profile, Runtime Package ref + digest, 호환성·정책·무결성 정보를 담은 불변 실행 계약이자 배포 단위. 현재 archive schema는 Bundle 명칭을 유지할 수 있음 |
 | Runtime Package | 실행 binary와 필요한 library·codec·font·설정을 묶어 별도로 cache하는 플랫폼별 실행물 |
-| Profile Binding | Execution Profile을 Java 등의 타입 안전한 domain API로 매핑해 독립 배포하는 언어별 편의 library |
-| Artifact | Task가 입력으로 사용하거나 결과로 생성하는 file·URI·data 참조 |
-| Raw Command | 현재 공개 Local 릴리스의 legacy 호환 API. 다음 Bundle-first 공개 계약에는 포함하지 않음 |
-| TaskCage Hub | Bundle·Profile·Binding metadata를 저장·검색·검증·배포할 수 있는 장기 Registry 후보. Local Public Alpha와 Local Product Alpha에는 포함하지 않음 |
+| Input / Output data | Task에 전달되거나 Task가 생성하는 입력·출력 데이터. daemon 내부에서는 필요할 때 Artifact로 관리 |
+| Raw Command | 현재 공개 Local 릴리스의 legacy 호환 API. 다음 Capsule-first 공개 계약에는 포함하지 않음 |
+| TaskCage Hub | Capsule·Profile metadata를 저장·검색·검증·배포할 수 있는 장기 Registry 후보. Local Public Alpha와 Local Product Alpha에는 포함하지 않음 |
 
 **TaskCage는 프로세스를 실행하는 도구가 아니라, 외부 프로세스를 신뢰 가능한 작업 계약으로 바꾸는 runtime이다.**

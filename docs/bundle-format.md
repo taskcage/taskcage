@@ -1,4 +1,8 @@
-# TaskCage Bundle format v0alpha1
+# TaskCage Capsule archive format v0alpha1
+
+> 제품 용어는 **Capsule**이다. 이 문서와 현재 구현의 `bundle.json`, `profile.json`,
+> `taskcage.bundle/v0alpha1` schema 값은 기존 archive·wire 호환성을 위해 Bundle 명칭을 유지한다.
+> 새 사용자 문서에서는 이 archive를 Capsule로 부른다.
 
 > **릴리스 상태:** 이 계약과 `taskcaged bundle import`, immutable local catalog, `--bundle-cache-root` 기반
 > Profile 실행은 `taskcaged-v0.4.0` tag 이후 `main`에 구현됐지만 아직 공개 daemon 릴리스에는 포함되지
@@ -12,13 +16,13 @@
 
 ## 목적
 
-TaskCage Bundle은 특정 외부 프로그램 작업을 실행하기 위한 불변 계약이다. Bundle은 실행 파일 경로나
+TaskCage Capsule archive는 특정 외부 프로그램 작업을 실행하기 위한 불변 계약이다. Capsule은 실행 파일 경로나
 caller-provided argv를 노출하지 않고, 어떤 Profile을 어떤 Runtime Package와 정책으로 실행할지 정의한다.
 
 ```text
-Bundle = what and how to execute
+Capsule = what and how to execute
 Runtime Package = executable files and dependencies
-Task = one cgroup-managed execution of a Bundle Profile
+Task = one cgroup-managed execution of a Capsule Profile
 ```
 
 Bundle은 Docker Image가 아니다. root filesystem, PID 1, namespace, network configuration, container user와
@@ -176,13 +180,14 @@ ffmpeg-runtime@sha256:...
 Bundle과 분리된 digest cache entry로 검증·저장한다. 큰 Package는 local import 또는 이후 Registry에서
 별도로 준비할 수 있다.
 
-## Binding 관계
+## 언어별 SDK 관계
 
-Binding은 Bundle/Profile schema를 특정 언어의 도메인 API로 매핑하는 선택적 library다.
+언어별 SDK는 Capsule의 Profile schema를 해당 언어의 typed input/output API로 노출하는 선택적 편의 계층이다.
+프로세스별 Binding artifact가 Capsule 실행의 필수 구성요소는 아니다.
 
 ```text
-Java FFmpeg Binding
-  → ffmpeg-transcode Bundle/Profile
+Java SDK
+  → ffmpeg-transcode Capsule/Profile
   → Generic ProfileRequest
 ```
 
@@ -203,21 +208,20 @@ Package digest and platform, pins its entrypoint descriptor, stages the one decl
 the declared argv placeholders, and applies the Bundle policy plus permitted request overrides. Missing, corrupt or
 incompatible Bundles never fall back to a caller command or to a mutable executable path.
 
-Binding은 Bundle의 trust boundary가 아니다. daemon은 Bundle signature, allowlist, Profile input, Artifact와
-resource override를 다시 검증한다. Binding은 지원하는 Bundle/Profile version 범위와 필요한 Core SDK·Protocol
-version을 공개해야 한다.
+언어별 SDK는 Capsule의 trust boundary가 아니다. daemon은 Capsule signature, allowlist, Profile input/output
+data와 resource override를 다시 검증한다.
 
 ## 사용 경로
 
 ```text
-Bundle author
+Capsule author
   → Runtime Package + Profile 제작
-  → Bundle archive 생성·서명
+  → Capsule archive 생성·서명
   → local import 또는 조직 Registry 배포
 
 Application developer
-  → generic ProfileRequest 또는 language Binding 사용
-  → Task 결과와 output Artifact 수신
+  → generic ProfileRequest 또는 language SDK 사용
+  → Task 실행 결과와 output data 수신
 ```
 
 ## Local import and catalog on `main` (unreleased)
@@ -260,5 +264,5 @@ Bundle을 제공한다. Hub는 여러 호스트·조직이 Bundle과 Runtime Pac
 
 ## 공개 API 전환
 
-다음 Bundle-first 공개 계약에서는 일반 실행을 Bundle/Profile request로 제한한다. 현재 Local Raw Command는
-기존 릴리스와 검증 자료를 위한 호환 경로이며, 새 public Bundle API 또는 Remote API의 일부가 아니다.
+다음 Capsule-first 공개 계약에서는 일반 실행을 Capsule/Profile request로 제한한다. 현재 Local Raw Command는
+기존 릴리스와 검증 자료를 위한 호환 경로이며, 새 public Capsule API 또는 Remote API의 일부가 아니다.

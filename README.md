@@ -8,11 +8,11 @@ TaskCage는 신뢰된 외부 프로세스를 작업 단위로 실행하고, Linu
 > Raw Command·Profile과 opt-in Remote TLS Profile·Artifact API를 제공한다. `0.x`는 초기 개발 버전이며
 > 공개 API와 운영 계약이 이후 minor 버전에서 변경될 수 있다.
 
-> **다음 방향:** 다음 breaking 공개 계약은 Bundle/Profile 중심으로 전환한다. 현재 Local Raw Command는
-> 기존 릴리스의 호환 경로이며, 새 실행 경험은 Bundle import → generic Profile request 또는 language
-> Binding 호출을 목표로 한다.
+> **다음 방향:** 다음 breaking 공개 계약은 Capsule 중심으로 전환한다. 현재 Local Raw Command는
+> 기존 릴리스의 호환 경로이며, 새 실행 경험은 Capsule import → 선언된 Profile 입력으로 Capsule을
+> 호출하는 흐름을 목표로 한다.
 
-> **`main` 개발 상태(미출시):** Bundle import, `--bundle-cache-root`와 catalog 기반 Profile 실행은
+> **`main` 개발 상태(미출시):** Capsule archive import, `--bundle-cache-root`와 catalog 기반 Profile 실행은
 > `taskcaged-v0.4.0` tag 이후 `main`에 구현됐다. 현재 설치 가능한 daemon `0.4.0`에는 이 기능과 명령이
 > 포함되지 않으며, Bundle 기능을 포함할 최소 공개 daemon version은 아직 정해지지 않았다.
 
@@ -28,7 +28,9 @@ PDF·OCR·이미지·영상 변환, 브라우저 자동화, 컴파일 같은 외
 - 여러 작업이 겹치면 정상 요청까지 영향을 받는다.
 - exit code만으로는 timeout, OOM, PID 제한 같은 종료 원인을 구분하기 어렵다.
 
-TaskCage는 외부 프로세스를 단일 PID가 아니라 제한과 결과를 가진 **Task**로 다룬다.
+TaskCage는 외부 프로세스를 단일 PID가 아니라 제한과 결과를 가진 **Task**로 다룬다. Task가 실행하는
+재현 가능한 외부 프로세스 단위는 **Capsule**이며, Capsule은 Runtime Package와 Execution Profile로
+구성된다.
 
 > Task는 특정 실행 계약을 입력과 자원 정책으로 수행하는 일회성 작업이며, cgroup v2 실행 경계·프로세스 트리·상태·결과를 포함한다.
 
@@ -66,7 +68,7 @@ TaskCage Java SDK
 - 요청 ID 기반의 데몬 생존 기간 내 멱등 제출
 - Ubuntu FFmpeg package를 사용하는 Local Raw Command 정상·timeout reference workflow
 - TLS 1.3과 service-account 인증을 사용하는 opt-in Remote Profile 실행
-- Remote Artifact upload/download와 principal별 Profile·자원 override authorization
+- Remote input/output data upload/download와 principal별 Profile·자원 override authorization
 
 ## 안전 보장
 
@@ -299,26 +301,27 @@ bash integration-tests/release-artifact-smoke.sh \
 - [릴리스 및 버전 정책](docs/release-policy.md)
 - [릴리스 운영](docs/releasing.md)
 - [FFmpeg Local Raw Command reference](docs/reference-ffmpeg.md)
-- [첫 FFmpeg Profile Binding 계약](docs/ffmpeg-profile-binding.md)
-- [Java FFmpeg Binding 예제](examples/ffmpeg-java/README.md)
+- [첫 FFmpeg Capsule Profile 계약](docs/ffmpeg-profile-binding.md)
+- [Java FFmpeg Capsule 예제](examples/ffmpeg-java/README.md)
 - [Linux 통합 시험](integration-tests/README.md)
 - [Protocol fixture](protocol-fixtures/v1/README.md)
 - [기여 가이드](CONTRIBUTING.md)
 
 ## 단계별 제품 방향
 
-`0.1.0`은 Local UDS와 Raw Command 기준선을, `0.2.0`은 opt-in Local Profile·Artifact·Runtime Package를,
+`0.1.0`은 Local UDS와 Raw Command 기준선을, `0.2.0`은 opt-in Local Profile·input/output data·Runtime Package를,
 `0.4.0` daemon과 `0.3.0` Java SDK는 인증된 Remote Profile·Artifact 전송을 추가했다. 이들은 현재
 설치 가능한 공개 계약이다.
 
-`main`에는 Bundle-first MVP가 중앙 Hub 없이 Local Bundle import, Runtime Package 검증, generic
-`ProfileRequest`, Artifact 입출력, 첫 FFmpeg Binding을 하나의 흐름으로 제공하도록 구현됐다. 이 구현은
+`main`에는 Capsule-first MVP가 중앙 Hub 없이 Local Capsule archive import, Runtime Package 검증, generic
+`ProfileRequest`, input/output data 처리를 하나의 흐름으로 제공하도록 구현됐다. 이 구현은
 `taskcaged-v0.4.0` 이후에 병합됐으며 아직 공개 daemon 릴리스에 포함되지 않았다. 최소 릴리스 version도
 아직 정해지지 않았다.
 
-Bundle은 Profile, Runtime Package ref + digest, 플랫폼·정책·무결성 정보를 담는 불변 실행 계약이다.
-Package는 daemon cache에서 digest 기준으로 공유한다. archive 검증·catalog import·Profile 실행의
-현재 계약은 [Bundle 형식](docs/bundle-format.md)에 정리되어 있다.
+Capsule archive는 Execution Profile, Runtime Package ref + digest, 플랫폼·정책·무결성 정보를 담는
+불변 실행 계약이다. Package는 daemon cache에서 digest 기준으로 공유한다. 현재 archive와 schema의
+하위 호환 이름은 Bundle을 사용하며, 제품 용어와 전환 규칙은 [제품 철학과 용어](docs/product-philosophy.md),
+기술 계약은 [Capsule archive 형식](docs/bundle-format.md)에 정리되어 있다.
 
 Remote Protocol v1은 Local UDS를 대체하지 않는 opt-in 경로다. TLS 1.3, service-account 인증,
 principal별 Profile authorization과 관리되는 Artifact 전달을 사용하며 Remote Raw Command와 Local fallback을
