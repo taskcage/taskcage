@@ -19,6 +19,9 @@ TaskCage는 신뢰된 외부 프로세스를 작업 단위로 실행하고, Linu
 제품의 장기 방향과 표준 용어는 [제품 철학과 용어](docs/product-philosophy.md)에서 정의한다. 이 README는
 현재 설치 가능한 Local 및 opt-in Remote Public Alpha 범위를 설명한다.
 
+Capsule-first 전환의 현재 단계와 다음 구현 순서는 [Capsule-first MVP 계획](docs/capsule-mvp-plan.md)에
+정리되어 있다. EmbeddedRunner를 먼저 검증하고, 같은 계약에 현재 daemon-backed ExternalRunner를 연결한다.
+
 ## 해결하려는 문제
 
 PDF·OCR·이미지·영상 변환, 브라우저 자동화, 컴파일 같은 외부 프로그램은 호출은 간단하지만 독립된 자원과 프로세스 트리를 가진다.
