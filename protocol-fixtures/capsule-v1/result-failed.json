@@ -1,0 +1,13 @@
+{
+  "taskId": "44444444-4444-4444-8444-444444444444",
+  "capsule": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
+  "profile": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
+  "state": "FINISHED",
+  "outcome": "FAILED",
+  "terminationReason": "EXITED",
+  "cleanupConfirmed": true,
+  "process": {"exitCode": 1, "signal": null},
+  "usage": {"cpuTimeMicros": 7000, "memoryPeakBytes": 1048576},
+  "artifacts": {},
+  "failure": {"code": "PROCESS_FAILED", "message": "external process exited with code 1"}
+}

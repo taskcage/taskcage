@@ -1,0 +1,17 @@
+{
+  "capsule": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
+  "profile": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
+  "inputs": {
+    "source": {
+      "kind": "LOCAL_INPUT",
+      "path": "jobs/42/source.mp4",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "sizeBytes": 1024
+    },
+    "sample_rate_hz": {"kind": "INT64", "value": 16000},
+    "channels": {"kind": "INT64", "value": 1}
+  },
+  "resourceOverrides": {
+    "limits": {"wallTimeLimitMs": 120000}
+  }
+}

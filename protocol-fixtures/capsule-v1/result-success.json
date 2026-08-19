@@ -1,0 +1,20 @@
+{
+  "taskId": "44444444-4444-4444-8444-444444444444",
+  "capsule": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
+  "profile": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
+  "state": "FINISHED",
+  "outcome": "SUCCEEDED",
+  "terminationReason": "EXITED",
+  "cleanupConfirmed": true,
+  "process": {"exitCode": 0, "signal": null},
+  "usage": {"cpuTimeMicros": 7000, "memoryPeakBytes": 1048576},
+  "artifacts": {
+    "audio": {
+      "path": "tasks/44444444-4444-4444-8444-444444444444/result.wav",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sizeBytes": 1823912,
+      "mediaType": "audio/wav"
+    }
+  },
+  "failure": null
+}

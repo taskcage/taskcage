@@ -1,0 +1,13 @@
+{
+  "taskId": "44444444-4444-4444-8444-444444444444",
+  "capsule": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
+  "profile": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
+  "state": "FINISHED",
+  "outcome": "FAILED",
+  "terminationReason": "CANCELLED",
+  "cleanupConfirmed": true,
+  "process": {"exitCode": null, "signal": "SIGKILL"},
+  "usage": {"cpuTimeMicros": 7000, "memoryPeakBytes": 1048576},
+  "artifacts": {},
+  "failure": {"code": "CANCELLED", "message": "task cancelled by caller"}
+}

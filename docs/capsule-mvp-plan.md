@@ -37,6 +37,9 @@ Capsule**이다. Capsule은 실행 파일만 담는 패키지가 아니라 typed
 
 ### 1. 공통 Capsule 실행 계약
 
+세부 규범은 [Capsule 실행 계약 v1](capsule-execution-contract.md)과
+[공통 fixture](../protocol-fixtures/capsule-v1/)에 고정한다.
+
 언어와 backend가 달라도 다음 의미는 같아야 한다.
 
 - Capsule identity와 version
