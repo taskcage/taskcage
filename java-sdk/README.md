@@ -31,9 +31,9 @@ Java application
 
 ## Capsule 실행 계약
 
-공통 실행 API는 `CapsuleRunner`가 소유한다. Runner 구현은 Embedded 또는 daemon-backed External일 수
-있지만, Capsule identity, typed `ProfileRequest`, 대기 timeout, idempotency key와 cleanup-confirmed
-result의 의미는 동일해야 한다.
+공통 실행 API는 `CapsuleRunner`가 소유한다. Runner 구현은 private `taskcage-exec`를 사용하는 Embedded
+backend 또는 daemon-backed External backend일 수 있지만, Capsule identity, typed `ProfileRequest`, 대기
+timeout, idempotency key와 cleanup-confirmed result의 의미는 동일해야 한다.
 
 현재 SDK는 기존 `ProfileRuntime`을 External backend로 연결하는 adapter를 제공한다.
 
@@ -49,7 +49,8 @@ try (CapsuleRunner runner = CapsuleRunner.external(taskCageClient)) {
 
 `CapsuleRunner`는 실행 파일 경로와 shell 문자열을 받지 않는다. Capsule이 선언한 Profile과 Runtime
 Package를 backend가 검증하며, 현재 External adapter는 그 요청을 설치된 daemon에 전달한다. Embedded
-backend는 같은 계약을 유지하는 다음 단계의 구현이다.
+backend는 `taskcage-exec` private helper를 SDK가 관리하고, helper가 공통 Rust execution core를 호출하는
+다음 단계의 구현이다. Embedded backend는 `taskcaged serve` child daemon을 시작하지 않는다.
 
 ## Remote Profile 실행
 

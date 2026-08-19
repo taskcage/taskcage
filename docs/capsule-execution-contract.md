@@ -8,7 +8,9 @@ Local Profile Protocol v2의 wire envelope와 field를 교체하지 않는다. L
 `EmbeddedRunner`는 이 문서의 의미를 보존해야 한다.
 
 이 계약은 실행 방법을 정의하지만 archive 배포 형식, Runtime Package 다운로드, Hub, TLS transport는
-정의하지 않는다.
+정의하지 않는다. 구현은 하나의 Rust `taskcage-core`를 공유해야 하며, `taskcaged`와 Embedded용
+`taskcage-exec`는 각각 daemon·private helper adapter로 동작한다. EmbeddedRunner는 `taskcaged` child
+daemon을 시작하는 방식으로 구현하지 않는다.
 
 ## 핵심 객체
 
