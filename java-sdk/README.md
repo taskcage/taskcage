@@ -29,6 +29,28 @@ Java application
               taskcaged
 ```
 
+## Capsule 실행 계약
+
+공통 실행 API는 `CapsuleRunner`가 소유한다. Runner 구현은 Embedded 또는 daemon-backed External일 수
+있지만, Capsule identity, typed `ProfileRequest`, 대기 timeout, idempotency key와 cleanup-confirmed
+result의 의미는 동일해야 한다.
+
+현재 SDK는 기존 `ProfileRuntime`을 External backend로 연결하는 adapter를 제공한다.
+
+```java
+CapsuleRequest request = new CapsuleRequest(
+    new CapsuleIdentity("ffmpeg-audio-to-wav", "1.0.0"),
+    new ProfileRequest(profile, inputs));
+
+try (CapsuleRunner runner = CapsuleRunner.external(taskCageClient)) {
+    CapsuleExecutionResult result = runner.execute(request, Duration.ofMinutes(2));
+}
+```
+
+`CapsuleRunner`는 실행 파일 경로와 shell 문자열을 받지 않는다. Capsule이 선언한 Profile과 Runtime
+Package를 backend가 검증하며, 현재 External adapter는 그 요청을 설치된 daemon에 전달한다. Embedded
+backend는 같은 계약을 유지하는 다음 단계의 구현이다.
+
 ## Remote Profile 실행
 
 Remote daemon에는 TLS 1.3과 service-account 인증이 필수다. Local UDS용 `TaskCageClient`와 Remote의
