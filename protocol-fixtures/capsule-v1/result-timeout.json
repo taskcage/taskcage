@@ -1,0 +1,13 @@
+{
+  "taskId": "44444444-4444-4444-8444-444444444444",
+  "capsule": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
+  "profile": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
+  "state": "FINISHED",
+  "outcome": "FAILED",
+  "terminationReason": "TIMED_OUT",
+  "cleanupConfirmed": true,
+  "process": {"exitCode": null, "signal": "SIGKILL"},
+  "usage": {"cpuTimeMicros": 120000, "memoryPeakBytes": 536870912},
+  "artifacts": {},
+  "failure": {"code": "TIMEOUT", "message": "wall time limit exceeded"}
+}
