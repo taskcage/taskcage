@@ -131,21 +131,23 @@ Capsule
 언어별 SDK는 Capsule의 신뢰를 부여하지 않는다. daemon은 SDK가 보낸 요청도 Capsule 서명, allowlist,
 Profile schema, input/output data와 정책을 최종 검증한다.
 
-### 7. Local Core 계약을 유지하고 Remote는 제한된 별도 경로로 제공한다
+### 7. 실행 backend는 교체 가능해야 한다
 
-Core SDK는 장기적으로 transport와 상관없이 같은 Task·결과·종료 원인 계약을 제공한다.
+Core SDK는 장기적으로 backend와 transport에 상관없이 같은 Capsule·Task·결과·종료 원인 계약을 제공한다.
 
 ```text
 TaskCage Core SDK
-├─ Current Local Transport (UDS): Raw Command와 Profile
-├─ Target Local Transport (UDS): 승인된 Capsule/Profile
-└─ Remote Transport (TLS): 승인된 Profile과 관리되는 Artifact
+├─ CapsuleRunner
+│  ├─ EmbeddedRunner (MVP 우선)
+│  └─ ExternalRunner (현재 daemon/UDS 연결)
+└─ Remote transport (TLS, 후속 단계)
 ```
 
-현재 공개 기준선은 Local UDS의 Raw Command·Profile과 인증된 Remote Profile 실행이다. Local과 Remote는
+현재 공개 기준선은 daemon-backed Local UDS의 Raw Command·Profile과 인증된 Remote Profile 실행이다. Local과 Remote는
 같은 Task 결과·종료 원인·정리 계약을 유지하지만 transport와 허용된 실행 입력은 명시적으로 구분한다.
-다음 Capsule-first 단계는 Local Capsule import, Runtime Package 검증, 범용 Profile API를 하나의
-완결된 사용자 흐름으로 검증한다. 중앙 Capsule Hub는 그 뒤 실제 공유·배포 요구가 확인된 경우에만 검토한다.
+다음 Capsule-first 단계는 EmbeddedRunner에서 하나의 Capsule을 실행한 뒤, 같은 요청을 ExternalRunner로
+검증하는 것이다. 중앙 Capsule Hub는 그 뒤 실제 공유·배포 요구가 확인된 경우에만 검토한다. 세부 순서는
+[Capsule-first MVP 계획](capsule-mvp-plan.md)을 따른다.
 
 Remote는 Local Protocol v1 framing을 network에 그대로 노출하지 않는다. 원격 Profile 실행의 TLS,
 service-account authentication, authorization, Artifact reference와 failure contract는
