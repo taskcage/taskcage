@@ -1,4 +1,8 @@
-# TaskCage Local Profile Core API v2
+# TaskCage Local Capsule Profile Core API v2
+
+> 제품 용어에서 Capsule은 Runtime Package와 Execution Profile로 구성된 실행 단위다. 이 문서는 그중
+> Profile 요청·Task lifecycle·input/output data 계약을 정의한다. 현재 archive schema와 구현 명칭은
+> 하위 호환성을 위해 Bundle을 사용할 수 있다.
 
 > 상태: Local Profile의 **현재 Core 계약**이다. installed Profile은 signed Bundle import로 catalog에
 > 등록될 수 있으며, Bundle archive 형식과 설치 절차는 [Bundle 형식](bundle-format.md)에 정의한다. 이
@@ -20,7 +24,7 @@ Local Profile Core는 신뢰된 Linux host의 daemon에 이미 설치된 Executi
 
 다음은 이 문서의 범위가 아니다.
 
-- FFmpeg·Chromium 등의 Profile Binding과 domain type
+- 특정 도구에 종속된 Capsule convenience API와 domain type
 - Runtime Package cache, Bundle archive 형식, Profile import/install command
 - Remote transport, TLS, object storage, Artifact upload/download
 - Spring Boot integration, 임의 JSON value, multi-output, output overwrite
