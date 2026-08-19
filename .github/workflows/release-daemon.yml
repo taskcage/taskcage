@@ -129,9 +129,7 @@ jobs:
           distribution: temurin
           java-version: "17"
       - name: Install Ubuntu FFmpeg package
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
+        run: sudo bash scripts/ci/install-ffmpeg.sh
       - run: bash integration-tests/ffmpeg-reference-workflow.sh
 
   arm64-runtime-package-gate:
