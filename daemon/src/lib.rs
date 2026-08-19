@@ -12,6 +12,8 @@ pub mod bundle;
 mod cancellation;
 pub mod capability;
 mod capacity;
+#[cfg(target_os = "linux")]
+pub mod capsule;
 pub mod cgroup;
 #[cfg(all(target_os = "linux", test))]
 mod cleanup_fault;
@@ -34,6 +36,10 @@ pub mod output;
 pub mod preflight;
 #[cfg(target_os = "linux")]
 mod profile;
+#[cfg(target_os = "linux")]
+pub mod profile_invocation;
+#[cfg(target_os = "linux")]
+pub mod profile_mapper;
 #[cfg(target_os = "linux")]
 mod profile_registry;
 pub mod protocol;

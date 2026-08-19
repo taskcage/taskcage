@@ -16,9 +16,18 @@ use crate::artifact::{
     ArtifactPath, ArtifactStoreError, DeclaredOutputArtifact, LocalInputArtifact,
     StagedArtifactTask,
 };
-use crate::bundle::{BundleCatalog, BundleError, BundleInput, BundleInspection, BundleProfile};
+#[cfg(test)]
+use crate::bundle::BundleProfile;
+use crate::bundle::{BundleCatalog, BundleError};
+use crate::capsule::{CapsuleCatalog, CapsuleError, CompiledCapsule};
 use crate::digest::Sha256Digest;
 use crate::execution_plan::ResolvedExecutionPlan;
+use crate::profile_invocation::{
+    CpuMaxOverride, InputValueRejection, InvocationError, ProfileCall,
+    ProfileIdentity as InvocationProfileIdentity,
+    ProfileResourceOverrides as InvocationResourceOverrides,
+    ProfileValue as InvocationProfileValue, VerifiedArgument, verify_profile_call,
+};
 use crate::protocol::{
     CommandSpec, ErrorCode, OutputLimits, ProfileIdentity, ProfileInputValue,
     ProfileRequestPayload, ProfileResourceOverrides, ResourceLimits,
@@ -84,15 +93,8 @@ enum VerifiedProfileExecution {
     },
     Bundle {
         entrypoint: File,
-        arguments: Vec<BundleArgument>,
+        arguments: Vec<VerifiedArgument>,
     },
-}
-
-#[derive(Debug)]
-enum BundleArgument {
-    Literal(OsString),
-    Input,
-    Output,
 }
 
 #[derive(Debug)]
@@ -188,16 +190,15 @@ impl ProfileRegistry {
         }
 
         if let Some(bundles) = &self.bundles {
-            match bundles
-                .catalog
-                .inspect(&request.profile.name, &request.profile.version)
+            match CapsuleCatalog::new(&bundles.catalog)
+                .compile(&request.profile.name, &request.profile.version)
             {
-                Ok(bundle) => return self.resolve_bundle(request, bundle, bundles),
-                Err(BundleError::NotFound { .. }) => {}
+                Ok(capsule) => return self.resolve_capsule(request, capsule, bundles),
+                Err(CapsuleError::LegacyBundle(BundleError::NotFound { .. })) => {}
                 Err(error) => {
                     return Err(ProfileError::new(
                         ErrorCode::EnvironmentUnavailable,
-                        format!("installed Bundle catalog is unavailable: {error}"),
+                        format!("installed Capsule catalog is unavailable: {error}"),
                     ));
                 }
             }
@@ -221,37 +222,44 @@ impl ProfileRegistry {
         }
     }
 
-    fn resolve_bundle(
+    fn resolve_capsule(
         &self,
         request: &ProfileRequestPayload,
-        bundle: BundleInspection,
+        capsule: CompiledCapsule,
         bundles: &BundleProfileRegistration,
     ) -> Result<ResolvedProfile, ProfileError> {
-        let profile = bundle.profile;
-        let (source, arguments) = validate_bundle_inputs(request, &profile.inputs, &profile.argv)?;
-        let budget = resolve_bundle_budget(&profile, request.resource_overrides.as_ref())?;
+        let invocation = verify_profile_call(&capsule, profile_call_from_protocol(request))
+            .map_err(profile_invocation_error)?;
+        let source = invocation
+            .input_artifacts()
+            .values()
+            .next()
+            .expect("VerifiedInvocation must contain exactly one LOCAL_INPUT")
+            .clone();
+        let budget = invocation.effective_resources().clone();
+        let arguments = invocation.arguments().to_vec();
         let package = bundles
             .packages
-            .resolve(bundle.manifest.runtime.digest)
+            .resolve(invocation.runtime().package_digest())
             .map_err(|error| {
                 ProfileError::new(
                     ErrorCode::EnvironmentUnavailable,
-                    format!("Bundle Runtime Package is unavailable: {error}"),
+                    format!("Capsule Runtime Package is unavailable: {error}"),
                 )
             })?;
         let entrypoint = package.entrypoint().try_clone().map_err(|error| {
             ProfileError::new(
                 ErrorCode::EnvironmentUnavailable,
-                format!("verified Bundle entrypoint descriptor could not be pinned: {error}"),
+                format!("verified Capsule entrypoint descriptor could not be pinned: {error}"),
             )
         })?;
-        let maximum_bytes = profile
-            .output
+        let output_contract = invocation.declared_output();
+        let maximum_bytes = output_contract
             .maximum_bytes
             .min(self.maximum_artifact_bytes);
         let output = DeclaredOutputArtifact::new(
-            &profile.output.file_name,
-            &profile.output.media_type,
+            &output_contract.file_name,
+            &output_contract.media_type,
             maximum_bytes,
         )
         .map_err(|error| ProfileError::new(ErrorCode::InvalidProfileInput, error.to_string()))?;
@@ -264,7 +272,7 @@ impl ProfileRegistry {
                 entrypoint,
                 arguments,
             },
-            output_slot: profile.output.name,
+            output_slot: output_contract.name.clone(),
         })
     }
 
@@ -483,9 +491,11 @@ impl VerifiedProfileExecution {
                 arguments
                     .into_iter()
                     .map(|argument| match argument {
-                        BundleArgument::Literal(value) => value,
-                        BundleArgument::Input => input.as_os_str().to_owned(),
-                        BundleArgument::Output => output.as_os_str().to_owned(),
+                        VerifiedArgument::Literal(value) => OsString::from(value),
+                        VerifiedArgument::InputArtifactPath { .. } => input.as_os_str().to_owned(),
+                        VerifiedArgument::OutputArtifactPath { .. } => {
+                            output.as_os_str().to_owned()
+                        }
                     })
                     .collect(),
                 working_directory,
@@ -529,112 +539,86 @@ fn parse_local_input(
     }
 }
 
-fn validate_bundle_inputs(
-    request: &ProfileRequestPayload,
-    inputs: &[BundleInput],
-    argv: &[serde_json::Value],
-) -> Result<(LocalInputArtifact, Vec<BundleArgument>), ProfileError> {
-    if request.inputs.len() != inputs.len() {
-        return Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
-            "Profile inputs do not match the installed Bundle contract",
-        ));
-    }
-    let mut source = None;
-    for input in inputs {
-        let value = request.inputs.get(&input.name).ok_or_else(|| {
-            ProfileError::new(
-                ErrorCode::InvalidProfileInput,
-                format!("inputs.{} is required", input.name),
-            )
-        })?;
-        match (input.kind.as_str(), value) {
-            ("LOCAL_INPUT", ProfileInputValue::LocalInput { .. }) => {
-                source = Some(parse_local_input(request, &input.name)?);
-            }
-            ("INT64", ProfileInputValue::Int64 { value }) if bundle_int64_allows(input, *value) => {
-            }
-            ("INT64", ProfileInputValue::Int64 { .. }) => {
-                return Err(ProfileError::new(
-                    ErrorCode::InvalidProfileInput,
-                    format!(
-                        "inputs.{} is not allowed by the Bundle INT64 contract",
-                        input.name
-                    ),
-                ));
-            }
-            ("STRING", ProfileInputValue::String { value })
-                if !value.is_empty() && value.len() <= 4096 && !value.contains('\0') => {}
-            ("STRING", ProfileInputValue::String { .. }) => {
-                return Err(ProfileError::new(
-                    ErrorCode::InvalidProfileInput,
-                    format!("inputs.{} must contain 1..=4096 non-NUL bytes", input.name),
-                ));
-            }
-            ("BOOLEAN", ProfileInputValue::Boolean { .. }) => {}
-            _ => {
-                return Err(ProfileError::new(
-                    ErrorCode::InvalidProfileInput,
-                    format!(
-                        "inputs.{} does not match the Bundle kind {}",
-                        input.name, input.kind
-                    ),
-                ));
-            }
-        }
-    }
-    let source = source.expect("Bundle validation requires one LOCAL_INPUT");
-    let mut arguments = Vec::with_capacity(argv.len());
-    for argument in argv {
-        if let Some(literal) = argument.as_str() {
-            arguments.push(BundleArgument::Literal(OsString::from(literal)));
-            continue;
-        }
-        let object = argument
-            .as_object()
-            .expect("Bundle archive validated argv objects");
-        let (kind, slot) = object
-            .iter()
-            .next()
-            .expect("Bundle argv has one placeholder");
-        let slot = slot
-            .as_str()
-            .expect("Bundle archive validated placeholder slot");
-        if kind == "output" {
-            arguments.push(BundleArgument::Output);
-            continue;
-        }
-        let value = request
+fn profile_call_from_protocol(request: &ProfileRequestPayload) -> ProfileCall {
+    let mut call = ProfileCall::new(
+        InvocationProfileIdentity::new(
+            request.profile.name.clone(),
+            request.profile.version.clone(),
+        ),
+        request
             .inputs
-            .get(slot)
-            .expect("Bundle input was validated");
-        match (kind.as_str(), value) {
-            ("input", ProfileInputValue::LocalInput { .. }) => {
-                arguments.push(BundleArgument::Input)
-            }
-            ("int64", ProfileInputValue::Int64 { value }) => {
-                arguments.push(BundleArgument::Literal(OsString::from(value.to_string())))
-            }
-            ("string", ProfileInputValue::String { value }) => {
-                arguments.push(BundleArgument::Literal(OsString::from(value)))
-            }
-            ("boolean", ProfileInputValue::Boolean { value }) => {
-                arguments.push(BundleArgument::Literal(OsString::from(value.to_string())))
-            }
-            _ => unreachable!("Bundle archive and request input contract were validated"),
-        }
+            .iter()
+            .map(|(name, value)| (name.clone(), invocation_value_from_protocol(value))),
+    );
+    if let Some(overrides) = request.resource_overrides.as_ref() {
+        call = call.with_resource_overrides(invocation_overrides_from_protocol(overrides));
     }
-    Ok((source, arguments))
+    call
 }
 
-fn bundle_int64_allows(input: &BundleInput, value: i64) -> bool {
-    if let Some(allowed_values) = &input.allowed_values {
-        return allowed_values.binary_search(&value).is_ok();
+fn invocation_value_from_protocol(value: &ProfileInputValue) -> InvocationProfileValue {
+    match value {
+        ProfileInputValue::String { value } => InvocationProfileValue::String(value.clone()),
+        ProfileInputValue::Int64 { value } => InvocationProfileValue::Int64(*value),
+        ProfileInputValue::Boolean { value } => InvocationProfileValue::Boolean(*value),
+        ProfileInputValue::LocalInput {
+            path,
+            digest,
+            size_bytes,
+        } => InvocationProfileValue::LocalInput {
+            path: path.clone(),
+            digest: digest.clone(),
+            size_bytes: *size_bytes,
+        },
     }
-    matches!(
-        (input.minimum, input.maximum),
-        (Some(minimum), Some(maximum)) if (minimum..=maximum).contains(&value)
-    )
+}
+
+fn invocation_overrides_from_protocol(
+    overrides: &ProfileResourceOverrides,
+) -> InvocationResourceOverrides {
+    let mut domain = InvocationResourceOverrides::new();
+    if let Some(limits) = overrides.limits.as_ref() {
+        if let Some(cpu) = limits.cpu_max.as_ref() {
+            domain = domain.with_cpu_max(CpuMaxOverride::new(cpu.quota_micros, cpu.period_micros));
+        }
+        if let Some(value) = limits.memory_max_bytes {
+            domain = domain.with_memory_max_bytes(value);
+        }
+        if let Some(value) = limits.pids_max {
+            domain = domain.with_pids_max(value);
+        }
+        if let Some(value) = limits.wall_time_limit_ms {
+            domain = domain.with_wall_time_limit_ms(value);
+        }
+    }
+    if let Some(output) = overrides.output.as_ref() {
+        if let Some(value) = output.stdout_tail_max_bytes {
+            domain = domain.with_stdout_tail_max_bytes(value);
+        }
+        if let Some(value) = output.stderr_tail_max_bytes {
+            domain = domain.with_stderr_tail_max_bytes(value);
+        }
+    }
+    domain
+}
+
+fn profile_invocation_error(error: InvocationError) -> ProfileError {
+    let code = match &error {
+        InvocationError::CapsuleProfileNotFound { .. } => ErrorCode::ProfileNotFound,
+        InvocationError::PolicyRejected { .. } => ErrorCode::LimitExceedsPolicy,
+        InvocationError::InvalidCompiledContract { .. } => ErrorCode::EnvironmentUnavailable,
+        InvocationError::InputValueRejected {
+            rejection: InputValueRejection::ArtifactPath,
+            ..
+        } => ErrorCode::InvalidArtifactPath,
+        InvocationError::InvalidProfileIdentity { .. }
+        | InvocationError::DuplicateInput { .. }
+        | InvocationError::InputSetMismatch { .. }
+        | InvocationError::InputTypeMismatch { .. }
+        | InvocationError::InputValueRejected { .. }
+        | InvocationError::InvalidResourceOverride { .. } => ErrorCode::InvalidProfileInput,
+    };
+    ProfileError::new(code, error.to_string())
 }
 
 fn validate_ffmpeg_inputs(
@@ -768,80 +752,6 @@ fn resolve_budget(
         ));
     }
     ResourceBudget::try_from_protocol(limits, output).map_err(profile_input_budget_error)
-}
-
-fn resolve_bundle_budget(
-    profile: &BundleProfile,
-    overrides: Option<&ProfileResourceOverrides>,
-) -> Result<ResourceBudget, ProfileError> {
-    let maximum = ResourceBudget::try_from_protocol(
-        profile.policy.limits.clone(),
-        profile.policy.output.clone(),
-    )
-    .map_err(profile_input_budget_error)?;
-    let Some(overrides) = overrides else {
-        return Ok(maximum);
-    };
-    let requested = resolve_budget(&maximum, Some(overrides))?;
-    validate_bundle_override_allowlist(profile, overrides)?;
-    requested
-        .validate_within_maximum(&maximum)
-        .map_err(|error| {
-            ProfileError::new(
-                ErrorCode::LimitExceedsPolicy,
-                format!("resourceOverrides exceeds the Bundle policy: {error}"),
-            )
-        })?;
-    Ok(requested)
-}
-
-fn validate_bundle_override_allowlist(
-    profile: &BundleProfile,
-    overrides: &ProfileResourceOverrides,
-) -> Result<(), ProfileError> {
-    let limits = overrides.limits.as_ref();
-    let output = overrides.output.as_ref();
-    let requested_fields = [
-        (
-            "limits.cpuMax",
-            limits.is_some_and(|value| value.cpu_max.is_some()),
-        ),
-        (
-            "limits.memoryMaxBytes",
-            limits.is_some_and(|value| value.memory_max_bytes.is_some()),
-        ),
-        (
-            "limits.pidsMax",
-            limits.is_some_and(|value| value.pids_max.is_some()),
-        ),
-        (
-            "limits.wallTimeLimitMs",
-            limits.is_some_and(|value| value.wall_time_limit_ms.is_some()),
-        ),
-        (
-            "output.stdoutTailMaxBytes",
-            output.is_some_and(|value| value.stdout_tail_max_bytes.is_some()),
-        ),
-        (
-            "output.stderrTailMaxBytes",
-            output.is_some_and(|value| value.stderr_tail_max_bytes.is_some()),
-        ),
-    ];
-    let disallowed = requested_fields.iter().find_map(|(field, requested)| {
-        (*requested
-            && !profile
-                .allowed_overrides
-                .iter()
-                .any(|allowed| allowed == *field))
-        .then_some(*field)
-    });
-    if let Some(field) = disallowed {
-        return Err(ProfileError::new(
-            ErrorCode::LimitExceedsPolicy,
-            format!("resourceOverrides field {field} is not allowed by the Bundle"),
-        ));
-    }
-    Ok(())
 }
 
 fn profile_input_budget_error(error: ResourceBudgetError) -> ProfileError {
@@ -1181,6 +1091,25 @@ mod tests {
         serde_json::from_slice(&profile_bytes()).unwrap()
     }
 
+    fn compile_bundle_profile(profile: &BundleProfile) -> CompiledCapsule {
+        let (_root, catalog, package_digest) = catalog_with_runtime_package();
+        let profile_bytes = serde_json::to_vec(profile).unwrap();
+        let (archive, keys) = signed_bundle_archive(&profile_bytes, package_digest);
+        catalog.import(archive.path(), &keys).unwrap();
+        CapsuleCatalog::new(&catalog)
+            .compile(&profile.name, &profile.version)
+            .unwrap()
+    }
+
+    fn verify_bundle_request(
+        profile: &BundleProfile,
+        request: &ProfileRequestPayload,
+    ) -> Result<crate::profile_invocation::VerifiedInvocation, ProfileError> {
+        let capsule = compile_bundle_profile(profile);
+        verify_profile_call(&capsule, profile_call_from_protocol(request))
+            .map_err(profile_invocation_error)
+    }
+
     fn set_int64_input(request: &mut ProfileRequestPayload, slot: &str, value: i64) {
         request
             .inputs
@@ -1189,9 +1118,15 @@ mod tests {
 
     fn validate_ffmpeg_bundle_inputs(
         request: &ProfileRequestPayload,
-    ) -> Result<(LocalInputArtifact, Vec<BundleArgument>), ProfileError> {
-        let profile = ffmpeg_bundle_profile();
-        validate_bundle_inputs(request, &profile.inputs, &profile.argv)
+    ) -> Result<(LocalInputArtifact, Vec<VerifiedArgument>), ProfileError> {
+        let invocation = verify_bundle_request(&ffmpeg_bundle_profile(), request)?;
+        let source = invocation
+            .input_artifacts()
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        Ok((source, invocation.arguments().to_vec()))
     }
 
     #[derive(Clone, Copy)]
@@ -1275,6 +1210,50 @@ mod tests {
             "allowedOverrides": allowed_overrides
         }))
         .unwrap()
+    }
+
+    fn resolve_bundle_budget(
+        profile: &BundleProfile,
+        overrides: Option<&ProfileResourceOverrides>,
+    ) -> Result<ResourceBudget, ProfileError> {
+        let inputs = profile
+            .inputs
+            .iter()
+            .map(|input| {
+                let value = match input.kind.as_str() {
+                    "LOCAL_INPUT" => ProfileInputValue::LocalInput {
+                        path: "jobs/42/source.bin".to_owned(),
+                        digest: format!("sha256:{}", "0".repeat(64)),
+                        size_bytes: 128,
+                    },
+                    "STRING" => ProfileInputValue::String {
+                        value: "value".to_owned(),
+                    },
+                    "BOOLEAN" => ProfileInputValue::Boolean { value: false },
+                    "INT64" => ProfileInputValue::Int64 {
+                        value: input
+                            .allowed_values
+                            .as_ref()
+                            .and_then(|values| values.first().copied())
+                            .or(input.minimum)
+                            .expect("test INT64 input must have a validation contract"),
+                    },
+                    kind => panic!("unsupported test input kind {kind}"),
+                };
+                (input.name.clone(), value)
+            })
+            .collect();
+        let request = ProfileRequestPayload {
+            client_request_id: "33333333-3333-4333-8333-333333333333".to_owned(),
+            profile: ProfileIdentity {
+                name: profile.name.clone(),
+                version: profile.version.clone(),
+            },
+            inputs,
+            resource_overrides: overrides.cloned(),
+        };
+        verify_bundle_request(profile, &request)
+            .map(|invocation| invocation.effective_resources().clone())
     }
 
     fn all_bundle_override_fields() -> [&'static str; 6] {
@@ -1866,18 +1845,17 @@ mod tests {
         assert_eq!(ffmpeg_arguments(input, 16_000, 1, output), expected_argv);
 
         let bundle_profile = ffmpeg_bundle_profile();
-        let (_, bundle_arguments) =
-            validate_bundle_inputs(&request(), &bundle_profile.inputs, &bundle_profile.argv)
-                .unwrap();
-        let bundle_argv = bundle_arguments
-            .into_iter()
-            .map(|argument| match argument {
-                BundleArgument::Literal(value) => value,
-                BundleArgument::Input => input.as_os_str().to_owned(),
-                BundleArgument::Output => output.as_os_str().to_owned(),
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(bundle_argv, expected_argv);
+        let verified = verify_bundle_request(&bundle_profile, &request()).unwrap();
+        let materialized = crate::profile_mapper::materialize_invocation(
+            verified,
+            crate::profile_mapper::ArtifactBindings::new(
+                [("source", input.to_path_buf())],
+                [("audio", output.to_path_buf())],
+                PathBuf::from("/var/lib/taskcage/artifacts/.taskcage/staging/task"),
+            ),
+        )
+        .unwrap();
+        assert_eq!(materialized.arguments(), expected_argv);
 
         let declared =
             DeclaredOutputArtifact::new(FFMPEG_OUTPUT_FILE, FFMPEG_OUTPUT_MEDIA_TYPE, 1024)
@@ -1888,6 +1866,91 @@ mod tests {
         assert_eq!(bundle_profile.output.name, FFMPEG_OUTPUT_SLOT);
         assert_eq!(bundle_profile.output.file_name, FFMPEG_OUTPUT_FILE);
         assert_eq!(bundle_profile.output.media_type, FFMPEG_OUTPUT_MEDIA_TYPE);
+    }
+
+    #[test]
+    fn typed_bundle_arguments_bind_request_values_without_json_shape_matching() {
+        let profile: BundleProfile = serde_json::from_slice(&file_copy_bundle_profile()).unwrap();
+        let arguments = verify_bundle_request(&profile, &file_copy_request())
+            .unwrap()
+            .arguments()
+            .to_vec();
+
+        assert_eq!(
+            arguments,
+            vec![
+                VerifiedArgument::Literal("bundle-copy".to_owned()),
+                VerifiedArgument::InputArtifactPath {
+                    slot: "source".to_owned(),
+                },
+                VerifiedArgument::Literal("copy".to_owned()),
+                VerifiedArgument::Literal("false".to_owned()),
+                VerifiedArgument::Literal("50".to_owned()),
+                VerifiedArgument::OutputArtifactPath {
+                    slot: "bundle-result".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn protocol_adapter_and_direct_domain_call_have_identical_verification_meaning() {
+        let profile = ffmpeg_bundle_profile();
+        let capsule = compile_bundle_profile(&profile);
+        let wire = request();
+        let adapted = verify_profile_call(&capsule, profile_call_from_protocol(&wire)).unwrap();
+        let direct = verify_profile_call(
+            &capsule,
+            ProfileCall::new(
+                InvocationProfileIdentity::new(FFMPEG_PROFILE_NAME, FFMPEG_PROFILE_VERSION),
+                vec![
+                    (
+                        "source",
+                        InvocationProfileValue::LocalInput {
+                            path: "jobs/42/source.mp3".to_owned(),
+                            digest: format!("sha256:{}", "0".repeat(64)),
+                            size_bytes: 128,
+                        },
+                    ),
+                    ("sample_rate_hz", InvocationProfileValue::Int64(16_000)),
+                    ("channels", InvocationProfileValue::Int64(1)),
+                ],
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(adapted.profile_identity(), direct.profile_identity());
+        assert_eq!(adapted.values(), direct.values());
+        assert_eq!(adapted.input_artifacts(), direct.input_artifacts());
+        assert_eq!(adapted.arguments(), direct.arguments());
+        assert_eq!(
+            adapted.effective_resources().protocol_limits(),
+            direct.effective_resources().protocol_limits()
+        );
+        assert_eq!(
+            adapted.effective_resources().protocol_output(),
+            direct.effective_resources().protocol_output()
+        );
+    }
+
+    #[test]
+    fn capsule_adapter_preserves_invalid_artifact_path_wire_classification() {
+        let profile = ffmpeg_bundle_profile();
+        let capsule = compile_bundle_profile(&profile);
+        let mut wire = request();
+        wire.inputs.insert(
+            "source".to_owned(),
+            ProfileInputValue::LocalInput {
+                path: "../source.mp3".to_owned(),
+                digest: format!("sha256:{}", "0".repeat(64)),
+                size_bytes: 128,
+            },
+        );
+
+        let error = verify_profile_call(&capsule, profile_call_from_protocol(&wire))
+            .map_err(profile_invocation_error)
+            .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::InvalidArtifactPath);
     }
 
     #[test]

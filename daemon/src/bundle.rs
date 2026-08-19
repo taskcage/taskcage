@@ -125,12 +125,35 @@ pub struct InstalledBundle {
     pub runtime_package_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VerifiedBundleInspection;
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleInspection {
     pub installed: InstalledBundle,
     pub manifest: BundleManifest,
     pub profile: BundleProfile,
+    #[serde(skip)]
+    _verified: VerifiedBundleInspection,
+}
+
+impl BundleInspection {
+    pub fn installed(&self) -> &InstalledBundle {
+        &self.installed
+    }
+
+    pub fn manifest(&self) -> &BundleManifest {
+        &self.manifest
+    }
+
+    pub fn profile(&self) -> &BundleProfile {
+        &self.profile
+    }
+
+    pub(crate) fn into_parts(self) -> (InstalledBundle, BundleManifest, BundleProfile) {
+        (self.installed, self.manifest, self.profile)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,7 +182,7 @@ pub struct BundleProfile {
     pub version: String,
     pub inputs: Vec<BundleInput>,
     pub output: BundleOutput,
-    pub argv: Vec<serde_json::Value>,
+    pub argv: Vec<BundleProfileArgument>,
     pub policy: BundleResourcePolicy,
     pub allowed_overrides: Vec<String>,
 }
@@ -188,13 +211,144 @@ pub struct BundleInput {
     pub maximum: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BundleOutput {
     pub name: String,
     pub file_name: String,
     pub media_type: String,
     pub maximum_bytes: u64,
+}
+
+/// Profile manifest의 shell-free argv template을 load 시점에 고정한 표현이다.
+///
+/// custom serde 구현은 v0alpha1 JSON shape을 그대로 유지하면서 task 실행 경로가
+/// `serde_json::Value`를 다시 해석하지 않도록 한다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BundleProfileArgument {
+    Literal(String),
+    InputPath {
+        slot: String,
+    },
+    InputValue {
+        kind: BundleProfileInputValueKind,
+        slot: String,
+    },
+    OutputPath {
+        slot: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleProfileInputValueKind {
+    String,
+    Int64,
+    Boolean,
+}
+
+impl Serialize for BundleProfileArgument {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Literal(value) => value.serialize(serializer),
+            Self::InputPath { slot } => BundleInputPathArgument {
+                input: slot.clone(),
+            }
+            .serialize(serializer),
+            Self::InputValue { kind, slot } => match kind {
+                BundleProfileInputValueKind::String => BundleStringArgument {
+                    string: slot.clone(),
+                }
+                .serialize(serializer),
+                BundleProfileInputValueKind::Int64 => BundleInt64Argument {
+                    int64: slot.clone(),
+                }
+                .serialize(serializer),
+                BundleProfileInputValueKind::Boolean => BundleBooleanArgument {
+                    boolean: slot.clone(),
+                }
+                .serialize(serializer),
+            },
+            Self::OutputPath { slot } => BundleOutputPathArgument {
+                output: slot.clone(),
+            }
+            .serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BundleProfileArgument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(
+            match SerializedBundleProfileArgument::deserialize(deserializer)? {
+                SerializedBundleProfileArgument::Literal(value) => Self::Literal(value),
+                SerializedBundleProfileArgument::InputPath(argument) => Self::InputPath {
+                    slot: argument.input,
+                },
+                SerializedBundleProfileArgument::String(argument) => Self::InputValue {
+                    kind: BundleProfileInputValueKind::String,
+                    slot: argument.string,
+                },
+                SerializedBundleProfileArgument::Int64(argument) => Self::InputValue {
+                    kind: BundleProfileInputValueKind::Int64,
+                    slot: argument.int64,
+                },
+                SerializedBundleProfileArgument::Boolean(argument) => Self::InputValue {
+                    kind: BundleProfileInputValueKind::Boolean,
+                    slot: argument.boolean,
+                },
+                SerializedBundleProfileArgument::OutputPath(argument) => Self::OutputPath {
+                    slot: argument.output,
+                },
+            },
+        )
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SerializedBundleProfileArgument {
+    Literal(String),
+    InputPath(BundleInputPathArgument),
+    String(BundleStringArgument),
+    Int64(BundleInt64Argument),
+    Boolean(BundleBooleanArgument),
+    OutputPath(BundleOutputPathArgument),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleInputPathArgument {
+    input: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleStringArgument {
+    string: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleInt64Argument {
+    int64: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleBooleanArgument {
+    boolean: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BundleOutputPathArgument {
+    output: String,
 }
 
 #[derive(Debug)]
@@ -404,6 +558,7 @@ impl BundleCatalog {
             },
             manifest: bundle,
             profile,
+            _verified: VerifiedBundleInspection,
         })
     }
 
@@ -810,38 +965,34 @@ fn validate_input_schema(input: &BundleInput) -> BundleResult<()> {
 }
 
 fn validate_argv(
-    argument: &serde_json::Value,
+    argument: &BundleProfileArgument,
     inputs: &[BundleInput],
     output: &BundleOutput,
 ) -> BundleResult<()> {
-    if let Some(literal) = argument.as_str() {
-        if literal.is_empty() || literal.len() > 4096 || literal.contains('\0') {
-            return Err(BundleError::Manifest(
-                "argv literal이 잘못되었습니다".to_owned(),
-            ));
+    match argument {
+        BundleProfileArgument::Literal(literal) => {
+            if literal.is_empty() || literal.len() > 4096 || literal.contains('\0') {
+                return Err(BundleError::Manifest(
+                    "argv literal이 잘못되었습니다".to_owned(),
+                ));
+            }
+            Ok(())
         }
-        return Ok(());
-    }
-    let object = argument.as_object().ok_or_else(|| {
-        BundleError::Manifest("argv element는 string 또는 placeholder object여야 합니다".to_owned())
-    })?;
-    if object.len() != 1 {
-        return Err(BundleError::Manifest(
-            "argv placeholder는 exactly one key여야 합니다".to_owned(),
-        ));
-    }
-    let (kind, value) = object.iter().next().expect("one");
-    let slot = value.as_str().ok_or_else(|| {
-        BundleError::Manifest("argv placeholder value는 string이어야 합니다".to_owned())
-    })?;
-    match kind.as_str() {
-        "output" if slot == output.name => Ok(()),
-        "input" => require_input_kind(inputs, slot, "LOCAL_INPUT"),
-        "int64" => require_input_kind(inputs, slot, "INT64"),
-        "string" => require_input_kind(inputs, slot, "STRING"),
-        "boolean" => require_input_kind(inputs, slot, "BOOLEAN"),
-        _ => Err(BundleError::Manifest(
-            "지원하지 않는 argv placeholder입니다".to_owned(),
+        BundleProfileArgument::InputPath { slot } => {
+            require_input_kind(inputs, slot, "LOCAL_INPUT")
+        }
+        BundleProfileArgument::InputValue { kind, slot } => require_input_kind(
+            inputs,
+            slot,
+            match kind {
+                BundleProfileInputValueKind::String => "STRING",
+                BundleProfileInputValueKind::Int64 => "INT64",
+                BundleProfileInputValueKind::Boolean => "BOOLEAN",
+            },
+        ),
+        BundleProfileArgument::OutputPath { slot } if slot == &output.name => Ok(()),
+        BundleProfileArgument::OutputPath { .. } => Err(BundleError::Manifest(
+            "argv placeholder가 matching output slot을 참조하지 않습니다".to_owned(),
         )),
     }
 }
@@ -857,17 +1008,21 @@ fn require_input_kind(inputs: &[BundleInput], slot: &str, kind: &str) -> BundleR
         ))
     }
 }
-fn validate_identity(name: &str, version: &str) -> BundleResult<()> {
-    if name.is_empty()
-        || name.len() > 63
-        || !name.bytes().enumerate().all(|(i, c)| {
-            if i == 0 {
-                c.is_ascii_lowercase()
-            } else {
-                c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-'
-            }
+pub(crate) fn valid_capsule_name(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (1..=63).contains(&bytes.len())
+        && value.split('.').all(|segment| {
+            let bytes = segment.as_bytes();
+            !bytes.is_empty()
+                && bytes[0].is_ascii_lowercase()
+                && bytes[1..]
+                    .iter()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
         })
-    {
+}
+
+fn validate_identity(name: &str, version: &str) -> BundleResult<()> {
+    if !valid_capsule_name(name) {
         return Err(BundleError::Manifest(
             "Bundle name이 잘못되었습니다".to_owned(),
         ));
@@ -1190,8 +1345,8 @@ pub(crate) mod test_support {
             &profile_raw,
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         );
-        let bundle: BundleManifest = serde_json::from_slice(&bundle_raw).unwrap();
-        let profile: BundleProfile = serde_json::from_slice(&profile_raw).unwrap();
+        let bundle: BundleManifest = decode_manifest(&bundle_raw, BUNDLE_JSON)?;
+        let profile: BundleProfile = decode_manifest(&profile_raw, PROFILE_JSON)?;
 
         validate_bundle(&bundle, &profile, &profile_raw)
     }
@@ -1203,7 +1358,7 @@ pub(crate) mod test_support {
         ));
     }
 
-    fn bundle_bytes(profile: &[u8], runtime_digest: &str) -> Vec<u8> {
+    pub(crate) fn bundle_bytes(profile: &[u8], runtime_digest: &str) -> Vec<u8> {
         let profile_value: serde_json::Value = serde_json::from_slice(profile).unwrap();
         let name = profile_value["name"].as_str().unwrap();
         let version = profile_value["version"].as_str().unwrap();
@@ -1233,7 +1388,7 @@ pub(crate) mod test_support {
         tar.into_inner().unwrap().finish().unwrap()
     }
 
-    fn signed_entries(
+    pub(crate) fn signed_entries(
         bundle: Vec<u8>,
         profile: Vec<u8>,
     ) -> (Vec<(&'static str, Vec<u8>)>, Vec<TrustedBundleKey>) {
@@ -1263,7 +1418,7 @@ pub(crate) mod test_support {
         )
     }
 
-    fn write_archive(entries: Vec<(&str, Vec<u8>)>) -> NamedTempFile {
+    pub(crate) fn write_archive(entries: Vec<(&str, Vec<u8>)>) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(&archive(entries)).unwrap();
         file
@@ -1352,6 +1507,25 @@ pub(crate) mod test_support {
     }
 
     #[test]
+    fn capsule_names_accept_strict_namespaced_segments_without_path_like_values() {
+        assert!(valid_capsule_name("ffmpeg-audio-to-wav"));
+        assert!(valid_capsule_name("media.extract-audio"));
+        for invalid in [
+            "",
+            ".media",
+            "media.",
+            "media..extract-audio",
+            "media.1extract-audio",
+            "Media.extract-audio",
+            "media/extract-audio",
+            "../media",
+        ] {
+            assert!(!valid_capsule_name(invalid), "accepted {invalid:?}");
+        }
+        assert!(!valid_capsule_name(&"a".repeat(64)));
+    }
+
+    #[test]
     fn accepts_a_signed_bundle_with_limited_argv_placeholders() {
         let profile = profile_bytes();
         let bundle = bundle_bytes(
@@ -1363,6 +1537,74 @@ pub(crate) mod test_support {
         let verified = VerifiedArchive::read(file.path(), &keys).unwrap();
         assert_eq!(verified.bundle.name, "ffmpeg-audio-to-wav");
         assert_eq!(verified.bundle.version, "1.0.0");
+    }
+
+    #[test]
+    fn compiles_profile_argv_to_typed_ir_without_changing_its_json_shape() {
+        let mut profile = profile_value();
+        profile["inputs"].as_array_mut().unwrap().extend([
+            serde_json::json!({"name":"label","kind":"STRING","required":true}),
+            serde_json::json!({"name":"retain_metadata","kind":"BOOLEAN","required":true}),
+        ]);
+        profile["argv"] = serde_json::json!([
+            "literal",
+            {"input":"source"},
+            {"int64":"sample_rate_hz"},
+            {"string":"label"},
+            {"boolean":"retain_metadata"},
+            {"output":"audio"}
+        ]);
+
+        assert!(validate_profile_manifest(profile.clone()).is_ok());
+        let compiled: BundleProfile =
+            decode_manifest(&serde_json::to_vec(&profile).unwrap(), PROFILE_JSON).unwrap();
+
+        assert_eq!(
+            compiled.argv,
+            vec![
+                BundleProfileArgument::Literal("literal".to_owned()),
+                BundleProfileArgument::InputPath {
+                    slot: "source".to_owned(),
+                },
+                BundleProfileArgument::InputValue {
+                    kind: BundleProfileInputValueKind::Int64,
+                    slot: "sample_rate_hz".to_owned(),
+                },
+                BundleProfileArgument::InputValue {
+                    kind: BundleProfileInputValueKind::String,
+                    slot: "label".to_owned(),
+                },
+                BundleProfileArgument::InputValue {
+                    kind: BundleProfileInputValueKind::Boolean,
+                    slot: "retain_metadata".to_owned(),
+                },
+                BundleProfileArgument::OutputPath {
+                    slot: "audio".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(
+            serde_json::to_vec(&compiled.argv).unwrap(),
+            serde_json::to_vec(&profile["argv"]).unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_dangling_and_kind_mismatched_argv_nodes() {
+        let invalid_arguments = [
+            serde_json::json!({"unknown":"source"}),
+            serde_json::json!({"input":"source","output":"audio"}),
+            serde_json::json!({"input":1}),
+            serde_json::json!({"input":"missing"}),
+            serde_json::json!({"int64":"source"}),
+            serde_json::json!({"output":"missing"}),
+        ];
+
+        for argument in invalid_arguments {
+            let mut profile = profile_value();
+            profile["argv"] = serde_json::json!([argument]);
+            assert_profile_manifest_rejected(profile);
+        }
     }
 
     #[test]
