@@ -1,11 +1,13 @@
-# FFmpeg Audio-to-WAV Profile Binding
+# FFmpeg Audio-to-WAV Capsule convenience API
 
-> 상태: Java Binding, Runtime Package cache와 Bundle catalog 기반 daemon Profile 실행이 구현됐다. 실제 사용자 경로는
-> container Java-to-daemon E2E와 [`examples/ffmpeg-java`](../examples/ffmpeg-java/)로 검증한다.
+> 상태: 이 문서는 기존 `taskcage-ffmpeg-binding` artifact의 호환 경로를 설명한다. 다음 Capsule-first
+> 공개 계약에서는 프로세스별 Binding을 필수 개념으로 만들지 않고, 선언된 Profile schema를 Java SDK의
+> typed input/output API로 노출한다. 실제 사용자 경로는 container Java-to-daemon E2E와
+> [`examples/ffmpeg-java`](../examples/ffmpeg-java/)로 검증한다.
 
 ## 목적
 
-첫 FFmpeg Binding은 Java 사용자가 실행 파일 경로와 argv를 만들지 않고, 하나의 타입 안전한 작업으로
+첫 FFmpeg convenience API는 Java 사용자가 실행 파일 경로와 argv를 만들지 않고, 하나의 타입 안전한 작업으로
 FFmpeg를 실행하는 경험을 검증한다.
 
 ```java
@@ -20,16 +22,16 @@ try (TaskCageClient taskCage = TaskCageClient.connect(config)) {
 }
 ```
 
-Binding은 별도 Java 편의 계층이다. Task 제출·조회·취소, transport, Profile wire model과 Artifact value
+이 API는 별도 Java 편의 계층이다. Task 제출·조회·취소, transport, Profile wire model과 input/output data
 type은 기존 TaskCage Core SDK가 계속 소유한다.
 
-Binding은 `ffmpeg-audio-to-wav@1.0.0` Bundle을 설치한 daemon에 generic `ProfileRequest`를 보낸다. Bundle은
-FFmpeg Runtime Package digest와 고정 argv·Artifact·정책 계약을 제공하고, Binding은 그 Bundle/Profile
-version 범위를 선언하는 독립 Java package로 유지한다.
+이 API는 `ffmpeg-audio-to-wav@1.0.0` Capsule archive를 설치한 daemon에 generic `ProfileRequest`를 보낸다. Capsule은
+FFmpeg Runtime Package digest와 고정 argv·input/output·정책 계약을 제공한다. 현재 convenience artifact는
+기존 사용자를 위해 독립 Java package로 유지한다.
 
 ## 확정된 경계
 
-- 첫 Binding은 FFmpeg CLI 전체가 아니라 하나의 고정된 작업만 제공한다.
+- 첫 convenience API는 FFmpeg CLI 전체가 아니라 하나의 고정된 작업만 제공한다.
 - caller는 executable path, argv, working directory, environment 또는 output file name을 지정하지 않는다.
 - Binding은 하나의 고정된 Profile name/version과 input slot으로 `ProfileRequest`를 결정적으로 만든다.
 - 입력과 출력은 승인된 Local Artifact 계약을 사용한다.
