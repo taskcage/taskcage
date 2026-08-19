@@ -18,4 +18,15 @@ public record CapsuleExecutionResult(
     public ExecutionResult execution() {
         return profileTask.result();
     }
+
+    /**
+     * Returns whether the result was published after process, cgroup, and staging cleanup.
+     *
+     * <p>A {@link FinishedProfileTaskSnapshot} is only constructible for a cleanup-confirmed
+     * terminal task, so this value is always {@code true}. Exposing it keeps the Capsule result
+     * contract explicit for callers that do not know the Profile snapshot type.
+     */
+    public boolean cleanupConfirmed() {
+        return true;
+    }
 }

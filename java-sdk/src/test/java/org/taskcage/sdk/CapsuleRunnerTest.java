@@ -37,6 +37,7 @@ class CapsuleRunnerTest {
         assertEquals(request.capsule(), result.capsule());
         assertEquals(snapshot, result.profileTask());
         assertEquals(ProfileOutcome.SUCCEEDED, result.outcome());
+        assertTrue(result.cleanupConfirmed());
         assertTrue(result.execution().process().exitCode() != null);
     }
 
