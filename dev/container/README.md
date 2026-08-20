@@ -3,6 +3,20 @@
 이 환경은 Linux cgroup v2 VM을 직접 준비하지 않고 실제 `taskcaged`와 Java SDK E2E를 실행하기 위한
 개발 전용 구성이다. 운영용 TaskCage 배포나 보안 sandbox를 제공하지 않는다.
 
+## Capsule MVP에서의 역할
+
+Capsule-first MVP의 권장 개발 경험은 Docker Compose daemon에 Java `ExternalRunner`가 연결해 Capsule을
+실행하는 것이다. Docker Desktop 사용자도 macOS/Windows가 아니라 그 안의 Linux VM에서 cgroup 제한과
+process tree cleanup을 확인할 수 있다.
+
+현재 기본 `taskcaged` service는 같은 Compose volume을 공유하는 Local UDS E2E를 제공한다. `remote-taskcaged`
+profile은 별도 Compose network에서 개발용 CA·TLS를 사용하는 Remote Protocol E2E를 제공한다. 다음 MVP 변경은
+이 TLS 경로를 FFmpeg Capsule 개발 sample과 Java ExternalRunner의 기본 검증 경로로 완결하는 것이다. 그 전까지
+기본 UDS Compose를 TLS Capsule 개발 경험으로 설명하지 않는다.
+
+개발용 CA는 SDK가 명시적으로 신뢰해야 하며 hostname 검증을 끄거나 모든 인증서를 신뢰해서는 안 된다.
+이 CA, 인증서, service credential은 test fixture 전용이고 운영에서 재사용하면 안 된다.
+
 ## 요구 사항
 
 - Linux containers를 실행하는 Docker Engine 또는 Docker Desktop
@@ -12,7 +26,7 @@
 Docker Desktop에서는 컨테이너가 Desktop의 Linux VM 안에서 실행된다. 따라서 여기서 검증하는 cgroup은
 macOS나 Windows host가 아니라 해당 Linux VM의 cgroup이다.
 
-## daemon 시작
+## 현재 Local UDS daemon 시작
 
 저장소 루트에서 다음을 실행한다.
 
@@ -51,7 +65,7 @@ snapshot·실행·결과 publish를 검증할 수 있다. 테스트가 끝나면
 cgroup이 없는지도 검사한다. 최종 cgroup·systemd·릴리스 검증은 계속 Ubuntu 24.04 VM 또는 host 통합
 테스트가 담당한다.
 
-## Remote TLS Java E2E
+## 현재 Remote TLS Java E2E
 
 Remote Protocol v1의 실제 TCP/TLS 경로는 별도 daemon과 Java test runner 컨테이너로 검증한다.
 

@@ -2,164 +2,139 @@
 
 ## 목표
 
-TaskCage의 핵심 제품은 외부 프로그램을 직접 호출하는 API가 아니라, **재현 가능한 실행 계약인
-Capsule**이다. Capsule은 실행 파일만 담는 패키지가 아니라 typed input/output, 안전한 argv 구성,
-자원 정책, timeout·cancel, 결과 검증과 전체 프로세스 정리를 함께 정의한다.
+TaskCage의 첫 검증 목표는 Java 개발자가 외부 CLI를 `ProcessBuilder` 대신 **Capsule 실행 계약**으로
+호출하고, 제한·정리·결과를 일관되게 받는 경험을 만드는 것이다.
+
+```text
+Java Application / Worker
+        ↓ Java SDK
+TaskCage Daemon
+        ↓ taskcage-core
+Capsule → external process
+```
+
+Capsule은 실행 파일 묶음이 아니다. 하나의 Capsule은 다음 실행 지식을 함께 고정한다.
+
+```text
+typed input/output schema
+allowed argv materialization
+Runtime Package reference
+CPU · memory · PID · timeout policy
+output validation and artifact publish
+failure and cleanup result
+```
 
 첫 사용자 성공 기준은 다음과 같다.
 
-> 일반적인 Java Worker가 실행 파일 경로와 shell 문자열을 몰라도 하나의 Capsule을 실행하고,
-> 실패 뒤에도 프로세스와 결과물이 깨끗하게 정리되는가?
+> 일반적인 Java Worker가 executable path나 shell 문자열을 몰라도 FFmpeg Capsule 하나를 실행하고,
+> 실패 뒤에도 process tree와 partial artifact가 깨끗하게 정리되는가?
 
-## 현재 기준선
+## 현재 기준선과 목표 상태
 
-현재 `main`에는 다음 daemon-backed 기능이 있다.
+현재 `main`은 daemon-backed Local Profile, Capsule archive import, Runtime Package 검증, FFmpeg
+Profile, Local UDS와 opt-in Remote TLS E2E를 제공한다. 개발 Compose의 기본 daemon은 아직 Local UDS를
+사용하며, TLS daemon은 Remote Protocol E2E용 별도 profile이다.
 
-- Linux cgroup v2 Task 실행·제한·관찰·전체 정리
-- Runtime Package import/cache와 서명된 local archive catalog
-- 설치된 Profile을 통한 typed input/output 실행
-- Local UDS Core SDK와 Java `ProfileRequest`
-- timeout·cancel·Artifact publish·멱등성·종료 결과
+MVP의 다음 변경은 이를 숨기지 않는다. **개발자가 권장 경로 하나만 따라 실제 Capsule을 실행할 수 있게
+Compose 기반 ExternalRunner 경험을 완성하는 것**이 우선이다. EmbeddedRunner는 같은 계약을 공유하는
+선택적 배포 방식이며, 첫 사용자 경로를 막지 않는다.
 
-이 구현의 archive와 내부 Rust 모듈은 아직 `Bundle` 명칭을 사용한다. 따라서 이번 전환은 기능을
-다시 만드는 작업이 아니라, 사용자 개념을 Capsule로 통일하고 실행 backend를 교체 가능한 구조로
-정리하는 작업이다.
+## 실행 모드
 
-## 단계별 처리 순서
+두 mode는 동일한 Capsule request와 `ExecutionResult` 의미를 공유한다. 다만 Linux cgroup 제한과
+whole-process cleanup은 Linux execution backend가 실제로 검증한 경우에만 보장한다.
 
-### 0. 용어와 경계 정리
+| Mode | 목적 | 주요 사용처 | 현재 상태 |
+|---|---|---|---|
+| **ExternalRunner** | 실행 중인 daemon에 UDS 또는 TLS로 Capsule 실행을 요청 | Docker Compose 개발, 팀 공용 runtime, 운영 | 현재 daemon-backed Profile adapter가 기준선. Compose TLS Capsule 경로는 다음 구현 |
+| **EmbeddedRunner** | Java SDK가 private `taskcage-exec` helper를 관리 | daemon 설치 없이 단일 Java Worker 안에 배포 | 후속 선택적 확장 |
 
-- 공개 문서와 새 Java API에서 `Capsule`을 기본 용어로 사용한다.
-- `Bundle`은 마이그레이션 기간에만 기존 archive·schema의 호환 명칭으로 남긴다.
-- 새 문서에서 Hub, 자동 다운로드, 분산 scheduler, Worker adapter를 MVP 필수 구성요소로 표현하지 않는다.
-- 기존 Raw Command는 호환 경로로만 문서화하고 새 Capsule 흐름의 기본 진입점으로 사용하지 않는다.
-- archive 확장자와 schema를 실제 코드와 함께 바꾸는 breaking migration은 별도 변경으로 진행한다.
+## 로컬 개발의 기본 경험
 
-### 1. 공통 Capsule 실행 계약
+MVP의 권장 로컬 경로는 Embedded가 아니라 Docker Compose 기반 daemon이다.
 
-세부 규범은 [Capsule 실행 계약 v1](capsule-execution-contract.md)과
-[공통 fixture](../protocol-fixtures/capsule-v1/)에 고정한다.
-
-언어와 backend가 달라도 다음 의미는 같아야 한다.
-
-- Capsule identity와 version
-- typed input/output schema
-- 선언된 argv materialization 규칙
-- Runtime Package 참조와 플랫폼 조건
-- resource policy와 허용 override
-- timeout·cancel·whole-task cleanup
-- output validation과 atomic publish
-- 종료 원인·사용량·정리 완료가 포함된 결과
-
-Java SDK는 이 계약을 Java 값 객체와 `CapsuleRunner` 인터페이스로 표현하고, daemon은 최종 검증자다.
-
-### 2. 공통 실행 코어 추출
-
-실행 의미는 daemon이나 SDK에 중복 구현하지 않고 재사용 가능한 Rust `taskcage-core`로 분리한다.
-코어는 Capsule 검증, Runtime Package 검증, cgroup 제한, 프로세스 실행, timeout·cancel, 전체 cleanup,
-output validation과 terminal result 생성을 담당한다.
-
-`taskcaged`와 Embedded용 private helper는 이 코어를 호출하는 얇은 backend adapter다. `taskcaged` 자체를
-EmbeddedRunner 안에서 child daemon으로 실행하는 방식은 사용하지 않는다.
-
-첫 분리 단계에서는 backend-independent한 `CapsuleIdentity`와 shell-free `ExecutionCommand`뿐 아니라
-cgroup 경로·preflight·deadline·출력 캡처·프로세스 실행 primitives도 `taskcage-core`가 소유한다.
-`taskcaged`는 UDS/TLS, host policy, protocol/task lifecycle 조정과 core adapter 역할만 담당한다.
-따라서 이 단계는 이름만 바꾸는 작업이 아니라 실행 의미를 core에 모으고 daemon을 얇게 만드는 순서이며,
-EmbeddedRunner 자체가 실행 가능해졌다고 간주하지 않는다.
-
-### 3. ExternalRunner 기준선
-
-현재 daemon-backed Local UDS를 먼저 `taskcage-core`의 실행 명령 경계에 연결하고 회귀 검증한다.
-
-- 기존 Protocol v2와 Local Profile 동작을 유지한다.
-- daemon은 UDS/TLS와 host policy를 담당하고 실행 의미는 core에 둔다.
-- ExternalRunner의 결과와 cleanup 의미를 공통 conformance fixture로 고정한다.
-
-### 4. Private execution helper
-
-Embedded backend는 별도 daemon 설치 없이 실행되어야 한다. 이를 위해 `taskcage-exec`라는 작은 private
-helper를 제공하고, Java SDK가 필요할 때 자동 기동한다.
-
-```java
-try (CapsuleRunner runner = CapsuleRunner.embedded(capsule)) {
-    ExecutionResult result = runner.execute(request);
-}
+```text
+docker compose up -d taskcaged
+        ↓ TLS
+Java application / integration test
+        ↓ Capsule request
+taskcaged → taskcage-core → external process
 ```
 
-helper는 공개 socket, systemd service 또는 별도 `taskcaged serve` lifecycle을 만들지 않는다. Java와
-stdin/stdout 또는 private pipe로 통신하며, 하나의 helper가 여러 Task를 처리할 수 있다. 각 Task는
-core가 독립 cgroup으로 관리한다. Java가 cgroup 파일을 직접 조작하는 구현은 권한·race·cleanup 의미가
-중복되므로 MVP의 기본 선택으로 삼지 않는다.
+이 경로가 제공해야 할 경험은 다음과 같다.
 
-EmbeddedRunner가 제공해야 하는 최소 기능은 하나의 Runtime Package, 하나의 Execution Profile,
-typed request/result, resource policy, timeout·cancel, whole-process cleanup이다.
+- 개발자는 Linux cgroup delegation이나 helper artifact를 직접 준비하지 않는다.
+- 팀은 동일한 daemon, Capsule과 Runtime Package 환경을 재현한다.
+- Java SDK의 실제 TLS 연결과 Capsule 결과를 로컬에서 검증한다.
+- macOS/Windows 개발자도 Docker Desktop Linux VM 안에서 Linux cgroup 동작을 확인한다.
+- 운영의 ExternalRunner와 같은 Capsule request/result 모델을 사용한다.
 
-### 5. Java EmbeddedRunner 연결
+Compose는 개발 전용 CA와 daemon 서버 인증서를 제공한다. SDK는 그 CA를 명시적으로 신뢰하고 hostname
+검증을 유지한다. 개발 편의를 이유로 운영 기본값에서 hostname 검증을 끄거나 모든 인증서를 신뢰하지
+않는다.
 
-Java SDK는 `taskcage-exec`를 private helper로 관리하고, ExternalRunner와 동일한 `CapsuleRunner` 계약으로
-요청·결과를 노출한다.
+현재 Compose의 Local UDS와 Remote TLS E2E는 이 목표를 향한 기반이다. TLS를 기본 Capsule 개발 경로로
+승격하는 변경은 daemon 설정, Compose profile, SDK sample과 E2E를 함께 갱신해야 한다.
 
-- 사용자는 backend를 바꿔도 request/result 의미를 다시 배우지 않는다.
-- helper는 Linux `amd64`·`arm64` 플랫폼 artifact로 배포한다.
-- helper crash, timeout, cancel과 close 시 lifecycle을 명확히 처리한다.
-- Remote TLS는 인증·Artifact·보존 계약이 필요한 별도 단계이며 Embedded MVP의 선행 조건이 아니다.
+## 구현 순서
 
-### 6. 첫 공식 Capsule
+### 1. External Capsule contract 완결
 
-FFmpeg 전체 CLI가 아니라 `ffmpeg-audio-to-wav@1.0.0` 하나를 기준으로 검증한다.
+- Capsule identity, Profile, typed input/output, Artifact와 `ExecutionResult`를 ExternalRunner 경계에서
+  일관되게 연결한다.
+- 성공은 `exitCode == 0`만이 아니라 output validation, atomic publish, whole-task cleanup 확인까지
+  포함한다.
+- FFmpeg Capsule 하나를 기준 사례로 고정한다.
 
-- 입력: local Artifact, sample rate, mono/stereo
-- 출력: 검증된 `audio/wav` Artifact
-- 실행: Capsule이 고정한 argv와 Runtime Package entrypoint
-- 실패: non-zero, timeout, cancel, output validation 실패를 구분된 결과로 반환
+### 2. Compose TLS developer runtime
 
-### 7. Worker·container 검증과 배포
+- 개발용 TLS daemon, CA·서버 인증서와 Capsule/Runtime Package import 초기화를 제공한다.
+- Java sample과 integration test는 explicit trust material로 daemon DNS에 연결한다.
+- TLS handshake, 인증 실패와 hostname 검증 실패를 E2E로 확인한다.
 
-Java Worker가 실행 중인 컨테이너 안에서 Java SDK와 private helper를 함께 사용한다.
+### 3. Java ExternalRunner 사용자 경험
 
-- 여러 Capsule Task를 하나의 helper에서 실행한다.
-- cgroup delegation과 필요한 컨테이너 권한을 명시적으로 검증한다.
-- 컨테이너 종료 뒤 helper·Task·staging 잔여물이 없는지 확인한다.
-- Java SDK와 `taskcage-exec-linux-amd64`/`linux-arm64` artifact를 함께 배포한다.
+- endpoint와 trust material만으로 daemon에 연결하는 최소 설정을 제공한다.
+- 사용자는 executable path, argv, cgroup setting, staging output path를 직접 지정하지 않는다.
+- FFmpeg request/result는 Java 객체 API로 제공하되, Core SDK의 generic Capsule request를 우회하지 않는다.
 
-### 8. 확장과 배포
+### 4. Capsule lifecycle 검증
 
-한 Capsule의 실행과 사용자 경험이 확인된 뒤에만 다음을 추가한다.
+- 정상 실행, timeout, cancel, memory/PID limit을 Compose Linux 환경에서 반복 검증한다.
+- 모든 terminal result에 termination reason, stdout/stderr tail, resource usage와 Artifact 결과를 포함한다.
+- descendant process, task cgroup, staging artifact가 남지 않음을 확인한다.
 
-- Capsule archive의 새 확장자·schema와 legacy Bundle read-only migration
-- Java typed convenience API와 필요할 때의 generated mapper
-- 여러 Runtime Package와 플랫폼별 artifact
-- GitHub Release 또는 조직 artifact 저장소 기반 파일 배포
+### 5. EmbeddedRunner (선택적 확장)
 
-Hub는 여러 조직·호스트가 Capsule 검색과 자동 설치를 실제로 요구할 때 시작한다. 초기 MVP는
-Hub 없이 local import와 명시적 Package digest만으로 동작해야 한다.
+- `taskcage-exec` private helper의 cancel, close, crash cleanup과 platform artifact를 완성한다.
+- 동일 Capsule에 대해 ExternalRunner와 result·failure·Artifact·cleanup 의미를 conformance test로 비교한다.
+- Java Worker container에서 cgroup delegation과 종료 뒤 잔여 process 정리를 검증한다.
+
+## MVP 완료 조건
+
+다음 흐름이 깨끗한 Docker Compose Linux 환경에서 반복 가능하면 External Capsule MVP를 완료로 본다.
+
+```text
+docker compose up
+→ Java SDK TLS connection
+→ ffmpeg-audio-to-wav Capsule execution
+→ validated output Artifact
+→ timeout / cancel / memory / PID limit
+→ whole-task cleanup confirmation
+```
+
+EmbeddedRunner는 같은 Capsule contract를 유지해야 하지만, 위 ExternalRunner 경로를 먼저 완결하는 데
+필수 조건은 아니다.
 
 ## MVP에서 보류하는 것
 
-- 중앙 Hub와 자동 Runtime Package 다운로드
+- 중앙 Hub와 자동 Capsule 다운로드
 - 여러 언어 SDK 동시 지원
-- code generation과 복잡한 stdout parser
+- Worker/MQ adapter, distributed scheduler와 autoscaling
+- 복잡한 code generation과 범용 stdout parser
 - 다중 output orchestration
-- Kafka/Queue Worker 제품과 분산 scheduler
-- Kubernetes Operator와 자동 scale-out
-- 보안 sandbox, namespace, seccomp, filesystem/network 정책
 - 새 public Raw Command API
+- 보안 sandbox, namespace, seccomp, filesystem/network isolation
 
-## 완료 기준
-
-다음 흐름이 깨끗한 Linux/container 개발 환경에서 반복 가능하면 Capsule MVP를 완료로 본다.
-
-```text
-Capsule 정의
-→ Runtime Package 검증
-→ taskcage-core 실행
-→ ExternalRunner 동일 요청 실행
-→ EmbeddedRunner(private helper) 동일 요청 실행
-→ timeout/cancel 및 자식·손자 정리 확인
-→ output validation·artifact publish 확인
-→ Java 예제로 결과와 종료 원인 확인
-```
-
-성능 수치는 보조 지표다. 핵심은 ProcessBuilder 대비 설치·호출 경험을 과도하게 바꾸지 않으면서,
-제한·정리·결과 계약을 반복해서 보장하는 것이다.
+성능 수치는 보조 지표다. 핵심은 ProcessBuilder 대비 호출 경험을 과도하게 바꾸지 않으면서, Capsule이
+정의한 제한·정리·결과 계약을 반복해서 보장하는 것이다.
