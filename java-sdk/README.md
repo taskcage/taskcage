@@ -48,9 +48,14 @@ try (CapsuleRunner runner = CapsuleRunner.external(taskCageClient)) {
 ```
 
 `CapsuleRunner`는 실행 파일 경로와 shell 문자열을 받지 않는다. Capsule이 선언한 Profile과 Runtime
-Package를 backend가 검증하며, 현재 External adapter는 그 요청을 설치된 daemon에 전달한다. Embedded
-backend는 `taskcage-exec` private helper를 SDK가 관리하고, helper가 공통 Rust execution core를 호출하는
-다음 단계의 구현이다. Embedded backend는 `taskcaged serve` child daemon을 시작하지 않는다.
+Package를 backend가 검증하며, 현재 External adapter는 그 요청을 설치된 daemon에 전달한다.
+
+Capsule-first MVP의 권장 시작점은 Docker Compose에서 기동한 TLS daemon에 ExternalRunner로 연결하는
+경로다. Java application은 endpoint와 명시적으로 신뢰한 개발 CA만 설정하고, Capsule identity와 typed
+input을 전달한다. TLS hostname 검증을 끄거나 모든 인증서를 신뢰하는 편의 API는 제공하지 않는다.
+
+Embedded backend는 `taskcage-exec` private helper를 SDK가 관리하고, helper가 공통 Rust execution core를
+호출하는 선택적 확장이다. Embedded backend는 `taskcaged serve` child daemon을 시작하지 않는다.
 
 ## Remote Profile 실행
 

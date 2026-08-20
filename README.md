@@ -20,9 +20,10 @@ TaskCage는 신뢰된 외부 프로세스를 작업 단위로 실행하고, Linu
 현재 설치 가능한 Local 및 opt-in Remote Public Alpha 범위를 설명한다.
 
 Capsule-first 전환의 현재 단계와 다음 구현 순서는 [Capsule-first MVP 계획](docs/capsule-mvp-plan.md)에
-정리되어 있다. 공통 실행 의미는 [Capsule 실행 계약](docs/capsule-execution-contract.md)으로 고정하고,
-Rust `taskcage-core`를 `taskcaged`와 Embedded용 private `taskcage-exec`가 공유한다. 운영 기준선은
-현재 daemon-backed ExternalRunner로 검증한 뒤, 같은 계약에 EmbeddedRunner를 연결한다.
+정리되어 있다. 공통 실행 의미는 [Capsule 실행 계약](docs/capsule-execution-contract.md)으로 고정한다.
+첫 사용자 경로는 Docker Compose에서 기동한 daemon에 Java ExternalRunner가 연결하는 방식이며, Rust
+`taskcage-core`를 `taskcaged`와 후속 Embedded용 private `taskcage-exec`가 공유한다. EmbeddedRunner는
+single-worker 배포를 위한 선택적 확장이다.
 
 ## 해결하려는 문제
 
@@ -318,10 +319,11 @@ bash integration-tests/release-artifact-smoke.sh \
 `0.4.0` daemon과 `0.3.0` Java SDK는 인증된 Remote Profile·Artifact 전송을 추가했다. 이들은 현재
 설치 가능한 공개 계약이다.
 
-`main`에는 Capsule-first MVP가 중앙 Hub 없이 Local Capsule archive import, Runtime Package 검증, generic
-`ProfileRequest`, input/output data 처리를 하나의 흐름으로 제공하도록 구현됐다. 이 구현은
-`taskcaged-v0.4.0` 이후에 병합됐으며 아직 공개 daemon 릴리스에 포함되지 않았다. 최소 릴리스 version도
-아직 정해지지 않았다.
+`main`에는 Capsule-first MVP의 기반인 Local Capsule archive import, Runtime Package 검증, generic
+`ProfileRequest`와 input/output data 처리가 구현됐다. 이 구현은 `taskcaged-v0.4.0` 이후에 병합됐으며
+아직 공개 daemon 릴리스에 포함되지 않았다. 다음 MVP 우선순위는 Docker Compose TLS daemon과 Java
+ExternalRunner를 통해 FFmpeg Capsule 한 개를 처음부터 끝까지 실행하는 개발 경험이다. 최소 릴리스
+version은 아직 정해지지 않았다.
 
 Capsule archive는 Execution Profile, Runtime Package ref + digest, 플랫폼·정책·무결성 정보를 담는
 불변 실행 계약이다. Package는 daemon cache에서 digest 기준으로 공유한다. 현재 archive와 schema의
