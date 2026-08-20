@@ -48,4 +48,15 @@ class RemoteProfileRequestTest {
         assertThrows(IllegalArgumentException.class, () -> new RemoteArtifactUpload(
                 ARTIFACT_ID, DIGEST, 0, Instant.parse("2026-08-13T12:10:00Z")));
     }
+
+    @Test
+    void remoteCapsuleRequestRequiresTheExactProfileIdentity() {
+        RemoteProfileRequest profile = new RemoteProfileRequest(
+                new ProfileIdentity("ffmpeg-audio-to-wav", "1.0.0"),
+                Map.of("source", new ManagedInputArtifact(ARTIFACT_ID)));
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new RemoteCapsuleRequest(new CapsuleIdentity("another-capsule", "1.0.0"), profile));
+    }
 }
