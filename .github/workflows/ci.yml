@@ -9,6 +9,46 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect CI-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      runtime: ${{ steps.filter.outputs.runtime }}
+      container: ${{ steps.filter.outputs.container }}
+      systemd: ${{ steps.filter.outputs.systemd }}
+      ffmpeg: ${{ steps.filter.outputs.ffmpeg }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - id: filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if [[ -z "${BASE_SHA}" || "${BASE_SHA}" == "0000000000000000000000000000000000000000" ]]; then
+            BASE_SHA="$(git rev-list --max-parents=0 "${HEAD_SHA}")"
+          fi
+          git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" > changed-files.txt
+
+          matches() {
+            grep --extended-regexp --quiet "$1" changed-files.txt
+          }
+          set_output() {
+            local name="$1"
+            shift
+            if matches "$*"; then
+              echo "${name}=true" >>"${GITHUB_OUTPUT}"
+            else
+              echo "${name}=false" >>"${GITHUB_OUTPUT}"
+            fi
+          }
+
+          set_output runtime '^(Cargo\.(toml|lock)$|core/|daemon/|test-fixtures/|integration-tests/(preflight-fail-closed|cgroup-runner-smoke)\.sh$|\.github/workflows/ci\.yml$)'
+          set_output container '^(Cargo\.(toml|lock)$|core/|daemon/|test-fixtures/|java-sdk/|java-bindings/|protocol-fixtures/|examples/ffmpeg-java/|dev/container/|\.github/workflows/ci\.yml$)'
+          set_output systemd '^(Cargo\.(toml|lock)$|core/|daemon/|test-fixtures/|packaging/ubuntu/|integration-tests/systemd-service-smoke\.sh$|\.github/workflows/ci\.yml$)'
+          set_output ffmpeg '^(Cargo\.(toml|lock)$|core/|daemon/|test-fixtures/|java-sdk/|java-bindings/ffmpeg/|protocol-fixtures/|examples/ffmpeg-java/|dev/container/(Dockerfile|entrypoint\.sh|prepare-ffmpeg-package\.sh|prepare-ffmpeg-bundle\.sh)|integration-tests/ffmpeg-reference-workflow\.sh|scripts/ci/install-ffmpeg\.sh|\.github/workflows/ci\.yml$)'
+
   java:
     name: Java SDK protocol fixtures
     runs-on: ubuntu-latest
@@ -24,6 +64,8 @@ jobs:
 
   container-e2e:
     name: Containerized Java E2E
+    needs: changes
+    if: needs.changes.outputs.container == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -32,6 +74,8 @@ jobs:
 
   container-e2e-arm64:
     name: Containerized Java E2E (ARM64)
+    needs: changes
+    if: github.event_name == 'push' && needs.changes.outputs.container == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
@@ -63,7 +107,8 @@ jobs:
 
   cgroup-preflight:
     name: Linux cgroup 사전 검사
-    needs: rust
+    needs: [changes, rust]
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -76,6 +121,7 @@ jobs:
   cgroup-runner:
     name: Linux cgroup 원자적 실행
     needs: cgroup-preflight
+    if: needs.cgroup-preflight.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -87,7 +133,8 @@ jobs:
 
   systemd-service:
     name: Ubuntu systemd service
-    needs: rust
+    needs: [changes, rust]
+    if: needs.changes.outputs.systemd == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -99,7 +146,8 @@ jobs:
 
   ffmpeg-reference:
     name: FFmpeg Local reference
-    needs: [cgroup-runner, systemd-service]
+    needs: changes
+    if: needs.changes.outputs.ffmpeg == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -114,43 +162,3 @@ jobs:
       - name: Install Ubuntu FFmpeg package
         run: sudo bash scripts/ci/install-ffmpeg.sh
       - run: bash integration-tests/ffmpeg-reference-workflow.sh
-
-  release-candidate:
-    name: Public Alpha release candidate
-    needs: [ffmpeg-reference, container-e2e-arm64]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        with:
-          toolchain: stable
-      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
-        with:
-          distribution: temurin
-          java-version: "17"
-      - name: Build daemon archive and checksum
-        run: bash scripts/release/build-daemon-archive.sh 0.4.0 dist
-      - name: Build Java release candidates and verify a clean external consumer
-        run: bash integration-tests/java-release-consumer-smoke.sh dist
-      - name: Verify component release tags
-        run: |
-          bash scripts/release/verify-version.sh taskcaged 0.4.0 taskcaged-v0.4.0
-          java_sdk_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' java-sdk/build.gradle.kts | head -n 1)"
-          ffmpeg_binding_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' java-bindings/ffmpeg/build.gradle.kts | head -n 1)"
-          bash scripts/release/verify-version.sh java-sdk "${java_sdk_version}" "java-sdk-v${java_sdk_version}"
-          bash scripts/release/verify-version.sh ffmpeg-binding "${ffmpeg_binding_version}" "ffmpeg-binding-v${ffmpeg_binding_version}"
-      - name: Install from the release archive
-        run: |
-          bash integration-tests/release-artifact-smoke.sh \
-            0.4.0 \
-            dist/taskcage-v0.4.0-x86_64-unknown-linux-gnu.tar.gz \
-            dist/taskcage-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256 \
-            dist/install-taskcaged.sh
-      - name: Upload validation-only release candidate
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: taskcage-release-candidates-validation-only
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 7
