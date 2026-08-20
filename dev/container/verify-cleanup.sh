@@ -18,6 +18,21 @@ wait_for_empty_directory() {
   done
 }
 
+wait_for_no_child_cgroup() {
+  directory=$1
+  attempt=0
+
+  while find "${directory}" -mindepth 1 -maxdepth 1 -type d -print -quit | grep -q .; do
+    attempt=$((attempt + 1))
+    if [ "${attempt}" -ge 30 ]; then
+      echo "FAIL: a TaskCage job cgroup remains after Java E2E: ${directory}" >&2
+      find "${directory}" -mindepth 1 -maxdepth 1 -type d -print >&2
+      exit 1
+    fi
+    sleep 1
+  done
+}
+
 artifact_root=${TASKCAGE_ARTIFACT_ROOT:-/taskcage-work/artifacts}
 
 [ -d /sys/fs/cgroup/jobs ] || {
@@ -29,7 +44,7 @@ artifact_root=${TASKCAGE_ARTIFACT_ROOT:-/taskcage-work/artifacts}
   exit 1
 }
 
-wait_for_empty_directory /sys/fs/cgroup/jobs "a TaskCage job cgroup"
+wait_for_no_child_cgroup /sys/fs/cgroup/jobs
 wait_for_empty_directory "${artifact_root}/.taskcage/staging" "a Local Artifact staging entry"
 wait_for_empty_directory "${artifact_root}/staging" "a Remote upload staging entry"
 wait_for_empty_directory "${artifact_root}/completed-inputs" "an unconsumed Remote input"
