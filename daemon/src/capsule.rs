@@ -19,6 +19,7 @@ pub use crate::bundle::{
 };
 use crate::digest::Sha256Digest;
 use crate::protocol::ProfileIdentity;
+pub use taskcage_core::{CapsuleIdentity, IdentityError as CapsuleIdentityError};
 
 #[derive(Debug, Error)]
 pub enum CapsuleError {
@@ -113,7 +114,8 @@ impl CompiledCapsule {
         validate_allowed_overrides(&allowed_overrides)?;
 
         Ok(Self {
-            identity: CapsuleIdentity { name, version },
+            identity: CapsuleIdentity::new(name, version)
+                .map_err(|error| CapsuleError::InvalidContract(error.to_string()))?,
             catalog_digest: installed.digest,
             runtime: CapsuleRuntimeReference {
                 package_id: runtime.package_id,
@@ -175,22 +177,6 @@ fn validate_allowed_overrides(overrides: &[String]) -> CapsuleResult<()> {
         }
     }
     Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CapsuleIdentity {
-    name: String,
-    version: String,
-}
-
-impl CapsuleIdentity {
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn version(&self) -> &str {
-        &self.version
-    }
 }
 
 /// Digest-pinned Runtime Package reference다.
