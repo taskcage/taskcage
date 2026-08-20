@@ -45,7 +45,7 @@ public interface CapsuleRunner extends AutoCloseable {
         public CapsuleExecutionResult execute(CapsuleRequest request, Duration waitTimeout)
                 throws InterruptedException, TimeoutException {
             Objects.requireNonNull(request, "request");
-            return result(request, runtime.run(request.profileRequest(), waitTimeout));
+            return result(request, runtime.run(request.toProfileRequest(), waitTimeout));
         }
 
         @Override
@@ -56,7 +56,7 @@ public interface CapsuleRunner extends AutoCloseable {
             Objects.requireNonNull(request, "request");
             return result(
                     request,
-                    runtime.run(clientRequestId, request.profileRequest(), waitTimeout));
+                    runtime.run(clientRequestId, request.toProfileRequest(), waitTimeout));
         }
 
         private static CapsuleExecutionResult result(

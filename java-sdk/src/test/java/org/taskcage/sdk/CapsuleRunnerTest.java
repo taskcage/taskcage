@@ -25,10 +25,9 @@ class CapsuleRunnerTest {
     @Test
     void externalRunnerPreservesTheCapsuleIdentityAndProfileResult() throws Exception {
         ProfileIdentity profile = new ProfileIdentity("file-copy", "1.0.0");
-        ProfileRequest profileRequest = new ProfileRequest(
-                profile, Map.of("label", new StringProfileInput("archive")));
-        CapsuleRequest request = new CapsuleRequest(
-                new CapsuleIdentity("file-copy", "1.0.0"), profileRequest);
+        CapsuleRequest request = CapsuleRequest.builder("file-copy", "1.0.0")
+                .string("label", "archive")
+                .build();
         FinishedProfileTaskSnapshot snapshot = success(profile);
 
         CapsuleExecutionResult result = CapsuleRunner.external(new StubRuntime(snapshot))
@@ -44,9 +43,9 @@ class CapsuleRunnerTest {
     @Test
     void externalRunnerDoesNotConvertWaitTimeout() {
         ProfileIdentity profile = new ProfileIdentity("file-copy", "1.0.0");
-        CapsuleRequest request = new CapsuleRequest(
-                new CapsuleIdentity("file-copy", "1.0.0"),
-                new ProfileRequest(profile, Map.of("label", new StringProfileInput("archive"))));
+        CapsuleRequest request = CapsuleRequest.builder("file-copy", "1.0.0")
+                .string("label", "archive")
+                .build();
 
         assertThrows(
                 TimeoutException.class,
@@ -55,15 +54,24 @@ class CapsuleRunnerTest {
     }
 
     @Test
-    void rejectsCapsuleAndProfileIdentityMismatchBeforeExecution() {
-        ProfileRequest profileRequest = new ProfileRequest(
-                new ProfileIdentity("file-copy", "1.0.0"),
-                Map.of("label", new StringProfileInput("archive")));
+    void builderDerivesTheProfileIdentityAndRejectsInvalidInputs() {
+        CapsuleRequest request = CapsuleRequest.builder("file-copy", "1.0.0")
+                .string("label", "archive")
+                .int64("attempt", 2)
+                .bool("overwrite", true)
+                .build();
 
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> new CapsuleRequest(
-                        new CapsuleIdentity("other-capsule", "1.0.0"), profileRequest));
+        ProfileRequest internal = request.toProfileRequest();
+        assertEquals(new ProfileIdentity("file-copy", "1.0.0"), internal.profile());
+        assertEquals(new StringProfileInput("archive"), request.inputs().get("label"));
+        assertEquals(new Int64ProfileInput(2), request.inputs().get("attempt"));
+        assertEquals(new BooleanProfileInput(true), request.inputs().get("overwrite"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CapsuleRequest.builder("file-copy", "1.0.0").build());
+        assertThrows(IllegalArgumentException.class,
+                () -> CapsuleRequest.builder("file-copy", "1.0.0")
+                        .string("Bad", "archive")
+                        .build());
     }
 
     private static final class StubRuntime implements ProfileRuntime {

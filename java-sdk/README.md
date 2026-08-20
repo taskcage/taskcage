@@ -30,16 +30,18 @@ Java application
 ## Capsule 실행 계약
 
 공통 실행 API는 `CapsuleRunner`가 소유한다. Runner 구현은 private `taskcage-exec`를 사용하는 Embedded
-backend 또는 daemon-backed External backend일 수 있지만, Capsule identity, typed `ProfileRequest`, 대기
+backend 또는 daemon-backed External backend일 수 있지만, Capsule identity, typed Capsule input, 대기
 timeout, idempotency key와 cleanup-confirmed result의 의미는 동일해야 한다.
 
 현재 SDK는 기존 `ProfileRuntime`을 Local External backend로 연결하고, TLS Remote에는
 `RemoteCapsuleRunner` adapter를 제공한다.
 
 ```java
-CapsuleRequest request = new CapsuleRequest(
-    new CapsuleIdentity("ffmpeg-audio-to-wav", "1.0.0"),
-    new ProfileRequest(profile, inputs));
+CapsuleRequest request = CapsuleRequest.builder("ffmpeg-audio-to-wav", "1.0.0")
+    .artifact("source", source)
+    .int64("sample_rate_hz", 16_000)
+    .int64("channels", 1)
+    .build();
 
 try (CapsuleRunner runner = CapsuleRunner.external(taskCageClient)) {
     CapsuleExecutionResult result = runner.execute(request, Duration.ofMinutes(2));
@@ -48,6 +50,10 @@ try (CapsuleRunner runner = CapsuleRunner.external(taskCageClient)) {
 
 `CapsuleRunner`는 실행 파일 경로와 shell 문자열을 받지 않는다. Capsule이 선언한 Profile과 Runtime
 Package를 backend가 검증하며, 현재 External adapter는 그 요청을 설치된 daemon에 전달한다.
+
+`CapsuleRequest`의 Builder는 일반 Capsule 사용자가 `ProfileIdentity`나 `ProfileRequest`를 직접 만들지
+않도록 한다. SDK는 Capsule 이름·버전에서 Profile identity를 유도하고, daemon adapter 경계에서만 low-level
+`ProfileRequest`로 변환한다. 직접 Profile API는 기존 호환·고급 경로로 유지된다.
 
 Capsule-first MVP의 권장 시작점은 Docker Compose에서 기동한 TLS daemon에 ExternalRunner로 연결하는
 경로다. Java application은 endpoint와 명시적으로 신뢰한 개발 CA만 설정하고, Capsule identity와 typed

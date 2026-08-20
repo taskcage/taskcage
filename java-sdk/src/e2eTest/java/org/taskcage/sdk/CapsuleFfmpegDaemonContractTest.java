@@ -28,14 +28,11 @@ class CapsuleFfmpegDaemonContractTest {
                 .build())) {
             CapsuleExecutionResult result = CapsuleRunner.external(client).execute(
                     UUID.randomUUID(),
-                    new CapsuleRequest(
-                            CAPSULE,
-                            new ProfileRequest(
-                                    new ProfileIdentity(CAPSULE.name(), CAPSULE.version()),
-                                    Map.of(
-                                            "source", input.reference(),
-                                            "sample_rate_hz", new Int64ProfileInput(16_000),
-                                            "channels", new Int64ProfileInput(1)))),
+                    CapsuleRequest.builder(CAPSULE)
+                            .artifact("source", input.reference())
+                            .int64("sample_rate_hz", 16_000)
+                            .int64("channels", 1)
+                            .build(),
                     Duration.ofSeconds(30));
 
             assertEquals(ProfileOutcome.SUCCEEDED, result.outcome());

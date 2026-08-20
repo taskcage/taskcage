@@ -44,7 +44,6 @@ class CapsuleContractFixtureCompatibilityTest {
     void validRequestFixtureConstructsLocalAndRemoteCapsuleRequests() throws Exception {
         ObjectNode fixture = read("request-valid.json");
         CapsuleIdentity capsule = capsuleIdentity(fixture.path("capsule"));
-        ProfileIdentity profile = profileIdentity(fixture.path("profile"));
         JsonNode inputs = fixture.path("inputs");
         JsonNode source = inputs.path("source");
         JsonNode limits = fixture.path("resourceOverrides").path("limits");
@@ -56,18 +55,16 @@ class CapsuleContractFixtureCompatibilityTest {
                 new ArtifactPath("jobs/capsule-v1/source.mp3"),
                 new Sha256Digest(source.path("digest").textValue()),
                 source.path("sizeBytes").longValue());
-        ProfileRequest localProfile = new ProfileRequest(
-                profile,
-                Map.of(
-                        "source", localSource,
-                        "sample_rate_hz", new Int64ProfileInput(inputs.path("sample_rate_hz").path("value").longValue()),
-                        "channels", new Int64ProfileInput(inputs.path("channels").path("value").longValue())),
-                overrides);
-        CapsuleRequest local = new CapsuleRequest(capsule, localProfile);
+        CapsuleRequest local = CapsuleRequest.builder(capsule)
+                .artifact("source", localSource)
+                .int64("sample_rate_hz", inputs.path("sample_rate_hz").path("value").longValue())
+                .int64("channels", inputs.path("channels").path("value").longValue())
+                .resourceOverrides(overrides)
+                .build();
 
         UUID managedArtifactId = UUID.fromString("33333333-3333-4333-8333-333333333333");
         RemoteProfileRequest remoteProfile = new RemoteProfileRequest(
-                profile,
+                profileIdentity(fixture.path("profile")),
                 Map.of(
                         "source", new ManagedInputArtifact(managedArtifactId),
                         "sample_rate_hz", new RemoteInt64Input(inputs.path("sample_rate_hz").path("value").longValue()),
@@ -75,13 +72,11 @@ class CapsuleContractFixtureCompatibilityTest {
                 overrides);
         RemoteCapsuleRequest remote = new RemoteCapsuleRequest(capsule, remoteProfile);
 
-        assertEquals(capsule.name(), profile.name());
-        assertEquals(capsule.version(), profile.version());
         assertEquals("ARTIFACT", source.path("kind").textValue());
         assertEquals("audio/mpeg", source.path("mediaType").textValue());
-        assertEquals(localSource, local.profileRequest().inputs().get("source"));
+        assertEquals(localSource, local.inputs().get("source"));
         assertEquals(new ManagedInputArtifact(managedArtifactId), remote.profileRequest().inputs().get("source"));
-        assertEquals(Duration.ofMinutes(2), local.profileRequest().resourceOverrides().wallTimeLimit().orElseThrow());
+        assertEquals(Duration.ofMinutes(2), local.resourceOverrides().wallTimeLimit().orElseThrow());
         assertEquals(overrides, remote.profileRequest().resourceOverrides());
     }
 
@@ -91,23 +86,16 @@ class CapsuleContractFixtureCompatibilityTest {
         JsonNode request = fixture.path("request");
         CapsuleIdentity capsule = capsuleIdentity(request.path("capsule"));
         ProfileIdentity profile = profileIdentity(request.path("profile"));
-        ProfileRequest localProfile = new ProfileRequest(
-                profile, Map.of("sample_rate_hz", new Int64ProfileInput(16_000)));
         RemoteProfileRequest remoteProfile = new RemoteProfileRequest(
                 profile, Map.of("sample_rate_hz", new RemoteInt64Input(16_000)));
 
-        CapsuleContractException local = assertThrows(
-                CapsuleContractException.class,
-                () -> new CapsuleRequest(capsule, localProfile));
         CapsuleContractException remote = assertThrows(
                 CapsuleContractException.class,
                 () -> new RemoteCapsuleRequest(capsule, remoteProfile));
 
         String expectedCode = fixture.path("error").path("code").textValue();
         boolean expectedRetryable = fixture.path("error").path("retryable").booleanValue();
-        assertEquals(expectedCode, local.code());
         assertEquals(expectedCode, remote.code());
-        assertEquals(expectedRetryable, local.retryable());
         assertEquals(expectedRetryable, remote.retryable());
         assertEquals(0, request.path("inputs").size());
         assertEquals(0, request.path("resourceOverrides").size());
