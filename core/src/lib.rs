@@ -5,6 +5,21 @@
 //! this crate incrementally. Transport, host admission policy and process supervision do not belong
 //! in this crate.
 
+mod execution;
+
+#[cfg(target_os = "linux")]
+pub mod cgroup;
+#[cfg(target_os = "linux")]
+pub mod cleanup_fault;
+#[cfg(target_os = "linux")]
+pub mod deadline;
+#[cfg(target_os = "linux")]
+pub mod executor;
+pub mod output;
+pub mod preflight;
+
+pub use execution::{ExecutionCommand, ExecutionExecutable};
+
 use semver::Version;
 use thiserror::Error;
 

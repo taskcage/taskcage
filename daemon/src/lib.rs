@@ -1,6 +1,8 @@
 //! TaskCage Rust 데몬의 사전 검사와 작업 실행 생명주기를 제공한다.
 
 pub mod artifact;
+#[cfg(target_os = "linux")]
+pub use taskcage_core::cleanup_fault;
 #[cfg(any(target_os = "linux", test))]
 mod audit;
 #[cfg(target_os = "linux")]
@@ -14,16 +16,14 @@ pub mod capability;
 mod capacity;
 #[cfg(target_os = "linux")]
 pub mod capsule;
-pub mod cgroup;
-#[cfg(all(target_os = "linux", test))]
-mod cleanup_fault;
+pub use taskcage_core::cgroup;
 pub mod codec;
-mod deadline;
+pub(crate) use taskcage_core::deadline;
 mod deployment_policy;
 pub mod digest;
 mod execution_plan;
 #[cfg(target_os = "linux")]
-mod executor;
+pub(crate) use taskcage_core::executor;
 mod fail_stop;
 #[cfg(any(target_os = "linux", test))]
 mod handlers;
@@ -32,8 +32,22 @@ mod handlers;
     allow(dead_code, reason = "protocol task lifecycle은 Linux에서만 제공됩니다")
 )]
 mod lifecycle;
-pub mod output;
-pub mod preflight;
+pub mod output {
+    pub use taskcage_core::output::{CaptureLimits, CapturedOutput, CapturedStream};
+
+    use crate::protocol::TaskOutput;
+
+    pub(crate) fn into_task_output(captured: CapturedOutput) -> TaskOutput {
+        let CapturedOutput { stdout, stderr } = captured;
+        TaskOutput {
+            stdout_tail: String::from_utf8_lossy(stdout.raw_tail()).into_owned(),
+            stderr_tail: String::from_utf8_lossy(stderr.raw_tail()).into_owned(),
+            stdout_truncated: stdout.truncated(),
+            stderr_truncated: stderr.truncated(),
+        }
+    }
+}
+pub use taskcage_core::preflight;
 #[cfg(target_os = "linux")]
 mod profile;
 #[cfg(target_os = "linux")]
@@ -714,7 +728,7 @@ pub async fn run_once(config: RunOnceConfig) -> Result<RunOnceReport> {
             cleanup_errors: Vec::new(),
         });
     }
-    let output = diagnostic.output.into_task_output();
+    let output = output::into_task_output(diagnostic.output);
     Ok(RunOnceReport {
         job_id: diagnostic.job_id,
         pid: diagnostic.pid,

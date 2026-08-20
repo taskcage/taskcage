@@ -13,26 +13,24 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
-#[cfg(test)]
+#[cfg(target_os = "linux")]
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
-#[cfg(test)]
-use std::time::Instant;
 
 use serde::Serialize;
 use thiserror::Error;
 use tokio::time::sleep;
 
-#[cfg(test)]
+#[cfg(target_os = "linux")]
 use crate::cleanup_fault::{CleanupFaultPoint, CleanupFaults};
 use crate::deadline::MonotonicDeadline;
 use crate::output::{BoundedTail, CaptureLimits, CapturedOutput, CapturedStream};
 
-#[cfg(test)]
+#[cfg(target_os = "linux")]
 type CleanupFaultHandle = Option<Arc<CleanupFaults>>;
-#[cfg(not(test))]
+#[cfg(not(target_os = "linux"))]
 #[derive(Clone, Debug)]
 struct CleanupFaultHandle;
 
@@ -152,7 +150,7 @@ impl PreparedCommand {
     }
 
     /// 검증된 Runtime Package entrypoint descriptor를 PATH 재해석 없이 준비한다.
-    pub(crate) fn new_pinned(
+    pub fn new_pinned(
         descriptor: Arc<File>,
         command: Vec<OsString>,
         working_directory: &Path,
@@ -220,9 +218,9 @@ fn nul_terminated_pointers(values: &[CString]) -> Vec<*const libc::c_char> {
 pub struct SpawnedProcess {
     pid: libc::pid_t,
     output_readers: OutputReaders,
-    #[cfg(test)]
+    #[cfg(target_os = "linux")]
     cleanup_faults: CleanupFaultHandle,
-    #[cfg(test)]
+    #[cfg(target_os = "linux")]
     reaped_exit: Mutex<Option<ProcessExit>>,
 }
 
@@ -232,22 +230,22 @@ pub struct PendingProcess {
     exec_read_end: Option<OwnedFd>,
     start_write_end: Option<OwnedFd>,
     output_readers: Option<OutputReaders>,
-    #[cfg(test)]
+    #[cfg(target_os = "linux")]
     cleanup_faults: CleanupFaultHandle,
     reaped: bool,
 }
 
 #[derive(Debug)]
-pub(crate) struct StartCommitToken {
+pub struct StartCommitToken {
     pid: libc::pid_t,
 }
 
 #[derive(Debug)]
-pub(crate) struct StartCommittedProcess {
+pub struct StartCommittedProcess {
     pid: libc::pid_t,
     exec_read_end: Option<OwnedFd>,
     output_readers: Option<OutputReaders>,
-    #[cfg(test)]
+    #[cfg(target_os = "linux")]
     cleanup_faults: CleanupFaultHandle,
 }
 
@@ -257,8 +255,8 @@ impl PendingProcess {
     }
 
     /// fail-stop 상태 잠금 안에서는 gate 신호 한 번만 기록하고 정리는 수행하지 않는다.
-    pub(crate) fn commit_start_signal(&mut self) -> Result<StartCommitToken, ExecutorError> {
-        #[cfg(test)]
+    pub fn commit_start_signal(&mut self) -> Result<StartCommitToken, ExecutorError> {
+        #[cfg(target_os = "linux")]
         if self.cleanup_faults.as_ref().is_some_and(|faults| {
             faults.is(CleanupFaultPoint::PendingCloneAbort)
                 || faults.should_fail(CleanupFaultPoint::ExecGateCleanup)
@@ -279,13 +277,13 @@ impl PendingProcess {
         Ok(StartCommitToken { pid: self.pid })
     }
 
-    pub(crate) fn into_start_committed(mut self, token: StartCommitToken) -> StartCommittedProcess {
+    pub fn into_start_committed(mut self, token: StartCommitToken) -> StartCommittedProcess {
         debug_assert_eq!(self.pid, token.pid);
         let committed = StartCommittedProcess {
             pid: self.pid,
             exec_read_end: self.exec_read_end.take(),
             output_readers: self.output_readers.take(),
-            #[cfg(test)]
+            #[cfg(target_os = "linux")]
             cleanup_faults: self.cleanup_faults.clone(),
         };
         // child 회수 책임은 start-committed owner로 이동했다.
@@ -293,27 +291,24 @@ impl PendingProcess {
         committed
     }
 
-    pub(crate) async fn abort_until(
-        &mut self,
-        deadline: MonotonicDeadline,
-    ) -> Result<(), ExecutorError> {
+    pub async fn abort_until(&mut self, deadline: MonotonicDeadline) -> Result<(), ExecutorError> {
         self.start_write_end.take();
         unsafe { libc::kill(self.pid, libc::SIGKILL) };
-        #[cfg(test)]
+        #[cfg(target_os = "linux")]
         let injected = self
             .cleanup_faults
             .as_ref()
             .is_some_and(|faults| faults.should_fail(CleanupFaultPoint::PendingCloneAbort));
-        #[cfg(not(test))]
+        #[cfg(not(target_os = "linux"))]
         let injected = false;
         let wait_result = if injected {
-            #[cfg(test)]
+            #[cfg(target_os = "linux")]
             {
                 Err(ExecutorError::Wait(CleanupFaults::error(
                     CleanupFaultPoint::PendingCloneAbort,
                 )))
             }
-            #[cfg(not(test))]
+            #[cfg(not(target_os = "linux"))]
             {
                 unreachable!("운영 빌드에는 cleanup fault가 없습니다")
             }
@@ -358,7 +353,7 @@ impl PendingProcess {
 
 impl StartCommittedProcess {
     /// gate commit 뒤에만 exec 결과를 읽으며 이 대기 동안 coordinator 잠금은 잡지 않는다.
-    pub(crate) fn wait_for_exec(mut self) -> Result<SpawnOutcome, ExecutorError> {
+    pub fn wait_for_exec(mut self) -> Result<SpawnOutcome, ExecutorError> {
         let exec_read_end = self
             .exec_read_end
             .take()
@@ -376,9 +371,9 @@ impl StartCommittedProcess {
             Ok(SpawnOutcome::Started(SpawnedProcess {
                 pid: self.pid,
                 output_readers,
-                #[cfg(test)]
+                #[cfg(target_os = "linux")]
                 cleanup_faults: self.cleanup_faults.clone(),
-                #[cfg(test)]
+                #[cfg(target_os = "linux")]
                 reaped_exit: Mutex::new(None),
             }))
         } else if payload.len() == size_of::<i32>() {
@@ -431,7 +426,7 @@ impl SpawnedProcess {
         self.pid
     }
 
-    pub(crate) async fn wait_until(
+    pub async fn wait_until(
         &self,
         deadline: MonotonicDeadline,
     ) -> Result<WaitOutcome, ExecutorError> {
@@ -446,11 +441,11 @@ impl SpawnedProcess {
         }
     }
 
-    pub(crate) async fn reap_after_kill_until(
+    pub async fn reap_after_kill_until(
         &self,
         deadline: MonotonicDeadline,
     ) -> Result<ProcessExit, ExecutorError> {
-        #[cfg(test)]
+        #[cfg(target_os = "linux")]
         {
             if self
                 .cleanup_faults
@@ -483,7 +478,7 @@ impl SpawnedProcess {
         }
     }
 
-    pub(crate) async fn finish_output_until(
+    pub async fn finish_output_until(
         self,
         deadline: MonotonicDeadline,
     ) -> Result<CapturedOutput, ExecutorError> {
@@ -683,15 +678,15 @@ pub fn spawn_in_cgroup(
     cgroup_fd: RawFd,
     capture_limits: CaptureLimits,
 ) -> Result<PendingProcess, ExecutorError> {
-    #[cfg(test)]
+    #[cfg(target_os = "linux")]
     let cleanup_faults = None;
-    #[cfg(not(test))]
+    #[cfg(not(target_os = "linux"))]
     let cleanup_faults = CleanupFaultHandle;
     spawn_in_cgroup_with_fault_handle(command, cgroup_fd, capture_limits, cleanup_faults)
 }
 
-#[cfg(test)]
-pub(crate) fn spawn_in_cgroup_with_cleanup_faults(
+#[cfg(target_os = "linux")]
+pub fn spawn_in_cgroup_with_cleanup_faults(
     command: &PreparedCommand,
     cgroup_fd: RawFd,
     capture_limits: CaptureLimits,
@@ -784,7 +779,7 @@ fn spawn_in_cgroup_with_fault_handle(
         exec_read_end: Some(exec_read_end),
         start_write_end: Some(start_write_end),
         output_readers: Some(output_readers),
-        #[cfg(test)]
+        #[cfg(target_os = "linux")]
         cleanup_faults,
         reaped: false,
     })
@@ -949,7 +944,7 @@ fn drain_output(
             if cancelled.load(Ordering::Acquire) {
                 return Ok(tail.finish());
             }
-            #[cfg(test)]
+            #[cfg(target_os = "linux")]
             {
                 let point = if _stream == "stdout" {
                     CleanupFaultPoint::StdoutReader
@@ -1071,6 +1066,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::num::NonZeroUsize;
+    use std::time::Instant;
 
     #[test]
     fn injected_stdout_and_stderr_reader_failures_stay_independent() {

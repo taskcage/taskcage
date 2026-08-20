@@ -717,8 +717,11 @@ dependencies = [
 name = "taskcage-core"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "semver",
+ "serde",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

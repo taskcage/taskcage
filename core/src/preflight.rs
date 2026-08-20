@@ -71,8 +71,8 @@ impl VerifiedEnvironment {
         self.paths
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_test() -> Self {
+    #[cfg(target_os = "linux")]
+    pub fn for_test() -> Self {
         let root = PathBuf::from("/delegated");
         Self {
             report: CapabilityReport {
@@ -178,7 +178,7 @@ impl SystemProbe {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn check_after_recovery(
+    pub fn check_after_recovery(
         &self,
         placement: StartupCgroupPlacement,
     ) -> Result<VerifiedEnvironment, PreflightError> {

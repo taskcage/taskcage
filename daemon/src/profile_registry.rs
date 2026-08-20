@@ -1423,7 +1423,7 @@ mod tests {
         let (executable, arguments, actual_working_directory, environment) = command.into_parts();
         assert!(matches!(
             executable,
-            ResolvedExecutable::RawPath(value) if value == FILE_COPY_PROGRAM
+            ResolvedExecutable::Path(value) if value == FILE_COPY_PROGRAM
         ));
         assert_eq!(
             arguments,
@@ -1455,7 +1455,7 @@ mod tests {
         let (executable, arguments, actual_working_directory, environment) = command.into_parts();
         assert!(matches!(
             executable,
-            ResolvedExecutable::PinnedDescriptor { argv0, .. } if argv0 == "ffmpeg"
+            ResolvedExecutable::Pinned { argv0, .. } if argv0 == "ffmpeg"
         ));
         assert_eq!(arguments, expected_arguments);
         assert_eq!(actual_working_directory, working_directory);

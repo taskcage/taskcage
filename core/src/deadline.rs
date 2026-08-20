@@ -5,17 +5,17 @@
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MonotonicDeadline {
+pub struct MonotonicDeadline {
     at: Instant,
     budget: Duration,
 }
 
 impl MonotonicDeadline {
-    pub(crate) fn from_now(budget: Duration) -> Option<Self> {
+    pub fn from_now(budget: Duration) -> Option<Self> {
         Self::from_start(Instant::now(), budget)
     }
 
-    pub(crate) fn from_start(start: Instant, budget: Duration) -> Option<Self> {
+    pub fn from_start(start: Instant, budget: Duration) -> Option<Self> {
         if budget.is_zero() {
             return None;
         }
@@ -25,27 +25,26 @@ impl MonotonicDeadline {
         })
     }
 
-    pub(crate) fn expired_at(now: Instant) -> Self {
+    pub fn expired_at(now: Instant) -> Self {
         Self {
             at: now,
             budget: Duration::ZERO,
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn at(self) -> Instant {
+    pub fn at(self) -> Instant {
         self.at
     }
 
-    pub(crate) fn budget(self) -> Duration {
+    pub fn budget(self) -> Duration {
         self.budget
     }
 
-    pub(crate) fn remaining(self) -> Option<Duration> {
+    pub fn remaining(self) -> Option<Duration> {
         self.remaining_at(Instant::now())
     }
 
-    pub(crate) fn remaining_at(self, now: Instant) -> Option<Duration> {
+    pub fn remaining_at(self, now: Instant) -> Option<Duration> {
         self.at
             .checked_duration_since(now)
             .filter(|value| !value.is_zero())

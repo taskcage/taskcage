@@ -4,7 +4,7 @@ use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CleanupFaultPoint {
+pub enum CleanupFaultPoint {
     PendingCloneAbort,
     ExecGateCleanup,
     CgroupKill,
@@ -17,13 +17,13 @@ pub(crate) enum CleanupFaultPoint {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CleanupFaultMode {
+pub enum CleanupFaultMode {
     Once,
     Persistent,
 }
 
 #[derive(Debug)]
-pub(crate) struct CleanupFaults {
+pub struct CleanupFaults {
     primary: CleanupFaultPoint,
     secondary: Option<CleanupFaultPoint>,
     mode: CleanupFaultMode,
@@ -33,7 +33,7 @@ pub(crate) struct CleanupFaults {
 }
 
 impl CleanupFaults {
-    pub(crate) fn new(point: CleanupFaultPoint, mode: CleanupFaultMode) -> Self {
+    pub fn new(point: CleanupFaultPoint, mode: CleanupFaultMode) -> Self {
         Self {
             primary: point,
             secondary: None,
@@ -44,7 +44,7 @@ impl CleanupFaults {
         }
     }
 
-    pub(crate) fn new_pair(
+    pub fn new_pair(
         primary: CleanupFaultPoint,
         secondary: CleanupFaultPoint,
         mode: CleanupFaultMode,
@@ -60,7 +60,7 @@ impl CleanupFaults {
         }
     }
 
-    pub(crate) fn should_fail(&self, point: CleanupFaultPoint) -> bool {
+    pub fn should_fail(&self, point: CleanupFaultPoint) -> bool {
         let attempt = if self.primary == point {
             self.primary_attempts.fetch_add(1, Ordering::AcqRel)
         } else if self.secondary == Some(point) {
@@ -72,16 +72,16 @@ impl CleanupFaults {
             && (matches!(self.mode, CleanupFaultMode::Persistent) || attempt == 0)
     }
 
-    pub(crate) fn is(&self, point: CleanupFaultPoint) -> bool {
+    pub fn is(&self, point: CleanupFaultPoint) -> bool {
         self.primary == point || self.secondary == Some(point)
     }
 
-    pub(crate) fn attempts(&self) -> usize {
+    pub fn attempts(&self) -> usize {
         self.primary_attempts.load(Ordering::Acquire)
             + self.secondary_attempts.load(Ordering::Acquire)
     }
 
-    pub(crate) fn attempts_for(&self, point: CleanupFaultPoint) -> usize {
+    pub fn attempts_for(&self, point: CleanupFaultPoint) -> usize {
         if self.primary == point {
             self.primary_attempts.load(Ordering::Acquire)
         } else if self.secondary == Some(point) {
@@ -91,11 +91,11 @@ impl CleanupFaults {
         }
     }
 
-    pub(crate) fn disable(&self) {
+    pub fn disable(&self) {
         self.enabled.store(false, Ordering::Release);
     }
 
-    pub(crate) fn error(point: CleanupFaultPoint) -> io::Error {
+    pub fn error(point: CleanupFaultPoint) -> io::Error {
         io::Error::other(format!("injected cleanup fault at {point:?}"))
     }
 }
