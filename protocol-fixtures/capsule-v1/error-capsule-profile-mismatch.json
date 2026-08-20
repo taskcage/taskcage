@@ -1,0 +1,18 @@
+{
+  "request": {
+    "capsule": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
+    "profile": {"name": "different-profile", "version": "1.0.0"},
+    "inputs": {},
+    "resourceOverrides": {}
+  },
+  "error": {
+    "code": "CAPSULE_PROFILE_MISMATCH",
+    "retryable": false
+  },
+  "sideEffects": {
+    "taskCreated": false,
+    "artifactStaged": false,
+    "cgroupCreated": false,
+    "processStarted": false
+  }
+}

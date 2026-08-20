@@ -4,16 +4,16 @@
   "profile": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
   "state": "FINISHED",
   "outcome": "FAILED",
-  "terminationReason": "TIMED_OUT",
+  "terminationReason": "EXITED",
   "cleanupConfirmed": true,
-  "process": {"exitCode": null, "signal": "SIGKILL"},
+  "process": {"exitCode": 0, "signal": null},
   "timing": {
     "submittedAt": "2026-08-20T00:00:00Z",
     "startedAt": "2026-08-20T00:00:01Z",
-    "finishedAt": "2026-08-20T00:02:01Z",
-    "wallTimeMs": 120000
+    "finishedAt": "2026-08-20T00:00:02Z",
+    "wallTimeMs": 1000
   },
-  "usage": {"cpuTimeMicros": 120000, "memoryPeakBytes": 536870912},
+  "usage": {"cpuTimeMicros": 7000, "memoryPeakBytes": 1048576},
   "output": {
     "stdoutTail": "",
     "stderrTail": "",
@@ -21,5 +21,8 @@
     "stderrTruncated": false
   },
   "artifacts": {},
-  "failure": {"code": "TIMEOUT", "message": "wall time limit exceeded"}
+  "failure": {
+    "code": "OUTPUT_CONTRACT_VIOLATION",
+    "message": "staging output does not satisfy the declared audio Artifact contract"
+  }
 }

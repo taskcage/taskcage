@@ -3,10 +3,10 @@
   "profile": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
   "inputs": {
     "source": {
-      "kind": "LOCAL_INPUT",
-      "path": "jobs/42/source.mp4",
+      "kind": "ARTIFACT",
       "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "sizeBytes": 1024
+      "sizeBytes": 1024,
+      "mediaType": "audio/mpeg"
     },
     "sample_rate_hz": {"kind": "INT64", "value": 16000},
     "channels": {"kind": "INT64", "value": 1}
