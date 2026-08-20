@@ -74,19 +74,23 @@ Central Portal에서 `taskcage.org` 도메인 소유권을 사용해 `org.taskca
 private key와 Central token을 repository, log, release note 또는 장기 보존 artifact에 기록하지 않는다. PR
 CI는 release secret을 받지 않고 매번 폐기되는 임시 PGP key로 Central bundle 구조만 검증한다.
 
-## PR release candidate 검증
+## tag 전 release candidate 검증
 
-일반 CI의 `Public Alpha release candidate` job은 각 컴포넌트의 현재 manifest 버전으로 다음을 수행한다.
+일반 PR CI는 변경된 범위에 맞는 검사만 실행한다. tag를 만들기 전 maintainer는 Actions의
+`Validate release candidate` workflow를 수동 실행하고 daemon version을 입력한다. 이 workflow는
+각 컴포넌트의 현재 manifest 버전으로 다음을 수행한다.
 
-- Linux x86-64와 ARM64 daemon archive 및 SHA-256 sidecar 생성
+- Linux x86-64와 ARM64 containerized Java E2E
+- x86-64 daemon archive 및 SHA-256 sidecar 생성과 installer smoke test
 - 임시 PGP key로 Java Core SDK와 FFmpeg Binding Central validation bundle 생성
 - 두 bundle만 제공하는 임시 Maven repository에서 별도 소비자 project compile
-- 컴포넌트별 tag 형식과 manifest version 일치 검사
+- daemon version과 각 컴포넌트 manifest version 일치 검사
 - archive의 prebuilt binary와 installer를 사용한 Ubuntu systemd smoke test
 - 검토용 GitHub Actions artifact 업로드
 
 이 artifact는 공개 릴리스가 아니며 Maven Central이나 GitHub Release에 복사해 게시하지 않는다. 실제
-릴리스 workflow가 tag commit에서 산출물을 다시 생성한다.
+릴리스 workflow가 tag commit에서 산출물을 다시 생성한다. tag workflow는 이 사전 검증을 대체하지
+않지만, 서명된 tag와 `main` 포함 여부를 포함한 최종 배포 gate로 계속 동작한다.
 
 ## daemon 릴리스
 
