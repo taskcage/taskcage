@@ -10,9 +10,10 @@ Local Profile Protocol v2의 wire envelope와 field를 교체하지 않는다. L
 이 계약은 실행 방법을 정의하지만 archive 배포 형식, Runtime Package 다운로드, Hub, TLS transport는
 정의하지 않는다. 구현은 하나의 Rust `taskcage-core`를 공유해야 하며, `taskcaged`와 Embedded용
 `taskcage-exec`는 각각 daemon·private helper adapter로 동작한다. EmbeddedRunner는 `taskcaged` child
-daemon을 시작하는 방식으로 구현하지 않는다. 현재 분리 작업은 공통 Capsule identity 경계부터 시작하며,
-실제 cgroup·프로세스 lifecycle 구현의 이동은 후속 단계다. 현재 daemon adapter는 core가 제공한
-검증된 shell-free `ExecutionCommand`를 host policy와 cgroup 실행기에 적용한다.
+daemon을 시작하는 방식으로 구현하지 않는다. 현재 분리 단계에서는 cgroup 경로·preflight·deadline·출력
+캡처·프로세스 실행기를 `taskcage-core`가 소유하고, `taskcaged`는 UDS/TLS·host policy·protocol/task
+lifecycle 조정만 담당한다. daemon adapter는 core가 제공한 검증된 실행 primitives를 host policy와
+wire protocol에 연결한다.
 
 ## 핵심 객체
 

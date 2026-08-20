@@ -62,10 +62,11 @@ output validation과 terminal result 생성을 담당한다.
 `taskcaged`와 Embedded용 private helper는 이 코어를 호출하는 얇은 backend adapter다. `taskcaged` 자체를
 EmbeddedRunner 안에서 child daemon으로 실행하는 방식은 사용하지 않는다.
 
-첫 분리 작업에서는 backend-independent한 `CapsuleIdentity`와 shell-free `ExecutionCommand`를
-`taskcage-core`로 옮겨 daemon이 이를 host policy에 적용하는 adapter가 되도록 경계를 만든다.
-cgroup·프로세스 lifecycle은 이 경계를 유지하면서 후속 커밋에서 점진적으로 이동한다. 따라서 이
-단계만으로 EmbeddedRunner가 실행 가능해졌다고 간주하지 않는다.
+첫 분리 단계에서는 backend-independent한 `CapsuleIdentity`와 shell-free `ExecutionCommand`뿐 아니라
+cgroup 경로·preflight·deadline·출력 캡처·프로세스 실행 primitives도 `taskcage-core`가 소유한다.
+`taskcaged`는 UDS/TLS, host policy, protocol/task lifecycle 조정과 core adapter 역할만 담당한다.
+따라서 이 단계는 이름만 바꾸는 작업이 아니라 실행 의미를 core에 모으고 daemon을 얇게 만드는 순서이며,
+EmbeddedRunner 자체가 실행 가능해졌다고 간주하지 않는다.
 
 ### 3. ExternalRunner 기준선
 
