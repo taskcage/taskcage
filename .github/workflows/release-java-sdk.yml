@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing Java SDK release tag, for example java-sdk-v0.3.0.
+        description: Existing Java SDK release tag, for example java-sdk-v0.4.0.
         required: true
         type: string
       central_deployment_id:
@@ -181,7 +181,7 @@ jobs:
             upload \
             "dist/taskcage-java-sdk-${RELEASE_VERSION}-central.zip" \
             "taskcage-java-sdk-${RELEASE_VERSION}")"
-          release_notes="$(printf 'TaskCage Java SDK %s\n\nSupported Local Protocols: v1, v2\nSupported Remote Protocol: v1\nRequires taskcaged: 0.4.0 or later for Remote Profile execution\nMaven: org.taskcage:taskcage-java-sdk:%s\n\nCentral USER_MANAGED deployment: %s\n\nReview and complete these notes before finalizing publication.' "${RELEASE_VERSION}" "${RELEASE_VERSION}" "${deployment_id}")"
+          release_notes="$(printf 'TaskCage Java SDK %s\n\nHighlights: Local and Remote Capsule runners\nSupported Local Protocols: v1, v2\nSupported Remote Protocol: v1\nRequires taskcaged: 0.5.0 or later for Capsule execution\nMaven: org.taskcage:taskcage-java-sdk:%s\n\nCentral USER_MANAGED deployment: %s\n\nReview and complete these notes before finalizing publication.' "${RELEASE_VERSION}" "${RELEASE_VERSION}" "${deployment_id}")"
           gh release create "${RELEASE_TAG}" \
             --draft \
             --prerelease \

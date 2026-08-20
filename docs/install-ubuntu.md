@@ -39,13 +39,13 @@ benchmark의 기준은 native Ubuntu 24.04 host다. WSL distro를 `wsl --termina
 ## Release archive 준비
 
 공개된 버전을 설치할 때는 archive와 checksum을 같은 GitHub Release에서 받고, 압축을 풀기 전에 검증한다.
-아래의 `VERSION`은 설치하려는 daemon release로 바꾼다. 현재 공개된 최신 버전은 `0.4.0`이다.
+아래의 `VERSION`은 설치하려는 daemon release로 바꾼다. 현재 공개된 최신 버전은 `0.5.0`이다.
 
 bootstrap installer를 사용하면 archive 다운로드, checksum 검증, 설치와 service 시작을 한 번에 수행할
 수 있다. installer 자체도 변경되지 않는 버전별 GitHub Release 자산에서 받고, 내용을 검토한 뒤 실행한다.
 
 ```bash
-VERSION=0.4.0
+VERSION=0.5.0
 RELEASE_URL="https://github.com/taskcage/taskcage/releases/download/taskcaged-v${VERSION}"
 
 curl --fail --location --remote-name "${RELEASE_URL}/install-taskcaged.sh"
@@ -67,7 +67,7 @@ sudo systemctl enable --now taskcaged.service
 수동 설치나 bootstrap installer 자체를 검증하려면 아래처럼 archive와 checksum을 직접 받을 수 있다.
 
 ```bash
-VERSION=0.4.0
+VERSION=0.5.0
 case "$(uname -m)" in
   x86_64) TARGET=x86_64-unknown-linux-gnu ;;
   aarch64) TARGET=aarch64-unknown-linux-gnu ;;
@@ -186,7 +186,7 @@ sudo -u taskcage /usr/local/bin/taskcaged status \
 준비된 daemon은 한 줄 JSON과 종료 코드 `0`을 반환한다.
 
 ```json
-{"status":"READY","daemonVersion":"0.4.0","protocolVersions":[1],"maxFrameBytes":1048576,"maxConcurrentTasks":4,"cgroupV2Ready":true}
+{"status":"READY","daemonVersion":"0.5.0","protocolVersions":[1],"maxFrameBytes":1048576,"maxConcurrentTasks":4,"cgroupV2Ready":true}
 ```
 
 연결 실패, timeout, 잘못된 응답 또는 `cgroupV2Ready=false`는 종료 코드가 `0`이 아니다. `status`는 실행

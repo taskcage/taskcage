@@ -7,6 +7,23 @@ TaskCage는 daemon과 SDK의 버전을 독립적으로 관리한다. 이 문서�
 
 현재 문서화된 변경 없음.
 
+## taskcaged 0.5.0 - 2026-08-20
+
+- signed Capsule archive import와 immutable catalog 기반 Profile 실행을 공개한다.
+- Runtime Package digest·platform·entrypoint를 매 Task 전에 재검증하고, Capsule이 선언한 typed input, 제한된 argv와 output publish 규칙만 실행한다.
+- FFmpeg Capsule의 정상 실행, timeout, memory/PID limit, 취소와 전체 cgroup cleanup을 Linux container 환경에서 검증한다.
+
+## TaskCage Java SDK 0.4.0 - 2026-08-20 (Maven Central)
+
+- Local `CapsuleRunner`와 Remote TLS `RemoteCapsuleRunner`로 Capsule identity와 typed Profile request를 실행한다.
+- Remote Capsule의 submit, idempotent request ID, terminal result, cancel, managed Artifact upload/download를 Java 타입으로 제공한다.
+- 개발 CA를 사용하는 Docker Compose E2E에서 FFmpeg Capsule의 정상·timeout·memory limit·cancel 및 artifact cleanup을 실제 daemon과 검증한다.
+
+### Compatibility
+
+- Java SDK 0.4.0의 Capsule 실행에는 `taskcaged` 0.5.0 이상이 필요하다.
+- Local Protocol v1·v2와 Remote Protocol v1은 계속 지원한다. 기존 Local Raw Command는 호환 API로 유지한다.
+
 ## taskcaged 0.4.0 - 2026-08-14
 
 - TLS 1.3과 service-account 인증을 사용하는 Remote Protocol v1 daemon listener를 추가한다.
