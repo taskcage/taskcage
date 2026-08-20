@@ -5,6 +5,10 @@
 //! this crate incrementally. Transport, host admission policy and process supervision do not belong
 //! in this crate.
 
+mod execution;
+
+pub use execution::{ExecutionCommand, ExecutionExecutable};
+
 use semver::Version;
 use thiserror::Error;
 

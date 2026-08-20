@@ -12,10 +12,12 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::File;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::protocol::CommandSpec;
 use crate::resource_budget::ResourceBudget;
+pub(crate) use taskcage_core::{
+    ExecutionCommand as ResolvedCommand, ExecutionExecutable as ResolvedExecutable,
+};
 
 #[derive(Debug, Clone)]
 /// 실행 출처와 무관하게 Runner가 소비하는 내부 실행 계약이다.
@@ -28,7 +30,7 @@ impl ResolvedExecutionPlan {
     /// Protocol v1 검증을 통과한 Raw Command를 내부 실행 계약으로 고정한다.
     pub(crate) fn from_validated_raw(command: &CommandSpec, budget: ResourceBudget) -> Self {
         Self {
-            command: ResolvedCommand::from_validated_raw(command),
+            command: resolved_command_from_validated_raw(command),
             budget,
         }
     }
@@ -43,15 +45,15 @@ impl ResolvedExecutionPlan {
         budget: ResourceBudget,
     ) -> Self {
         Self {
-            command: ResolvedCommand {
-                executable: ResolvedExecutable::PinnedDescriptor {
-                    descriptor: Arc::new(entrypoint),
+            command: ResolvedCommand::new(
+                ResolvedExecutable::Pinned {
+                    descriptor: std::sync::Arc::new(entrypoint),
                     argv0,
                 },
                 arguments,
                 working_directory,
                 environment,
-            },
+            ),
             budget,
         }
     }
@@ -65,56 +67,19 @@ impl ResolvedExecutionPlan {
     }
 }
 
-#[derive(Debug, Clone)]
-/// 셸이나 PATH 해석 없이 execve에 전달할 명령 값이다.
-pub(crate) struct ResolvedCommand {
-    executable: ResolvedExecutable,
-    arguments: Vec<OsString>,
-    working_directory: PathBuf,
-    environment: BTreeMap<OsString, OsString>,
-}
+fn resolved_command_from_validated_raw(command: &CommandSpec) -> ResolvedCommand {
+    let environment = command
+        .environment
+        .iter()
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+        .collect();
 
-#[derive(Debug, Clone)]
-/// 실행 파일을 여는 방식이다. Package entrypoint는 검증한 inode descriptor를 직접 실행한다.
-pub(crate) enum ResolvedExecutable {
-    RawPath(OsString),
-    PinnedDescriptor {
-        descriptor: Arc<File>,
-        argv0: OsString,
-    },
-}
-
-impl ResolvedCommand {
-    fn from_validated_raw(command: &CommandSpec) -> Self {
-        let environment = command
-            .environment
-            .iter()
-            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
-            .collect();
-
-        Self {
-            executable: ResolvedExecutable::RawPath(OsString::from(&command.program)),
-            arguments: command.args.iter().map(OsString::from).collect(),
-            working_directory: PathBuf::from(&command.working_directory),
-            environment,
-        }
-    }
-
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        ResolvedExecutable,
-        Vec<OsString>,
-        PathBuf,
-        BTreeMap<OsString, OsString>,
-    ) {
-        (
-            self.executable,
-            self.arguments,
-            self.working_directory,
-            self.environment,
-        )
-    }
+    ResolvedCommand::new(
+        ResolvedExecutable::Path(OsString::from(&command.program)),
+        command.args.iter().map(OsString::from).collect(),
+        PathBuf::from(&command.working_directory),
+        environment,
+    )
 }
 
 #[cfg(test)]
@@ -164,7 +129,7 @@ mod tests {
 
         assert!(matches!(
             executable,
-            ResolvedExecutable::RawPath(value)
+            ResolvedExecutable::Path(value)
                 if value == "/opt/task cage/bin/tool"
         ));
         assert_eq!(
