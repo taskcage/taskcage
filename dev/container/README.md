@@ -75,8 +75,9 @@ bash dev/container/run-remote-e2e.sh
 
 이 구성은 daemon에만 `privileged: true`와 private cgroup namespace를 부여한다. Java runner는 일반 Compose
 network에서 TLS 1.3과 ALPN `taskcage/remote/1`로 daemon DNS에 연결하고, test-only CA·service account로 인증한다.
-`file-copy@1.0.0` Profile을 통해 Artifact upload → Profile 실행 → output download를 검증한다. 인증서와 secret은
-test fixture 전용이며 운영 credential이나 인증서로 재사용하면 안 된다.
+`file-copy@1.0.0`와 Compose가 import한 `ffmpeg-audio-to-wav@1.0.0` Capsule을 통해 Artifact upload → Capsule
+실행 → output download를 검증한다. FFmpeg Capsule은 정상 실행·timeout·cancel 뒤 cleanup을 포함한다.
+인증서와 secret은 test fixture 전용이며 운영 credential이나 인증서로 재사용하면 안 된다.
 
 ## FFmpeg Binding 예제
 

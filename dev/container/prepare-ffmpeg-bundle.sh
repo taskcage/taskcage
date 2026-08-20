@@ -45,7 +45,7 @@ printf '%s\n' \
   '    "limits": {"cpuMax":{"quotaMicros":100000,"periodMicros":100000},"memoryMaxBytes":536870912,"pidsMax":32,"wallTimeLimitMs":120000},' \
   '    "output": {"stdoutTailMaxBytes":65536,"stderrTailMaxBytes":65536}' \
   '  },' \
-  '  "allowedOverrides": []' \
+  '  "allowedOverrides": ["limits.memoryMaxBytes","limits.pidsMax","limits.wallTimeLimitMs"]' \
   '}' >"${profile}"
 
 profile_digest="$(sha256sum "${profile}" | awk '{print $1}')"
