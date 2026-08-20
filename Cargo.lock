@@ -725,6 +725,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "taskcage-exec"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "taskcage-core",
+ "tokio",
+]
+
+[[package]]
 name = "taskcage-fixtures"
 version = "0.1.0"
 

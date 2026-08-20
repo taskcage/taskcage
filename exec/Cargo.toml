@@ -1,0 +1,17 @@
+[package]
+name = "taskcage-exec"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "taskcage-exec"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+taskcage-core = { path = "../core" }
+tokio = { version = "1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "time"] }
