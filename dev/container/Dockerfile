@@ -6,6 +6,7 @@ WORKDIR /workspace
 COPY Cargo.toml Cargo.lock ./
 COPY core ./core
 COPY daemon ./daemon
+COPY exec ./exec
 COPY test-fixtures ./test-fixtures
 RUN cargo build --workspace --release --locked
 
