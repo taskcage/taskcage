@@ -53,9 +53,27 @@ Capsule**이다. Capsule은 실행 파일만 담는 패키지가 아니라 typed
 
 Java SDK는 이 계약을 Java 값 객체와 `CapsuleRunner` 인터페이스로 표현하고, daemon은 최종 검증자다.
 
-### 2. EmbeddedRunner 우선
+### 2. 공통 실행 코어 추출
 
-첫 제품 경험은 별도 daemon 설치 없이 실행하는 EmbeddedRunner다.
+실행 의미는 daemon이나 SDK에 중복 구현하지 않고 재사용 가능한 Rust `taskcage-core`로 분리한다.
+코어는 Capsule 검증, Runtime Package 검증, cgroup 제한, 프로세스 실행, timeout·cancel, 전체 cleanup,
+output validation과 terminal result 생성을 담당한다.
+
+`taskcaged`와 Embedded용 private helper는 이 코어를 호출하는 얇은 backend adapter다. `taskcaged` 자체를
+EmbeddedRunner 안에서 child daemon으로 실행하는 방식은 사용하지 않는다.
+
+### 3. ExternalRunner 기준선
+
+현재 daemon-backed Local UDS를 먼저 `taskcage-core` 기반으로 전환하고 회귀 검증한다.
+
+- 기존 Protocol v2와 Local Profile 동작을 유지한다.
+- daemon은 UDS/TLS와 host policy를 담당하고 실행 의미는 core에 둔다.
+- ExternalRunner의 결과와 cleanup 의미를 공통 conformance fixture로 고정한다.
+
+### 4. Private execution helper
+
+Embedded backend는 별도 daemon 설치 없이 실행되어야 한다. 이를 위해 `taskcage-exec`라는 작은 private
+helper를 제공하고, Java SDK가 필요할 때 자동 기동한다.
 
 ```java
 try (CapsuleRunner runner = CapsuleRunner.embedded(capsule)) {
@@ -63,22 +81,25 @@ try (CapsuleRunner runner = CapsuleRunner.embedded(capsule)) {
 }
 ```
 
-Embedded backend는 Java가 cgroup semantics를 다시 구현하지 않도록, 검증된 Rust execution core를
-private helper/library 형태로 호출하는 것을 우선 검토한다. Java가 cgroup 파일을 직접 조작하는
-구현은 권한·race·cleanup 의미가 중복되므로 MVP의 기본 선택으로 삼지 않는다.
+helper는 공개 socket, systemd service 또는 별도 `taskcaged serve` lifecycle을 만들지 않는다. Java와
+stdin/stdout 또는 private pipe로 통신하며, 하나의 helper가 여러 Task를 처리할 수 있다. 각 Task는
+core가 독립 cgroup으로 관리한다. Java가 cgroup 파일을 직접 조작하는 구현은 권한·race·cleanup 의미가
+중복되므로 MVP의 기본 선택으로 삼지 않는다.
 
 EmbeddedRunner가 제공해야 하는 최소 기능은 하나의 Runtime Package, 하나의 Execution Profile,
 typed request/result, resource policy, timeout·cancel, whole-process cleanup이다.
 
-### 3. ExternalRunner 연결
+### 5. Java EmbeddedRunner 연결
 
-EmbeddedRunner와 동일한 `CapsuleRunner` 계약에 현재 daemon-backed Local UDS를 연결한다.
+Java SDK는 `taskcage-exec`를 private helper로 관리하고, ExternalRunner와 동일한 `CapsuleRunner` 계약으로
+요청·결과를 노출한다.
 
 - 사용자는 backend를 바꿔도 request/result 의미를 다시 배우지 않는다.
-- ExternalRunner는 운영 환경에서 daemon의 host 정책과 cgroup 관찰성을 활용한다.
+- helper는 Linux `amd64`·`arm64` 플랫폼 artifact로 배포한다.
+- helper crash, timeout, cancel과 close 시 lifecycle을 명확히 처리한다.
 - Remote TLS는 인증·Artifact·보존 계약이 필요한 별도 단계이며 Embedded MVP의 선행 조건이 아니다.
 
-### 4. 첫 공식 Capsule
+### 6. 첫 공식 Capsule
 
 FFmpeg 전체 CLI가 아니라 `ffmpeg-audio-to-wav@1.0.0` 하나를 기준으로 검증한다.
 
@@ -87,7 +108,16 @@ FFmpeg 전체 CLI가 아니라 `ffmpeg-audio-to-wav@1.0.0` 하나를 기준으�
 - 실행: Capsule이 고정한 argv와 Runtime Package entrypoint
 - 실패: non-zero, timeout, cancel, output validation 실패를 구분된 결과로 반환
 
-### 5. 확장과 배포
+### 7. Worker·container 검증과 배포
+
+Java Worker가 실행 중인 컨테이너 안에서 Java SDK와 private helper를 함께 사용한다.
+
+- 여러 Capsule Task를 하나의 helper에서 실행한다.
+- cgroup delegation과 필요한 컨테이너 권한을 명시적으로 검증한다.
+- 컨테이너 종료 뒤 helper·Task·staging 잔여물이 없는지 확인한다.
+- Java SDK와 `taskcage-exec-linux-amd64`/`linux-arm64` artifact를 함께 배포한다.
+
+### 8. 확장과 배포
 
 한 Capsule의 실행과 사용자 경험이 확인된 뒤에만 다음을 추가한다.
 
@@ -117,8 +147,9 @@ Hub 없이 local import와 명시적 Package digest만으로 동작해야 한다
 ```text
 Capsule 정의
 → Runtime Package 검증
-→ EmbeddedRunner 실행
+→ taskcage-core 실행
 → ExternalRunner 동일 요청 실행
+→ EmbeddedRunner(private helper) 동일 요청 실행
 → timeout/cancel 및 자식·손자 정리 확인
 → output validation·artifact publish 확인
 → Java 예제로 결과와 종료 원인 확인
