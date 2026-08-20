@@ -19,7 +19,7 @@ pub use crate::bundle::{
 };
 use crate::digest::Sha256Digest;
 use crate::protocol::ProfileIdentity;
-pub use taskcage_core::{CapsuleIdentity, IdentityError as CapsuleIdentityError};
+pub use taskcage_core::CapsuleIdentity;
 
 #[derive(Debug, Error)]
 pub enum CapsuleError {
