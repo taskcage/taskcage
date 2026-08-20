@@ -140,6 +140,32 @@ class RemoteTlsDaemonContractTest {
     }
 
     @Test
+    void reportsProcessLimitForTheFfmpegCapsuleAndPublishesNoArtifact() throws Exception {
+        Path source = Files.createTempFile("taskcage-remote-capsule-pids-", ".wav");
+        try {
+            Files.write(source, wave(2_500_000));
+            try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(options())) {
+                RemoteCapsuleExecutionResult limited = RemoteCapsuleRunner.external(client).execute(
+                        capsuleRequest(
+                                client.upload(source, "audio/wav"),
+                                ProfileResourceOverrides.builder()
+                                        .pidsMax(1)
+                                        .build()),
+                        Duration.ofSeconds(20));
+
+                assertEquals(ProfileOutcome.FAILED, limited.outcome());
+                assertEquals(
+                        TerminationReason.PROCESS_LIMIT_EXCEEDED,
+                        limited.execution().terminationReason());
+                assertTrue(limited.profileTask().artifacts().isEmpty());
+                assertTrue(limited.cleanupConfirmed());
+            }
+        } finally {
+            Files.deleteIfExists(source);
+        }
+    }
+
+    @Test
     void cancelsAnAcceptedFfmpegCapsuleAndObservesCleanupConfirmedFailure() throws Exception {
         Path source = Files.createTempFile("taskcage-remote-capsule-cancel-", ".wav");
         try {

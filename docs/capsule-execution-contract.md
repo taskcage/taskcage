@@ -187,3 +187,6 @@ Embedded backend가 cgroup 제한이나 whole-task cleanup을 증명할 수 없�
 [`protocol-fixtures/capsule-v1`](../protocol-fixtures/capsule-v1/)은 transport framing이 아닌 위 semantic
 contract를 고정한다. Java와 Rust 구현은 success, process failure, output contract failure, timeout과 cancel
 fixture의 identity, outcome, Artifact visibility, timing/output/usage shape를 임의로 바꾸지 않아야 한다.
+Rust `capsule_contract_fixtures`와 Java `CapsuleContractFixtureCompatibilityTest`는 corpus의 정확한 파일 집합과
+request, pre-execution identity mismatch, cleanup-confirmed terminal result를 직접 소비한다. fixture를 바꾸면
+두 구현의 conformance test도 함께 통과해야 한다.

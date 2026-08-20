@@ -32,8 +32,8 @@ failure and cleanup result
 ## 현재 기준선과 목표 상태
 
 현재 `main`은 daemon-backed Local Profile, Capsule archive import, Runtime Package 검증, FFmpeg
-Profile, Local UDS와 opt-in Remote TLS E2E를 제공한다. 개발 Compose의 기본 daemon은 아직 Local UDS를
-사용하며, TLS daemon은 Remote Protocol E2E용 별도 profile이다.
+Profile, Local UDS와 opt-in Remote TLS E2E를 제공한다. 개발 Compose의 기본 daemon은 Local UDS를
+사용하고, 권위 있는 External Capsule MVP 검증은 Remote TLS profile에서 수행한다.
 
 MVP의 다음 변경은 이를 숨기지 않는다. **개발자가 권장 경로 하나만 따라 실제 Capsule을 실행할 수 있게
 Compose 기반 ExternalRunner 경험을 완성하는 것**이 우선이다. EmbeddedRunner는 같은 계약을 공유하는
@@ -46,7 +46,7 @@ whole-process cleanup은 Linux execution backend가 실제로 검증한 경우�
 
 | Mode | 목적 | 주요 사용처 | 현재 상태 |
 |---|---|---|---|
-| **ExternalRunner** | 실행 중인 daemon에 UDS 또는 TLS로 Capsule 실행을 요청 | Docker Compose 개발, 팀 공용 runtime, 운영 | 현재 daemon-backed Profile adapter가 기준선. Compose TLS Capsule 경로는 다음 구현 |
+| **ExternalRunner** | 실행 중인 daemon에 UDS 또는 TLS로 Capsule 실행을 요청 | Docker Compose 개발, 팀 공용 runtime, 운영 | Compose TLS FFmpeg Capsule 경로와 반복 CI gate 구현. green Linux 실행 증거 필요 |
 | **EmbeddedRunner** | Java SDK가 private `taskcage-exec` helper를 관리 | daemon 설치 없이 단일 Java Worker 안에 배포 | 후속 선택적 확장 |
 
 ## 로컬 개발의 기본 경험
@@ -54,7 +54,7 @@ whole-process cleanup은 Linux execution backend가 실제로 검증한 경우�
 MVP의 권장 로컬 경로는 Embedded가 아니라 Docker Compose 기반 daemon이다.
 
 ```text
-docker compose up -d taskcaged
+docker compose --profile remote-test up -d remote-taskcaged
         ↓ TLS
 Java application / integration test
         ↓ Capsule request
@@ -73,8 +73,10 @@ Compose는 개발 전용 CA와 daemon 서버 인증서를 제공한다. SDK는 �
 검증을 유지한다. 개발 편의를 이유로 운영 기본값에서 hostname 검증을 끄거나 모든 인증서를 신뢰하지
 않는다.
 
-현재 Compose의 Local UDS와 Remote TLS E2E는 이 목표를 향한 기반이다. TLS를 기본 Capsule 개발 경로로
-승격하는 변경은 daemon 설정, Compose profile, SDK sample과 E2E를 함께 갱신해야 한다.
+`bash dev/container/run-remote-e2e.sh`는 깨끗한 Compose volume을 만들고 Remote TLS daemon과 Java
+ExternalRunner를 연결한다. 정상 실행, timeout, cancel, memory/PID limit을 실행한 뒤 job cgroup과
+Artifact staging residue를 daemon 컨테이너 내부에서 검사한다. 관련 변경의 일반 CI도 이 명령을 실행한다.
+MVP 완료 판정에는 해당 Linux gate의 실제 green 결과가 필요하다.
 
 ## 구현 순서
 

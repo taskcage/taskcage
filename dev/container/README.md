@@ -9,10 +9,9 @@ Capsule-first MVP의 권장 개발 경험은 Docker Compose daemon에 Java `Exte
 실행하는 것이다. Docker Desktop 사용자도 macOS/Windows가 아니라 그 안의 Linux VM에서 cgroup 제한과
 process tree cleanup을 확인할 수 있다.
 
-현재 기본 `taskcaged` service는 같은 Compose volume을 공유하는 Local UDS E2E를 제공한다. `remote-taskcaged`
-profile은 별도 Compose network에서 개발용 CA·TLS를 사용하는 Remote Protocol E2E를 제공한다. 다음 MVP 변경은
-이 TLS 경로를 FFmpeg Capsule 개발 sample과 Java ExternalRunner의 기본 검증 경로로 완결하는 것이다. 그 전까지
-기본 UDS Compose를 TLS Capsule 개발 경험으로 설명하지 않는다.
+기본 `taskcaged` service는 같은 Compose volume을 공유하는 Local UDS E2E를 제공한다. `remote-taskcaged`
+profile은 별도 Compose network에서 개발용 CA·TLS를 사용하는 Remote Protocol E2E를 제공한다. Remote E2E는
+FFmpeg Capsule과 Java ExternalRunner의 권위 있는 MVP 검증 경로이며, 기본 UDS Compose와 혼동하지 않는다.
 
 개발용 CA는 SDK가 명시적으로 신뢰해야 하며 hostname 검증을 끄거나 모든 인증서를 신뢰해서는 안 된다.
 이 CA, 인증서, service credential은 test fixture 전용이고 운영에서 재사용하면 안 된다.
@@ -62,8 +61,8 @@ bash dev/container/run-e2e.sh
 Java 테스트 컨테이너는 daemon과 UDS·작업 volume 및 Docker Linux host의 PID namespace를 공유한다.
 따라서 기존 Java E2E가 후손 PID 소멸까지 확인하고, Profile E2E가 입력 Artifact를 준비해 실제 daemon의
 snapshot·실행·결과 publish를 검증할 수 있다. 테스트가 끝나면 daemon 컨테이너 내부에서 잔여 job
-cgroup이 없는지도 검사한다. 최종 cgroup·systemd·릴리스 검증은 계속 Ubuntu 24.04 VM 또는 host 통합
-테스트가 담당한다.
+cgroup, Local/Remote Artifact staging, task-owned input과 임시 output이 없는지도 검사한다. 최종
+cgroup·systemd·릴리스 검증은 계속 Ubuntu 24.04 VM 또는 host 통합 테스트가 담당한다.
 
 ## 현재 Remote TLS Java E2E
 
@@ -76,7 +75,10 @@ bash dev/container/run-remote-e2e.sh
 이 구성은 daemon에만 `privileged: true`와 private cgroup namespace를 부여한다. Java runner는 일반 Compose
 network에서 TLS 1.3과 ALPN `taskcage/remote/1`로 daemon DNS에 연결하고, test-only CA·service account로 인증한다.
 `file-copy@1.0.0`와 Compose가 import한 `ffmpeg-audio-to-wav@1.0.0` Capsule을 통해 Artifact upload → Capsule
-실행 → output download를 검증한다. FFmpeg Capsule은 정상 실행·timeout·cancel 뒤 cleanup을 포함한다.
+실행 → output download를 검증한다. FFmpeg Capsule은 정상 실행·timeout·cancel·memory/PID limit과 각
+terminal result 뒤 cleanup을 포함한다. 테스트가 끝나면 daemon 컨테이너 안에서 잔여 job cgroup,
+upload/task input staging과 임시 output을 직접 검사한다. 관련 파일이 바뀐 pull request와 `main` push에서는
+일반 CI의 `Remote TLS Capsule E2E` job이 이 전체 명령을 깨끗한 Compose volume에서 실행한다.
 인증서와 secret은 test fixture 전용이며 운영 credential이나 인증서로 재사용하면 안 된다.
 
 ## FFmpeg Binding 예제

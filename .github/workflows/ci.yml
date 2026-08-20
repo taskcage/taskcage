@@ -72,6 +72,16 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - run: bash dev/container/run-e2e.sh
 
+  remote-container-e2e:
+    name: Remote TLS Capsule E2E
+    needs: changes
+    if: needs.changes.outputs.container == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: bash dev/container/run-remote-e2e.sh
+
   container-e2e-arm64:
     name: Containerized Java E2E (ARM64)
     needs: changes
