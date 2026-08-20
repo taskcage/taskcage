@@ -16,6 +16,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=rust-builder /workspace/target/release/taskcaged /usr/local/bin/taskcaged
+COPY --from=rust-builder /workspace/target/release/taskcage-exec /usr/local/libexec/taskcage/taskcage-exec
 COPY --from=rust-builder /workspace/target/release/ghost-tree /usr/local/libexec/taskcage/ghost-tree
 COPY --from=rust-builder /workspace/target/release/output-flood /usr/local/libexec/taskcage/output-flood
 COPY --from=rust-builder /workspace/target/release/memory-hog /usr/local/libexec/taskcage/memory-hog

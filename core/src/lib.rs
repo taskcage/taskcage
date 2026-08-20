@@ -1,9 +1,9 @@
 //! Backend-independent TaskCage execution contract.
 //!
-//! `taskcage-core` owns values that describe an immutable Capsule execution. The daemon and the
-//! private embedded helper are adapters around the execution implementation that will be moved into
-//! this crate incrementally. Transport, host admission policy and process supervision do not belong
-//! in this crate.
+//! `taskcage-core` owns values and Linux execution primitives for an immutable Capsule execution.
+//! The daemon and the private embedded helper are adapters around this implementation. Transport
+//! and host admission policy stay outside this crate; cgroup and process lifecycle primitives stay
+//! here so both backends share the same safety semantics.
 
 mod execution;
 
