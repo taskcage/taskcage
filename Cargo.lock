@@ -714,6 +714,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "taskcage-core"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "thiserror",
+]
+
+[[package]]
 name = "taskcage-fixtures"
 version = "0.1.0"
 
@@ -735,6 +743,7 @@ dependencies = [
  "serde_json_canonicalizer",
  "sha2",
  "tar",
+ "taskcage-core",
  "tempfile",
  "thiserror",
  "time",

@@ -1,5 +1,5 @@
 [workspace]
-members = ["daemon", "test-fixtures"]
+members = ["core", "daemon", "test-fixtures"]
 resolver = "2"
 
 [workspace.package]
