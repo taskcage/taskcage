@@ -7,5 +7,10 @@ public record CapsuleRequest(CapsuleIdentity capsule, ProfileRequest profileRequ
     public CapsuleRequest {
         Objects.requireNonNull(capsule, "capsule");
         Objects.requireNonNull(profileRequest, "profileRequest");
+        ProfileIdentity profile = profileRequest.profile();
+        if (!capsule.name().equals(profile.name()) || !capsule.version().equals(profile.version())) {
+            throw new IllegalArgumentException(
+                    "Capsule identity must match the v1 Profile identity exactly");
+        }
     }
 }

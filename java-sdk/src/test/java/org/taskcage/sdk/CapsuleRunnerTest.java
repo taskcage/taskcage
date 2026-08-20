@@ -28,7 +28,7 @@ class CapsuleRunnerTest {
         ProfileRequest profileRequest = new ProfileRequest(
                 profile, Map.of("label", new StringProfileInput("archive")));
         CapsuleRequest request = new CapsuleRequest(
-                new CapsuleIdentity("file-copy-capsule", "1.0.0"), profileRequest);
+                new CapsuleIdentity("file-copy", "1.0.0"), profileRequest);
         FinishedProfileTaskSnapshot snapshot = success(profile);
 
         CapsuleExecutionResult result = CapsuleRunner.external(new StubRuntime(snapshot))
@@ -45,13 +45,25 @@ class CapsuleRunnerTest {
     void externalRunnerDoesNotConvertWaitTimeout() {
         ProfileIdentity profile = new ProfileIdentity("file-copy", "1.0.0");
         CapsuleRequest request = new CapsuleRequest(
-                new CapsuleIdentity("file-copy-capsule", "1.0.0"),
+                new CapsuleIdentity("file-copy", "1.0.0"),
                 new ProfileRequest(profile, Map.of("label", new StringProfileInput("archive"))));
 
         assertThrows(
                 TimeoutException.class,
                 () -> CapsuleRunner.external(new StubRuntime(null))
                         .execute(request, Duration.ofSeconds(1)));
+    }
+
+    @Test
+    void rejectsCapsuleAndProfileIdentityMismatchBeforeExecution() {
+        ProfileRequest profileRequest = new ProfileRequest(
+                new ProfileIdentity("file-copy", "1.0.0"),
+                Map.of("label", new StringProfileInput("archive")));
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new CapsuleRequest(
+                        new CapsuleIdentity("other-capsule", "1.0.0"), profileRequest));
     }
 
     private static final class StubRuntime implements ProfileRuntime {
