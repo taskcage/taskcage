@@ -8,11 +8,10 @@ Runtime Package는 신뢰된 Linux 실행 파일과 필요한 library·license·
 이 cache의 이미 검증된 digest를 참조한다.
 
 > **릴리스 구분:** Runtime Package import와 정적 FFmpeg Profile 등록은 공개 daemon `0.4.0`에서 사용할 수
-> 있다. Local Bundle import와 `--bundle-cache-root`는 `taskcaged-v0.4.0` tag 이후 `main`에 구현됐지만 아직
-> 공개 daemon 릴리스에는 포함되지 않았으며, Bundle 기능의 최소 공개 version은 정해지지 않았다.
+> 있다. Local Capsule archive import와 `--bundle-cache-root` catalog는 daemon `0.5.0`에서 사용할 수 있다.
 
-`main`의 미출시 Bundle archive import와 signature 검증은 [Bundle 형식](bundle-format.md)에서 정의한다.
-Bundle 실행은 이 cache 계약을 우회하거나 Package를 mutable path로 실행하게 해서는 안 된다.
+Capsule archive import와 signature 검증은 [Bundle 형식](bundle-format.md)에서 정의한다. Capsule 실행은 이
+cache 계약을 우회하거나 Package를 mutable path로 실행하게 해서는 안 된다.
 
 지원 platform은 현재 `linux/x86_64/gnu`, `linux/aarch64/gnu`와 glibc다. Package architecture는 daemon이
 실행 중인 host architecture와 정확히 일치해야 하며, Package가 요구하는 최소 glibc version이 host보다 높으면
@@ -150,6 +149,6 @@ daemon은 시작할 때 등록 digest를 resolve하고 package `id`가 `org.task
 각 새 Task도 같은 digest의 manifest, platform, 전체 content를 다시 검증하고 고정 entrypoint descriptor를
 `execveat(AT_EMPTY_PATH)`로 실행한다. shell과 PATH lookup은 사용하지 않는다.
 
-`main`의 미출시 Bundle catalog 경로는 정적 digest flag 대신 `--bundle-cache-root /var/lib/taskcage`를
-사용한다. 설치된 Bundle catalog가 `ProfileRequest`의 name/version을 Runtime Package digest와 선언형
-argv로 해석한다. 이 flag는 공개 daemon `0.4.0`에서 사용할 수 없다.
+daemon `0.5.0`의 Capsule catalog 경로는 정적 digest flag 대신 `--bundle-cache-root /var/lib/taskcage`를
+사용한다. 설치된 Capsule catalog가 `ProfileRequest`의 name/version을 Runtime Package digest와 선언형
+argv로 해석한다.

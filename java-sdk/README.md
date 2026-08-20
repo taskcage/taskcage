@@ -2,17 +2,15 @@
 
 TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`에 Capsule Task를 제출·조회·취소하도록 제공하는 Java 17+ 라이브러리다. cgroup과 Local Protocol v1·v2, Remote Protocol v1의 세부 사항은 SDK 내부에 숨기고 Capsule, Profile, input/output data, 자원 예산, 상태와 실행 결과를 Java 타입으로 제공한다.
 
-> **상태:** `0.3.0`은 Maven Central에 공개된 최신 artifact다. 기존 Local UDS Raw Command·Profile을
-> 유지하면서 TLS 1.3 Remote Profile·Artifact API를 추가한다. Remote Profile 실행에는 `taskcaged` `0.4.0`
-> 이상이 필요하다. `0.x`는 초기 개발 버전이며 SDK는 Spring Boot에 의존하지 않는다.
+> **상태:** `0.4.0`은 Maven Central에 공개된 최신 artifact다. 기존 Local UDS Raw Command·Profile을
+> 유지하면서 Local·Remote Capsule API와 TLS 1.3 Remote Artifact API를 제공한다. Capsule 실행에는
+> `taskcaged` `0.5.0` 이상이 필요하다. `0.x`는 초기 개발 버전이며 SDK는 Spring Boot에 의존하지 않는다.
 
-> **다음 방향:** 현재 Raw Command API는 호환성을 위해 유지되지만, 다음 breaking 공개 계약의 주력 API는
-> Capsule/Profile 실행이다. Java 사용자는 Capsule 이름과 Profile이 선언한 typed input을 전달하며,
-> 실행 파일 경로와 argv를 직접 지정하지 않는다.
+> **Capsule 우선:** Raw Command API는 호환성을 위해 유지한다. 새 integration은 Capsule 이름과 Profile이
+> 선언한 typed input을 전달하며 실행 파일 경로와 argv를 직접 지정하지 않는다.
 
-`0.3.0`은 Local UDS transport, Raw Command, opt-in [Local Profile Core API v2](../docs/api-profile-v2.md)와
-인증된 Remote transport를 구현한다. Remote는 `RemoteTaskCageClient`로 별도 제공하며, Remote Raw Command는
-의도적으로 노출하지 않는다.
+`0.4.0`은 Local UDS transport, Raw Command, opt-in [Local Profile Core API v2](../docs/api-profile-v2.md),
+인증된 Remote transport와 Capsule runner를 구현한다. Remote Raw Command는 의도적으로 노출하지 않는다.
 
 ## Core SDK 역할
 
@@ -35,7 +33,8 @@ Java application
 backend 또는 daemon-backed External backend일 수 있지만, Capsule identity, typed `ProfileRequest`, 대기
 timeout, idempotency key와 cleanup-confirmed result의 의미는 동일해야 한다.
 
-현재 SDK는 기존 `ProfileRuntime`을 External backend로 연결하는 adapter를 제공한다.
+현재 SDK는 기존 `ProfileRuntime`을 Local External backend로 연결하고, TLS Remote에는
+`RemoteCapsuleRunner` adapter를 제공한다.
 
 ```java
 CapsuleRequest request = new CapsuleRequest(
@@ -66,11 +65,17 @@ Remote daemon에는 TLS 1.3과 service-account 인증이 필수다. Local UDS용
 try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(
         URI.create("taskcage+tls://taskcage.internal:7443"),
         ServiceCredentials.of("document-worker", Secret.fromEnvironment("TASKCAGE_CLIENT_SECRET")))) {
-    RemoteArtifactUpload source = client.upload(Path.of("input.mp3"), "audio/mpeg");
-    RemoteProfileTask task = client.submitProfile(new RemoteProfileRequest(
-        new ProfileIdentity("ffmpeg-audio-to-wav", "1.0.0"),
-        Map.of("source", source.asInput())));
-    RemoteProfileTaskSnapshot snapshot = client.getProfileResult(task.taskId());
+    RemoteArtifactUpload source = client.upload(Path.of("input.wav"), "audio/wav");
+    RemoteCapsuleExecutionResult result = RemoteCapsuleRunner.external(client).execute(
+        new RemoteCapsuleRequest(
+            new CapsuleIdentity("ffmpeg-audio-to-wav", "1.0.0"),
+            new RemoteProfileRequest(
+                new ProfileIdentity("ffmpeg-audio-to-wav", "1.0.0"),
+                Map.of(
+                    "source", source.asInput(),
+                    "sample_rate_hz", new RemoteInt64Input(16000),
+                    "channels", new RemoteInt64Input(1)))),
+        Duration.ofMinutes(2));
 }
 ```
 
@@ -78,10 +83,9 @@ try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(
 단 한 번만 소비된다. 제출 응답이 유실되면 같은 `clientRequestId`와 같은 `RemoteProfileRequest`로 재제출해야
 한다. output은 완료 snapshot의 `ManagedOutputArtifact`를 `download()`로 local `Path`에 받는다.
 
-현재 공개 릴리스의 FFmpeg reference workflow는 Raw Command의 자원 제한과 프로세스 트리 정리를 검증한다.
-다음 Capsule-first 사용자 경로의 목표는 Java 개발자가 10분 안에 Capsule archive를 import하고, 같은 Linux host의
-`taskcaged`에서 선언된 Profile input으로 작업 하나를 안전하게 실행하는 것이다.
-Hub는 이 흐름의 필수 구성요소가 아니다.
+FFmpeg Capsule reference workflow는 정상 실행, timeout, memory limit, cancel과 프로세스 트리 정리를
+검증한다. Java 개발자는 Capsule archive를 import한 `taskcaged`에 선언된 Profile input으로 작업을 안전하게
+실행한다. Hub는 이 흐름의 필수 구성요소가 아니다.
 
 ## 현재 구현 기반
 
@@ -151,7 +155,7 @@ resource override를 최종 검증한다. 언어별 SDK는 이 generic request�
 
 ## Local Raw Command 호환 API
 
-이 절은 현재 공개된 Local Protocol v1과 SDK `0.3.0`의 호환 API를 설명한다. 다음 Capsule-first 공개 계약의
+이 절은 현재 공개된 Local Protocol v1과 SDK `0.4.0`의 호환 API를 설명한다. Capsule-first 공개 계약의
 새 사용자 경로에는 포함하지 않는다. 기존 사용자는 daemon과 SDK의 지원 기간 동안 이 API를 계속 사용할 수
 있지만, 새 integration은 Capsule/Profile 경로를 사용해야 한다.
 
@@ -231,9 +235,9 @@ daemon과 Java Core SDK는 독립적으로 버전을 관리하고 배포한다. 
 버전 문자열이 아니라 양쪽이 지원하는 Protocol 버전으로 판단한다.
 
 ```text
-Daemon tag:     taskcaged-v0.4.0 (Remote Profile)
-Java SDK tag:   java-sdk-v0.3.0
-Java Core SDK:  0.3.0
+Daemon tag:     taskcaged-v0.5.0 (Capsule execution)
+Java SDK tag:   java-sdk-v0.4.0
+Java Core SDK:  0.4.0
 Protocol:       Local v1, v2; Remote v1
 ```
 
@@ -241,7 +245,7 @@ Maven Central에는 다음 좌표로 main, sources와 javadoc artifact가 서명
 
 ```kotlin
 dependencies {
-    implementation("org.taskcage:taskcage-java-sdk:0.3.0")
+    implementation("org.taskcage:taskcage-java-sdk:0.4.0")
 }
 ```
 
@@ -269,8 +273,8 @@ workflow로 검증한다.
    계약을 구현하고 가짜 daemon 단위 테스트와 실제 daemon reference E2E를 추가했다.
 3. **동기 실행 — 구현됨:** `run()`을 `TaskHandle` 계약 위에 구현하고 실제 daemon·FFmpeg E2E로 정상
    종료·Task wall-time timeout·출력 결과를 검증했다. 명시적 취소는 `TaskHandle.cancel()`을 사용한다.
-4. **배포 — 0.3.0 Maven Central 공개:** 서명된 main, sources와 javadoc artifact를
-   `org.taskcage:taskcage-java-sdk:0.3.0` 좌표로 공개했다.
+4. **배포 — 0.4.0 Maven Central 공개:** 서명된 main, sources와 javadoc artifact를
+   `org.taskcage:taskcage-java-sdk:0.4.0` 좌표로 공개했다.
 5. **첫 사용자 경로 — 구현됨:** FFmpeg reference workflow와 설치·daemon 연결·실행·문제 해결 문서를
    제공한다.
 
@@ -302,7 +306,7 @@ workflow로 검증한다.
 
 ```kotlin
 dependencies {
-    implementation("org.taskcage:taskcage-java-sdk:0.3.0")
+    implementation("org.taskcage:taskcage-java-sdk:0.4.0")
 }
 ```
 

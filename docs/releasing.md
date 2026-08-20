@@ -11,12 +11,12 @@ manifest를 새 patch 또는 minor 버전으로 변경하고 모든 예시의 �
 
 | 컴포넌트 | tag | 배포 workflow | 공개 위치 |
 |---|---|---|---|
-| daemon | `taskcaged-v0.4.0` | `Release taskcaged` | GitHub Release |
-| Java Core SDK | `java-sdk-v0.3.0` | `Release Java SDK` | Maven Central, GitHub Release |
+| daemon | `taskcaged-v0.5.0` | `Release taskcaged` | GitHub Release |
+| Java Core SDK | `java-sdk-v0.4.0` | `Release Java SDK` | Maven Central, GitHub Release |
 | FFmpeg Java Binding | `ffmpeg-binding-v0.1.0` | `Release FFmpeg Binding` | Maven Central, GitHub Release |
 
-컴포넌트는 독립적으로 배포하며 제품 버전이 같을 필요가 없다. Core SDK `0.3.0`은 Local Protocol v1·v2와
-Remote Protocol v1을 지원하며 Remote Profile 실행에는 daemon `0.4.0` 이상이 필요하다. FFmpeg Binding
+컴포넌트는 독립적으로 배포하며 제품 버전이 같을 필요가 없다. Core SDK `0.4.0`은 Local Protocol v1·v2와
+Remote Protocol v1을 지원하며 Capsule 실행에는 daemon `0.5.0` 이상이 필요하다. FFmpeg Binding
 `0.1.0`은 Core SDK `0.2.0`과 `ffmpeg-audio-to-wav@1.0.0` Profile을 제공하는 daemon `0.2.0`을 요구한다.
 연결 호환성은 제품 버전 문자열이 아니라 공통 Protocol version으로 판단한다.
 
@@ -25,10 +25,10 @@ Remote Protocol v1을 지원하며 Remote Profile 실행에는 daemon `0.4.0` �
 daemon GitHub prerelease에는 다음 파일을 게시한다.
 
 ```text
-taskcage-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
-taskcage-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-taskcage-v0.4.0-aarch64-unknown-linux-gnu.tar.gz
-taskcage-v0.4.0-aarch64-unknown-linux-gnu.tar.gz.sha256
+taskcage-v0.5.0-x86_64-unknown-linux-gnu.tar.gz
+taskcage-v0.5.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+taskcage-v0.5.0-aarch64-unknown-linux-gnu.tar.gz
+taskcage-v0.5.0-aarch64-unknown-linux-gnu.tar.gz.sha256
 install-taskcaged.sh
 ```
 
@@ -39,7 +39,7 @@ Java SDK는 Maven Central에 다음 좌표로 main JAR, sources JAR, Javadoc JAR
 PGP signature와 Maven Central이 요구하는 checksum을 포함한다.
 
 ```text
-org.taskcage:taskcage-java-sdk:0.3.0
+org.taskcage:taskcage-java-sdk:0.4.0
 org.taskcage:taskcage-ffmpeg-binding:0.1.0
 ```
 
@@ -101,9 +101,9 @@ daemon manifest version을 확인하고 모든 필수 CI가 통과한 `main` 커
 ```bash
 git switch main
 git pull --ff-only
-bash scripts/release/verify-version.sh taskcaged 0.4.0
-git tag --sign taskcaged-v0.4.0 -m "TaskCage daemon 0.4.0"
-git push origin taskcaged-v0.4.0
+bash scripts/release/verify-version.sh taskcaged 0.5.0
+git tag --sign taskcaged-v0.5.0 -m "TaskCage daemon 0.5.0"
+git push origin taskcaged-v0.5.0
 ```
 
 tag push는 `.github/workflows/release-daemon.yml`을 시작한다. workflow는 다음을 확인한다.
@@ -128,7 +128,7 @@ tag push는 `.github/workflows/release-daemon.yml`을 시작한다. workflow는 
 - 릴리스 노트에 사용자 변경, 지원 플랫폼, Protocol과 알려진 제한이 포함됨
 - 깨끗한 Ubuntu 24.04 x86-64와 ARM64 환경에서 각 archive smoke test가 통과함
 
-검토가 끝나면 GitHub Actions의 `Release taskcaged` workflow를 `tag=taskcaged-v0.4.0`으로 수동
+검토가 끝나면 GitHub Actions의 `Release taskcaged` workflow를 `tag=taskcaged-v0.5.0`으로 수동
 실행한다. `taskcaged-release` environment를 승인하면 workflow는 기존 Draft가 prerelease인지
 확인하고 공개한다. Draft 생성 뒤 workflow가 중단돼도 같은 tag로 공개 단계만 다시 실행할 수 있다.
 
@@ -141,9 +141,9 @@ Java SDK manifest version을 확인하고 `main`의 검증된 커밋에 독립 t
 ```bash
 git switch main
 git pull --ff-only
-bash scripts/release/verify-version.sh java-sdk 0.3.0
-git tag --sign java-sdk-v0.3.0 -m "TaskCage Java SDK 0.3.0"
-git push origin java-sdk-v0.3.0
+bash scripts/release/verify-version.sh java-sdk 0.4.0
+git tag --sign java-sdk-v0.4.0 -m "TaskCage Java SDK 0.4.0"
+git push origin java-sdk-v0.4.0
 ```
 
 tag push는 `.github/workflows/release-java-sdk.yml`의 prepare 경로를 시작한다. workflow는 tag signature,
@@ -166,7 +166,7 @@ Central deployment가 `VALIDATED`인지 확인하고 Draft release의 사용자�
 `Release Java SDK` workflow를 수동 실행한다.
 
 ```text
-tag: java-sdk-v0.3.0
+tag: java-sdk-v0.4.0
 central_deployment_id: Draft release에 기록된 UUID
 ```
 
@@ -211,7 +211,7 @@ Java SDK는 Central 상태가 `PUBLISHED`가 되고 실제 POM URL이 resolve되
 
 ```kotlin
 dependencies {
-    implementation("org.taskcage:taskcage-java-sdk:0.2.0")
+    implementation("org.taskcage:taskcage-java-sdk:0.4.0")
     implementation("org.taskcage:taskcage-ffmpeg-binding:0.1.0")
 }
 ```

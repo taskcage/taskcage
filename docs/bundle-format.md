@@ -5,9 +5,8 @@
 > 새 사용자 문서에서는 이 archive를 Capsule로 부른다.
 
 > **릴리스 상태:** 이 계약과 `taskcaged bundle import`, immutable local catalog, `--bundle-cache-root` 기반
-> Profile 실행은 `taskcaged-v0.4.0` tag 이후 `main`에 구현됐지만 아직 공개 daemon 릴리스에는 포함되지
-> 않았다. 공개 daemon `0.4.0`에는 `bundle` 명령과 `--bundle-cache-root`가 없으며, Bundle 기능을 포함할
-> 최소 공개 daemon version은 아직 정해지지 않았다. `0.4.0`의 FFmpeg Profile은
+> Profile 실행은 daemon `0.5.0`에서 공개된다. 공개 daemon `0.4.0`에는 `bundle` 명령과
+> `--bundle-cache-root`가 없으며, `0.4.0`의 FFmpeg Profile은
 > [정적 Runtime Package 등록](runtime-package-cache.md#daemon-040의-ffmpeg-profile-정적-등록)을 사용한다.
 >
 > **범위:** 이 문서는 `main`의 Local Bundle 실행 계약을 고정한다. Profile Task wire API는
@@ -191,11 +190,10 @@ Java SDK
   → Generic ProfileRequest
 ```
 
-## Local execution on `main` (unreleased)
+## Local execution
 
-This section applies only to a daemon built from `main` after `taskcaged-v0.4.0`; it is not an operator path for the
-released daemon `0.4.0`. After importing the referenced Runtime Package and Bundle into the same daemon-owned cache,
-start that development daemon with the Profile Artifact root and Bundle cache root.
+This section applies to daemon `0.5.0` and later. After importing the referenced Runtime Package and Bundle into the
+same daemon-owned cache, start the daemon with the Profile Artifact root and Bundle cache root.
 
 ```text
 --profile-artifact-root /var/lib/taskcage/artifacts
@@ -224,10 +222,9 @@ Application developer
   → Task 실행 결과와 output data 수신
 ```
 
-## Local import and catalog on `main` (unreleased)
+## Local import and catalog
 
-These commands are implemented on `main` but are not available in a public daemon release. When testing a daemon built
-from `main`, the operator first imports the referenced Runtime Package, then imports the Bundle archive using the same
+The operator first imports the referenced Runtime Package, then imports the Bundle archive using the same
 service UID:
 
 ```bash

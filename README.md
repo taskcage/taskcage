@@ -2,19 +2,15 @@
 
 TaskCage는 신뢰된 외부 프로세스를 작업 단위로 실행하고, Linux cgroup v2로 자원과 수명주기를 관리하는 경량 런타임이다.
 
-> **상태:** 현재 설치 가능한 최신 버전은 daemon `0.4.0`과 Java SDK `0.3.0`이다. daemon은
-> [`taskcaged-v0.4.0`](https://github.com/taskcage/taskcage/releases/tag/taskcaged-v0.4.0) GitHub Release에서,
-> Java SDK는 Maven Central의 `org.taskcage:taskcage-java-sdk:0.3.0` 좌표에서 설치한다. Local UDS의
-> Raw Command·Profile과 opt-in Remote TLS Profile·Artifact API를 제공한다. `0.x`는 초기 개발 버전이며
+> **상태:** 현재 설치 가능한 최신 버전은 daemon `0.5.0`과 Java SDK `0.4.0`이다. daemon은
+> [`taskcaged-v0.5.0`](https://github.com/taskcage/taskcage/releases/tag/taskcaged-v0.5.0) GitHub Release에서,
+> Java SDK는 Maven Central의 `org.taskcage:taskcage-java-sdk:0.4.0` 좌표에서 설치한다. Local UDS의
+> Raw Command·Profile·Capsule과 opt-in Remote TLS Capsule·Artifact API를 제공한다. `0.x`는 초기 개발 버전이며
 > 공개 API와 운영 계약이 이후 minor 버전에서 변경될 수 있다.
 
-> **다음 방향:** 다음 breaking 공개 계약은 Capsule 중심으로 전환한다. 현재 Local Raw Command는
-> 기존 릴리스의 호환 경로이며, 새 실행 경험은 Capsule import → 선언된 Profile 입력으로 Capsule을
-> 호출하는 흐름을 목표로 한다.
-
-> **`main` 개발 상태(미출시):** Capsule archive import, `--bundle-cache-root`와 catalog 기반 Profile 실행은
-> `taskcaged-v0.4.0` tag 이후 `main`에 구현됐다. 현재 설치 가능한 daemon `0.4.0`에는 이 기능과 명령이
-> 포함되지 않으며, Bundle 기능을 포함할 최소 공개 daemon version은 아직 정해지지 않았다.
+> **Capsule 실행:** daemon `0.5.0`은 signed Capsule archive import와 catalog 기반 Profile 실행을 제공한다.
+> Java SDK `0.4.0`은 Local `CapsuleRunner`와 Remote TLS `RemoteCapsuleRunner`를 제공한다. Local Raw Command는
+> 기존 사용자를 위한 호환 경로이며, 새 integration은 Capsule import → 선언된 typed input 실행 흐름을 사용한다.
 
 제품의 장기 방향과 표준 용어는 [제품 철학과 용어](docs/product-philosophy.md)에서 정의한다. 이 README는
 현재 설치 가능한 Local 및 opt-in Remote Public Alpha 범위를 설명한다.
@@ -103,7 +99,7 @@ Ubuntu 24.04 x86-64 또는 ARM64 host에서는 버전이 고정된 GitHub Releas
 바로 시작할 수 있다. 내려받은 스크립트의 내용을 확인한 뒤 root로 실행한다.
 
 ```bash
-VERSION=0.4.0
+VERSION=0.5.0
 RELEASE_URL="https://github.com/taskcage/taskcage/releases/download/taskcaged-v${VERSION}"
 
 curl --fail --location --output install-taskcaged.sh \
@@ -154,9 +150,9 @@ target/debug/taskcaged serve \
 
 상위 디렉터리와 서비스 계정은 배포 환경이 준비한다. 데몬은 소켓을 owner-only `0600`으로 생성한다. 위 값은 예시이며 프로토콜 기본값이 아니다.
 
-### daemon 0.4.0의 Opt-in Local Profile 설정
+### daemon 0.5.0의 Opt-in Local Profile 설정
 
-daemon `0.4.0`의 Local Profile은 기본적으로 꺼져 있다. 위의 두 Artifact 옵션을 **함께** 지정한 daemon만 정적
+daemon `0.5.0`의 Local Profile은 기본적으로 꺼져 있다. 위의 두 Artifact 옵션을 **함께** 지정한 daemon만 정적
 `file-copy@1.0.0` Profile과 Protocol v2 capability를 공개한다. 이 Profile은 Runtime Package, Bundle,
 임의 executable 또는 caller-provided argv를 허용하지 않는다.
 
@@ -179,14 +175,10 @@ daemon은 등록된 Package가 없거나 손상됐거나 host와 호환되지 �
 다시 검증하고 entrypoint descriptor를 고정한 채 shell과 PATH lookup 없이 실행한다. 자세한 cache와 정적
 등록 계약은 [Local Runtime Package cache](docs/runtime-package-cache.md)를 따른다.
 
-#### `main`의 미출시 Bundle catalog 경로
+#### Capsule catalog 경로
 
-아래 경로는 `taskcaged-v0.4.0` 이후 `main`에 구현된 개발 상태다. 공개 daemon `0.4.0`에서는 `bundle`
-명령과 `--bundle-cache-root`를 사용할 수 없다. Bundle 기능을 포함할 최소 공개 daemon version은 아직
-정해지지 않았다.
-
-`main` checkout에서 build한 daemon을 검증할 때는 Runtime Package와 signed Bundle을 같은 cache에 차례로
-import하고, Artifact 설정에 Bundle cache root를 지정한다.
+daemon `0.5.0`에서는 Runtime Package와 signed Capsule archive를 같은 cache에 차례로 import하고,
+Artifact 설정에 Capsule catalog cache root를 지정한다.
 
 ```bash
 sudo -u taskcage taskcaged import-package \
@@ -203,7 +195,7 @@ taskcaged serve \
   --bundle-cache-root /var/lib/taskcage
 ```
 
-이 `main` 경로에서 daemon은 요청한 Bundle이 없거나, Bundle이 참조한 Package가 손상됐거나 host와 호환되지
+이 경로에서 daemon은 요청한 Capsule이 없거나, Capsule이 참조한 Package가 손상됐거나 host와 호환되지
 않으면 Task를 시작하지 않는다. 새 Profile Task마다 Package를 다시 검증하고 entrypoint descriptor를 고정한
 채 선언된 argv만 shell과 PATH lookup 없이 실행한다.
 
@@ -228,11 +220,11 @@ cgroup fail-stop으로 `UNREADY`인 경우 종료 코드는 `0`이 아니다. Ub
 
 ## Java SDK 사용
 
-Java SDK `0.3.0`은 Maven Central에 공개됐다. Gradle 프로젝트에서는 다음 좌표를 추가한다.
+Java SDK `0.4.0`은 Maven Central에 공개됐다. Gradle 프로젝트에서는 다음 좌표를 추가한다.
 
 ```kotlin
 dependencies {
-    implementation("org.taskcage:taskcage-java-sdk:0.3.0")
+    implementation("org.taskcage:taskcage-java-sdk:0.4.0")
 }
 ```
 
@@ -287,8 +279,8 @@ bash integration-tests/preflight-fail-closed.sh
 bash integration-tests/cgroup-runner-smoke.sh
 bash integration-tests/ffmpeg-reference-workflow.sh
 bash integration-tests/release-artifact-smoke.sh \
-  0.4.0 path/to/taskcage-v0.4.0-x86_64-unknown-linux-gnu.tar.gz \
-  path/to/taskcage-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+  0.5.0 path/to/taskcage-v0.5.0-x86_64-unknown-linux-gnu.tar.gz \
+  path/to/taskcage-v0.5.0-x86_64-unknown-linux-gnu.tar.gz.sha256 \
   path/to/install-taskcaged.sh
 ```
 
@@ -316,14 +308,8 @@ bash integration-tests/release-artifact-smoke.sh \
 ## 단계별 제품 방향
 
 `0.1.0`은 Local UDS와 Raw Command 기준선을, `0.2.0`은 opt-in Local Profile·input/output data·Runtime Package를,
-`0.4.0` daemon과 `0.3.0` Java SDK는 인증된 Remote Profile·Artifact 전송을 추가했다. 이들은 현재
-설치 가능한 공개 계약이다.
-
-`main`에는 Capsule-first MVP의 기반인 Local Capsule archive import, Runtime Package 검증, generic
-`ProfileRequest`와 input/output data 처리가 구현됐다. 이 구현은 `taskcaged-v0.4.0` 이후에 병합됐으며
-아직 공개 daemon 릴리스에 포함되지 않았다. 다음 MVP 우선순위는 Docker Compose TLS daemon과 Java
-ExternalRunner를 통해 FFmpeg Capsule 한 개를 처음부터 끝까지 실행하는 개발 경험이다. 최소 릴리스
-version은 아직 정해지지 않았다.
+`0.4.0` daemon과 `0.3.0` Java SDK는 인증된 Remote Profile·Artifact 전송을 추가했다. `0.5.0` daemon과
+`0.4.0` Java SDK는 Capsule archive import, catalog 기반 Profile 실행과 TLS FFmpeg Capsule E2E를 추가한다.
 
 Capsule archive는 Execution Profile, Runtime Package ref + digest, 플랫폼·정책·무결성 정보를 담는
 불변 실행 계약이다. Package는 daemon cache에서 digest 기준으로 공유한다. 현재 archive와 schema의
