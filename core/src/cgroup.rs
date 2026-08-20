@@ -20,9 +20,9 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, RawFd};
-#[cfg(all(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
-#[cfg(all(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use serde::Serialize;
@@ -30,7 +30,7 @@ use thiserror::Error;
 #[cfg(target_os = "linux")]
 use tokio::time::sleep;
 
-#[cfg(all(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 use crate::cleanup_fault::{CleanupFaultPoint, CleanupFaults};
 #[cfg(target_os = "linux")]
 use crate::deadline::MonotonicDeadline;
@@ -46,7 +46,7 @@ const DELEGATE_SUBGROUP_ENV: &str = "TASKCAGE_CGROUP_DELEGATE_SUBGROUP";
 const MANAGER_CGROUP_NAME: &str = "manager";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StartupCgroupPlacement {
+pub enum StartupCgroupPlacement {
     DelegatedRoot,
     ExistingManager,
 }
@@ -94,7 +94,7 @@ pub enum CgroupPathError {
 
 #[cfg(target_os = "linux")]
 /// 명시 root가 없으면 systemd가 배치한 manager membership의 부모를 위임 root로 사용한다.
-pub(crate) fn configured_root_from_environment() -> Result<Option<PathBuf>, CgroupPathError> {
+pub fn configured_root_from_environment() -> Result<Option<PathBuf>, CgroupPathError> {
     if let Some(root) = std::env::var_os(CGROUP_ROOT_ENV) {
         return Ok(Some(PathBuf::from(root)));
     }
@@ -185,7 +185,7 @@ pub struct CgroupLimits {
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// 모든 cgroup 제한을 쓰고 같은 값으로 다시 읽은 뒤에만 만드는 내부 증거다.
-pub(crate) struct VerifiedCgroupLimits {
+pub struct VerifiedCgroupLimits {
     limits: CgroupLimits,
 }
 
@@ -195,12 +195,12 @@ impl VerifiedCgroupLimits {
         Self { limits }
     }
 
-    pub(crate) fn limits(self) -> CgroupLimits {
+    pub fn limits(self) -> CgroupLimits {
         self.limits
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_test(limits: CgroupLimits) -> Self {
+    #[cfg(target_os = "linux")]
+    pub fn for_test(limits: CgroupLimits) -> Self {
         Self::new(limits)
     }
 }
@@ -269,7 +269,7 @@ impl CgroupPaths {
 
     /// 시작 복구에서만 설정 root 또는 그 바로 아래 manager membership을 구분한다.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn resolve_startup(
+    pub fn resolve_startup(
         root_override: Option<&Path>,
     ) -> Result<(Self, StartupCgroupPlacement), CgroupPathError> {
         Self::resolve_with_policy(root_override, true)
@@ -330,7 +330,7 @@ impl CgroupPaths {
         &self.jobs
     }
 
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     pub(crate) fn for_test(root: PathBuf) -> Self {
         Self {
             mount: root.clone(),
@@ -425,7 +425,7 @@ fn parse_unified_membership(contents: &str) -> Result<PathBuf, CgroupPathError> 
     Ok(PathBuf::from(path))
 }
 
-pub(crate) fn validate_job_id(job_id: &str) -> Result<(), CgroupPathError> {
+pub fn validate_job_id(job_id: &str) -> Result<(), CgroupPathError> {
     let valid = !job_id.is_empty()
         && job_id.len() <= 64
         && job_id
@@ -454,23 +454,23 @@ const REQUIRED_CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
 /// 검증된 위임 영역에서 작업 cgroup을 만들고 관리한다.
 pub struct CgroupManager {
     paths: CgroupPaths,
-    #[cfg(test)]
+    #[cfg(target_os = "linux")]
     create_faults: Option<Arc<CgroupCreateFaults>>,
-    #[cfg(test)]
+    #[cfg(target_os = "linux")]
     cleanup_faults: Option<Arc<CleanupFaults>>,
 }
 
-#[cfg(all(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 #[derive(Debug, Default)]
-pub(crate) struct CgroupCreateFaults {
+pub struct CgroupCreateFaults {
     mode: AtomicU8,
     read_back_attempts: AtomicUsize,
     rollback_attempts: AtomicUsize,
 }
 
-#[cfg(all(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 impl CgroupCreateFaults {
-    pub(crate) fn inject_read_back_mismatch(&self, rollback_removal_fails: bool) {
+    pub fn inject_read_back_mismatch(&self, rollback_removal_fails: bool) {
         self.mode.store(
             if rollback_removal_fails { 2 } else { 1 },
             Ordering::Release,
@@ -481,11 +481,11 @@ impl CgroupCreateFaults {
         self.mode.swap(0, Ordering::AcqRel)
     }
 
-    pub(crate) fn read_back_attempts(&self) -> usize {
+    pub fn read_back_attempts(&self) -> usize {
         self.read_back_attempts.load(Ordering::Acquire)
     }
 
-    pub(crate) fn rollback_attempts(&self) -> usize {
+    pub fn rollback_attempts(&self) -> usize {
         self.rollback_attempts.load(Ordering::Acquire)
     }
 }
@@ -526,15 +526,15 @@ impl CgroupManager {
         }
         Ok(Self {
             paths,
-            #[cfg(test)]
+            #[cfg(target_os = "linux")]
             create_faults: None,
-            #[cfg(test)]
+            #[cfg(target_os = "linux")]
             cleanup_faults: None,
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn initialize_with_create_faults(
+    #[cfg(target_os = "linux")]
+    pub fn initialize_with_create_faults(
         environment: VerifiedEnvironment,
         faults: Arc<CgroupCreateFaults>,
     ) -> Result<Self, CgroupError> {
@@ -543,8 +543,8 @@ impl CgroupManager {
         Ok(manager)
     }
 
-    #[cfg(test)]
-    pub(crate) fn initialize_with_cleanup_faults(
+    #[cfg(target_os = "linux")]
+    pub fn initialize_with_cleanup_faults(
         environment: VerifiedEnvironment,
         faults: Arc<CleanupFaults>,
     ) -> Result<Self, CgroupError> {
@@ -558,7 +558,7 @@ impl CgroupManager {
     }
 
     pub fn create_job(&self, job_id: &str, limits: CgroupLimits) -> Result<JobCgroup, CgroupError> {
-        #[cfg(test)]
+        #[cfg(target_os = "linux")]
         if let Some(faults) = &self.create_faults {
             match faults.take_mode() {
                 1 => {
@@ -644,7 +644,7 @@ impl CgroupManager {
                 baseline,
                 verified_limits,
                 cleaned: false,
-                #[cfg(test)]
+                #[cfg(target_os = "linux")]
                 cleanup_faults: self.cleanup_faults.clone(),
             }),
             Err(error) => {
@@ -669,7 +669,7 @@ impl CgroupManager {
     }
 }
 
-#[cfg(all(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn configure_job_with_read_back_mismatch(
     path: &Path,
     limits: CgroupLimits,
@@ -729,7 +729,7 @@ pub struct JobCgroup {
     baseline: KernelEvents,
     verified_limits: VerifiedCgroupLimits,
     cleaned: bool,
-    #[cfg(test)]
+    #[cfg(target_os = "linux")]
     cleanup_faults: Option<Arc<CleanupFaults>>,
 }
 
@@ -747,22 +747,22 @@ impl JobCgroup {
         self.directory.as_raw_fd()
     }
 
-    pub(crate) fn verified_limits(&self) -> VerifiedCgroupLimits {
+    pub fn verified_limits(&self) -> VerifiedCgroupLimits {
         self.verified_limits
     }
 
-    pub(crate) fn is_cleaned(&self) -> bool {
+    pub fn is_cleaned(&self) -> bool {
         self.cleaned
     }
 
-    #[cfg(test)]
-    pub(crate) fn cleanup_faults(&self) -> Option<Arc<CleanupFaults>> {
+    #[cfg(target_os = "linux")]
+    pub fn cleanup_faults(&self) -> Option<Arc<CleanupFaults>> {
         self.cleanup_faults.clone()
     }
 
     pub fn is_populated(&self) -> Result<bool, CgroupError> {
         let path = self.path.join("cgroup.events");
-        #[cfg(test)]
+        #[cfg(target_os = "linux")]
         if self
             .cleanup_faults
             .as_ref()
@@ -791,7 +791,7 @@ impl JobCgroup {
     /// 대표 PID 하나가 아니라 작업 cgroup 아래의 모든 프로세스를 종료한다.
     pub fn kill_all(&self) -> Result<(), CgroupError> {
         let path = self.path.join("cgroup.kill");
-        #[cfg(test)]
+        #[cfg(target_os = "linux")]
         if self
             .cleanup_faults
             .as_ref()
@@ -806,10 +806,7 @@ impl JobCgroup {
         write_control(&path, "1\n")
     }
 
-    pub(crate) async fn wait_empty_until(
-        &self,
-        deadline: MonotonicDeadline,
-    ) -> Result<(), CgroupError> {
+    pub async fn wait_empty_until(&self, deadline: MonotonicDeadline) -> Result<(), CgroupError> {
         loop {
             if !self.is_populated()? {
                 return Ok(());
@@ -826,7 +823,7 @@ impl JobCgroup {
 
     pub fn stats(&self) -> Result<JobStats, CgroupError> {
         let cpu_path = self.path.join("cpu.stat");
-        #[cfg(test)]
+        #[cfg(target_os = "linux")]
         if self
             .cleanup_faults
             .as_ref()
@@ -857,7 +854,7 @@ impl JobCgroup {
     }
 
     /// 전체 종료, 빈 상태 확인, 통계 읽기, cgroup 제거 순서를 지킨다.
-    pub(crate) async fn finish_until(
+    pub async fn finish_until(
         &mut self,
         deadline: MonotonicDeadline,
     ) -> Result<JobStats, CgroupError> {
@@ -868,7 +865,7 @@ impl JobCgroup {
     }
 
     /// 이미 cgroup.kill을 보낸 제어 종료 경로는 같은 종료 명령을 중복 전송하지 않는다.
-    pub(crate) async fn finish_after_kill_until(
+    pub async fn finish_after_kill_until(
         &mut self,
         deadline: MonotonicDeadline,
     ) -> Result<JobStats, CgroupError> {
@@ -883,7 +880,7 @@ impl JobCgroup {
 
         // 통계 읽기에 실패해도 빈 cgroup 제거는 반드시 시도한다.
         let stats = self.stats();
-        #[cfg(test)]
+        #[cfg(target_os = "linux")]
         let removal = if self
             .cleanup_faults
             .as_ref()
@@ -898,7 +895,7 @@ impl JobCgroup {
             fs::remove_dir(&self.path)
                 .map_err(|source| cgroup_io_error("작업 cgroup 제거", &self.path, source))
         };
-        #[cfg(not(test))]
+        #[cfg(not(target_os = "linux"))]
         let removal = fs::remove_dir(&self.path)
             .map_err(|source| cgroup_io_error("작업 cgroup 제거", &self.path, source));
         if removal.is_ok() {
@@ -916,7 +913,7 @@ impl JobCgroup {
     }
 }
 
-#[cfg(all(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn injected_cleanup_error(
     operation: &'static str,
     path: &Path,
@@ -1054,7 +1051,7 @@ fn write_and_verify(path: &Path, value: &str) -> Result<(), CgroupError> {
     verify_read_back(path, value, actual.trim())
 }
 
-#[cfg(all(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn write_and_verify_with_injected_actual(
     path: &Path,
     value: &str,

@@ -273,7 +273,7 @@ impl SingleTaskLifecycle {
                 cpu_time_micros: completion.stats.cpu_usage_micros,
                 memory_peak_bytes: completion.stats.memory_peak_bytes,
             },
-            output: completion.output.into_task_output(),
+            output: crate::output::into_task_output(completion.output),
         };
 
         self.state = LifecycleState::Finished(payload);

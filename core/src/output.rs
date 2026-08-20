@@ -2,8 +2,6 @@
 
 use std::num::NonZeroUsize;
 
-use crate::protocol::TaskOutput;
-
 #[derive(Debug, Clone, Copy)]
 /// resource budget adapter가 검증한 두 stream 상한만 실행기에 전달한다.
 pub struct CaptureLimits {
@@ -51,18 +49,8 @@ pub struct CapturedOutput {
 }
 
 impl CapturedOutput {
-    pub fn into_task_output(self) -> TaskOutput {
-        let CapturedOutput { stdout, stderr } = self;
-        TaskOutput {
-            stdout_tail: decode_lossy(stdout.tail),
-            stderr_tail: decode_lossy(stderr.tail),
-            stdout_truncated: stdout.truncated,
-            stderr_truncated: stderr.truncated,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(
+    #[cfg(target_os = "linux")]
+    pub fn for_test(
         stdout_tail: Vec<u8>,
         stdout_truncated: bool,
         stderr_tail: Vec<u8>,
@@ -78,13 +66,6 @@ impl CapturedOutput {
                 truncated: stderr_truncated,
             },
         }
-    }
-}
-
-fn decode_lossy(bytes: Vec<u8>) -> String {
-    match String::from_utf8(bytes) {
-        Ok(output) => output,
-        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
     }
 }
 
@@ -207,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_utf8_is_replaced_only_when_building_task_output() {
+    fn invalid_utf8_is_preserved_until_backend_mapping() {
         let stdout = tail(3, &[&[0xff, b'a']]);
         assert_eq!(stdout.raw_tail(), &[0xff, b'a']);
         let captured = CapturedOutput {
@@ -215,12 +196,11 @@ mod tests {
             stderr: tail(1, &[]),
         };
 
-        let output = captured.into_task_output();
-        assert_eq!(output.stdout_tail, "\u{fffd}a");
+        assert_eq!(captured.stdout.raw_tail(), &[0xff, b'a']);
     }
 
     #[test]
-    fn split_multibyte_character_at_tail_start_uses_replacement_decoding() {
+    fn split_multibyte_character_at_tail_start_is_preserved() {
         let stdout = tail(2, &["€".as_bytes()]);
         assert_eq!(stdout.raw_tail(), &[0x82, 0xac]);
         let captured = CapturedOutput {
@@ -228,8 +208,7 @@ mod tests {
             stderr: tail(1, &[]),
         };
 
-        let output = captured.into_task_output();
-        assert!(output.stdout_tail.contains('\u{fffd}'));
+        assert_eq!(captured.stdout.raw_tail(), &[0x82, 0xac]);
     }
 
     #[test]
