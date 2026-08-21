@@ -5,7 +5,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,22 +48,23 @@ public final class ExecutionWorkerBenchmark {
             Path workDirectory = WORK_ROOT.resolve(mode.jsonName + "-" + scenario.jsonName + "-" + UUID.randomUUID());
             Files.createDirectories(workDirectory);
             long startedNanos = System.nanoTime();
-            List<TaskMetric> tasks = run(mode, scenario, concurrency, workDirectory);
+            List<TaskMetric> tasks = run(mode, scenario, batch, concurrency, workDirectory);
             if (batch >= warmupBatches) measured.add(new BatchMetric(elapsedMillis(startedNanos), tasks));
         }
         System.out.println(render(mode, scenario, concurrency, warmupBatches, measured));
     }
 
-    private static List<TaskMetric> run(Mode mode, Scenario scenario, int concurrency, Path workDirectory)
+    private static List<TaskMetric> run(Mode mode, Scenario scenario, int batch, int concurrency, Path workDirectory)
             throws InterruptedException, ExecutionException {
         ExecutorService pool = Executors.newFixedThreadPool(concurrency);
         try {
             List<Future<TaskMetric>> futures = new ArrayList<>();
             for (int index = 0; index < concurrency; index++) {
                 int taskIndex = index;
-                Callable<TaskMetric> task = mode == Mode.PROCESS_BUILDER
-                        ? () -> runProcessBuilder(scenario, taskIndex, workDirectory)
-                        : () -> runTaskCage(scenario, taskIndex, workDirectory);
+                Callable<TaskMetric> task = switch (mode) {
+                    case PROCESS_BUILDER -> () -> runProcessBuilder(scenario, batch, taskIndex, concurrency, workDirectory);
+                    case TASK_CAGE -> () -> runTaskCage(scenario, batch, taskIndex, concurrency, workDirectory);
+                };
                 futures.add(pool.submit(task));
             }
             List<TaskMetric> results = new ArrayList<>();
@@ -76,8 +76,10 @@ public final class ExecutionWorkerBenchmark {
         }
     }
 
-    private static TaskMetric runProcessBuilder(Scenario scenario, int index, Path workDirectory) throws Exception {
-        Command command = commandFor(scenario, index, workDirectory);
+    private static TaskMetric runProcessBuilder(Scenario scenario, int batch, int index, int concurrency,
+                                                Path workDirectory) throws Exception {
+        Scenario taskScenario = taskScenario(scenario, batch, index, concurrency);
+        Command command = commandFor(taskScenario, index, workDirectory);
         long startedNanos = System.nanoTime();
         List<String> processArguments = new ArrayList<>();
         processArguments.add(command.program.toString());
@@ -90,13 +92,13 @@ public final class ExecutionWorkerBenchmark {
 
         List<ProcessHandle> descendants = List.of();
         String termination;
-        if (scenario == Scenario.TIMEOUT_CHILD && command.readyPath != null) {
+        if (taskScenario == Scenario.TIMEOUT_CHILD && command.readyPath != null) {
             awaitReady(command.readyPath, Duration.ofSeconds(3));
             descendants = process.toHandle().descendants().toList();
             process.destroyForcibly();
             process.waitFor(5, TimeUnit.SECONDS);
             termination = "TIMED_OUT_ROOT_ONLY";
-        } else if (scenario == Scenario.MEMORY_LIMIT && index > 0) {
+        } else if (taskScenario == Scenario.MEMORY_LIMIT) {
             Thread.sleep(1_000);
             process.destroyForcibly();
             process.waitFor(5, TimeUnit.SECONDS);
@@ -110,13 +112,16 @@ public final class ExecutionWorkerBenchmark {
         descendants.forEach(handle -> {
             if (handle.isAlive()) handle.destroyForcibly();
         });
-        return new TaskMetric(elapsedMillis(startedNanos), termination, null, null, residual, true);
+        return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName, termination, null, null,
+                residual, residual == 0, taskScenario != Scenario.NORMAL || verifiedOutput(command));
     }
 
-    private static TaskMetric runTaskCage(Scenario scenario, int index, Path workDirectory) throws Exception {
-        Command command = commandFor(scenario, index, workDirectory);
+    private static TaskMetric runTaskCage(Scenario scenario, int batch, int index, int concurrency,
+                                          Path workDirectory) throws Exception {
+        Scenario taskScenario = taskScenario(scenario, batch, index, concurrency);
+        Command command = commandFor(taskScenario, index, workDirectory);
         long startedNanos = System.nanoTime();
-        ResourceBudget budget = budgetFor(scenario, index);
+        ResourceBudget budget = budgetFor(taskScenario);
         try (TaskCageClient client = TaskCageClient.connect(TaskCageClientConfig.builder()
                 .socketPath(Path.of(requiredEnv("TASKCAGE_SOCKET")))
                 .connectTimeout(Duration.ofSeconds(2))
@@ -126,30 +131,45 @@ public final class ExecutionWorkerBenchmark {
                     new ExternalCommand(command.program, command.arguments, workDirectory, Map.of()), budget),
                     Duration.ofSeconds(25));
             ExecutionResult result = finished.result();
-            return new TaskMetric(elapsedMillis(startedNanos), result.terminationReason().name(),
-                    result.usage().cpuTimeMicros(), result.usage().memoryPeakBytes(), 0, true);
+            return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName, result.terminationReason().name(),
+                    result.usage().cpuTimeMicros(), result.usage().memoryPeakBytes(), 0, true,
+                    taskScenario != Scenario.NORMAL || verifiedOutput(command));
         }
     }
 
-    private static ResourceBudget budgetFor(Scenario scenario, int index) {
-        long memory = scenario == Scenario.MEMORY_LIMIT && index > 0 ? 16L * 1024 * 1024 : 128L * 1024 * 1024;
-        Duration wallTime = scenario == Scenario.TIMEOUT_CHILD && index > 0 ? Duration.ofSeconds(1) : Duration.ofSeconds(15);
+    private static ResourceBudget budgetFor(Scenario scenario) {
+        long memory = scenario == Scenario.MEMORY_LIMIT ? 16L * 1024 * 1024 : 128L * 1024 * 1024;
+        Duration wallTime = scenario == Scenario.TIMEOUT_CHILD ? Duration.ofSeconds(1)
+                : scenario == Scenario.MEMORY_LIMIT ? Duration.ofSeconds(3) : Duration.ofSeconds(15);
         return new ResourceBudget(new CpuQuota(100_000, 100_000), memory, 32, wallTime, 4_096, 4_096);
     }
 
     private static Command commandFor(Scenario scenario, int index, Path workDirectory) {
-        if (scenario == Scenario.TIMEOUT_CHILD && index > 0) {
+        if (scenario == Scenario.TIMEOUT_CHILD) {
             Path ready = workDirectory.resolve("ghost-" + index + ".ready");
             return new Command(GHOST_TREE, List.of("--hold-parent", ready.toString()), ready);
         }
-        if (scenario == Scenario.MEMORY_LIMIT && index > 0) {
+        if (scenario == Scenario.MEMORY_LIMIT) {
             return new Command(MEMORY_HOG, List.of("67108864", "30"), null);
         }
         Path output = workDirectory.resolve("normal-" + index + ".wav");
         return new Command(FFMPEG, List.of(
                 "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-                "-f", "lavfi", "-i", "sine=frequency=1000:duration=1",
-                "-c:a", "pcm_s16le", output.toString()), null);
+                "-re", "-f", "lavfi", "-i", "sine=frequency=1000:duration=2",
+                "-c:a", "pcm_s16le", output.toString()), null, output);
+    }
+
+    private static Scenario taskScenario(Scenario requested, int batch, int index, int concurrency) {
+        if (requested == Scenario.NORMAL) return Scenario.NORMAL;
+        if (requested == Scenario.TIMEOUT_CHILD) return index == 0 ? Scenario.NORMAL : Scenario.TIMEOUT_CHILD;
+        if (requested == Scenario.MEMORY_LIMIT) return index == 0 ? Scenario.NORMAL : Scenario.MEMORY_LIMIT;
+
+        int position = Math.floorMod(batch * concurrency + index, 10);
+        return switch (position) {
+            case 0 -> Scenario.TIMEOUT_CHILD;
+            case 1 -> Scenario.MEMORY_LIMIT;
+            default -> Scenario.NORMAL;
+        };
     }
 
     private static void awaitReady(Path ready, Duration timeout) throws Exception {
@@ -166,6 +186,14 @@ public final class ExecutionWorkerBenchmark {
         return (int) handles.stream().filter(ProcessHandle::isAlive).count();
     }
 
+    private static boolean verifiedOutput(Command command) {
+        try {
+            return command.outputPath != null && Files.size(command.outputPath) > 44;
+        } catch (IOException exception) {
+            return false;
+        }
+    }
+
     private static long elapsedMillis(long startedNanos) {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
     }
@@ -173,13 +201,15 @@ public final class ExecutionWorkerBenchmark {
     private static String render(Mode mode, Scenario scenario, int concurrency, int warmupBatches,
                                  List<BatchMetric> batches) {
         List<TaskMetric> tasks = batches.stream().flatMap(batch -> batch.tasks.stream()).toList();
+        List<TaskMetric> normalTasks = tasks.stream().filter(TaskMetric::normalWorkload).toList();
         List<Long> batchLatencies = batches.stream().map(BatchMetric::latencyMillis).sorted().toList();
         List<Long> latencies = tasks.stream().map(TaskMetric::latencyMillis).sorted().toList();
+        List<Long> normalLatencies = normalTasks.stream().map(TaskMetric::latencyMillis).sorted().toList();
         Map<String, Integer> reasons = new LinkedHashMap<>();
         for (TaskMetric task : tasks) reasons.merge(task.termination, 1, Integer::sum);
         long totalMillis = batchLatencies.stream().mapToLong(Long::longValue).sum();
         long taskPeak = tasks.stream().map(TaskMetric::taskMemoryPeakBytes).filter(value -> value != null)
-                .mapToLong(Long::longValue).max().orElse(0);
+                .mapToLong(Long::longValue).max().orElse(-1);
         long taskCpu = tasks.stream().map(TaskMetric::taskCpuTimeMicros).filter(value -> value != null)
                 .mapToLong(Long::longValue).sum();
         int residual = tasks.stream().mapToInt(TaskMetric::residualProcesses).sum();
@@ -192,7 +222,11 @@ public final class ExecutionWorkerBenchmark {
                 + ",\"p95\":" + percentile(batchLatencies, 0.95) + ",\"max\":" + max(batchLatencies) + "}},"
                 + "\"tasks\":{\"submitted\":" + tasks.size() + ",\"latencyMs\":{\"p50\":"
                 + percentile(latencies, 0.50) + ",\"p95\":" + percentile(latencies, 0.95) + ",\"max\":"
-                + max(latencies) + "},\"terminationReasons\":" + reasonsJson(reasons) + "},"
+                + max(latencies) + "},\"normalTasks\":{\"submitted\":" + normalTasks.size()
+                + ",\"latencyMs\":{\"p50\":" + percentile(normalLatencies, 0.50) + ",\"p95\":"
+                + percentile(normalLatencies, 0.95) + ",\"max\":" + max(normalLatencies)
+                + "},\"outputsVerified\":" + normalTasks.stream().allMatch(TaskMetric::outputVerified)
+                + "},\"terminationReasons\":" + reasonsJson(reasons) + "},"
                 + "\"taskResources\":{\"memoryPeakBytes\":" + taskPeak + ",\"cpuTimeMicros\":" + taskCpu + "},"
                 + "\"executorContainer\":{\"memoryPeakBytes\":" + cgroupMemoryPeak()
                 + ",\"cpuUsageMicros\":" + cgroupCpuUsageMicros() + "},"
@@ -257,24 +291,34 @@ public final class ExecutionWorkerBenchmark {
         static Mode parse(String value) { return switch (value) {
             case "processbuilder" -> PROCESS_BUILDER;
             case "taskcage" -> TASK_CAGE;
-            default -> throw new IllegalArgumentException("BENCHMARK_MODE must be processbuilder or taskcage");
+            default -> throw new IllegalArgumentException(
+                    "BENCHMARK_MODE must be processbuilder or taskcage");
         }; }
     }
 
     private enum Scenario {
-        NORMAL("normal"), TIMEOUT_CHILD("timeout_child"), MEMORY_LIMIT("memory_limit");
+        NORMAL("normal"), TIMEOUT_CHILD("timeout_child"), MEMORY_LIMIT("memory_limit"),
+        MIXED_FAILURE("mixed_failure");
         private final String jsonName;
         Scenario(String jsonName) { this.jsonName = jsonName; }
         static Scenario parse(String value) { return switch (value) {
             case "normal" -> NORMAL;
             case "timeout_child" -> TIMEOUT_CHILD;
             case "memory_limit" -> MEMORY_LIMIT;
+            case "mixed_failure" -> MIXED_FAILURE;
             default -> throw new IllegalArgumentException("unknown BENCHMARK_SCENARIO: " + value);
         }; }
     }
 
-    private record Command(Path program, List<String> arguments, Path readyPath) {}
+    private record Command(Path program, List<String> arguments, Path readyPath, Path outputPath) {
+        private Command(Path program, List<String> arguments, Path readyPath) {
+            this(program, arguments, readyPath, null);
+        }
+    }
     private record BatchMetric(long latencyMillis, List<TaskMetric> tasks) {}
-    private record TaskMetric(long latencyMillis, String termination, Long taskCpuTimeMicros, Long taskMemoryPeakBytes,
-                              int residualProcesses, boolean cleanupConfirmed) {}
+    private record TaskMetric(long latencyMillis, String workload, String termination, Long taskCpuTimeMicros,
+                              Long taskMemoryPeakBytes, int residualProcesses,
+                              boolean cleanupConfirmed, boolean outputVerified) {
+        private boolean normalWorkload() { return workload.equals(Scenario.NORMAL.jsonName); }
+    }
 }
