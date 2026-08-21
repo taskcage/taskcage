@@ -51,14 +51,12 @@ FROM eclipse-temurin:17-jdk-jammy AS java-e2e
 
 WORKDIR /workspace
 COPY java-sdk ./java-sdk
-COPY java-bindings ./java-bindings
 COPY protocol-fixtures ./protocol-fixtures
 COPY daemon/tests/data/remote-root.pem ./daemon/tests/data/remote-root.pem
-RUN ./java-sdk/gradlew -p ./java-sdk test e2eTestClasses remoteE2eTestClasses --no-daemon \
-    && ./java-sdk/gradlew -p ./java-bindings/ffmpeg test bindingE2eTestClasses --no-daemon
+RUN ./java-sdk/gradlew -p ./java-sdk test e2eTestClasses remoteE2eTestClasses --no-daemon
 
 WORKDIR /workspace
-CMD ["/bin/bash", "-c", "./java-sdk/gradlew -p ./java-sdk test e2eTest --rerun-tasks --no-daemon --offline && ./java-sdk/gradlew -p ./java-bindings/ffmpeg test bindingE2eTest --rerun-tasks --no-daemon --offline"]
+CMD ["/bin/bash", "-c", "./java-sdk/gradlew -p ./java-sdk test e2eTest --rerun-tasks --no-daemon --offline"]
 
 FROM java-e2e AS java-remote-e2e
 
@@ -68,7 +66,6 @@ FROM eclipse-temurin:17-jdk-jammy AS ffmpeg-example
 
 WORKDIR /workspace
 COPY java-sdk ./java-sdk
-COPY java-bindings ./java-bindings
 COPY examples/ffmpeg-java ./examples/ffmpeg-java
 RUN ./java-sdk/gradlew -p ./examples/ffmpeg-java installDist --no-daemon
 

@@ -14,7 +14,7 @@ TaskCage Java SDK는 Java 애플리케이션이 Linux 호스트의 `taskcaged`�
 
 ## Core SDK 역할
 
-이 모듈은 특정 외부 도구를 위한 Binding이 아니라 **TaskCage Java Core SDK**다. Java 객체와
+이 모듈은 특정 외부 도구 전용 API가 아니라 **TaskCage Java Core SDK**다. Java 객체와
 Local Protocol v1·v2와 Remote Protocol v1 사이를 변환하고, `taskcaged` 연결과 Task 생명주기를 공통 API로 제공한다.
 
 ```text
@@ -33,7 +33,7 @@ Java application
 backend 또는 daemon-backed External backend일 수 있지만, Capsule identity, typed Capsule input, 대기
 timeout, idempotency key와 cleanup-confirmed result의 의미는 동일해야 한다.
 
-현재 SDK는 기존 `ProfileRuntime`을 Local External backend로 연결하고, TLS Remote에는
+현재 SDK는 Local Profile API를 Local External backend로 연결하고, TLS Remote에는
 `RemoteCapsuleRunner` adapter를 제공한다.
 
 ```java
@@ -113,16 +113,12 @@ FFmpeg Capsule reference workflow는 정상 실행, timeout, memory limit, cance
 - 실제 daemon의 Profile 실행·Artifact publish·조회·멱등성과 사전 실행 오류를 검증하는 Linux E2E
 
 Profile API는 daemon capability의 `protocolVersions`에 `2`가 있을 때만 요청을 보내며 Raw Command로
-fallback하지 않는다. Core E2E는 opt-in `file-copy@1.0.0` Profile로 범용 계약을 검증한다. 현재 공개된
-FFmpeg convenience module은 기존 사용자를 위한 호환 artifact이며, Capsule Profile schema를 직접 사용하는
-새 공개 경로에서는 필수 구성요소가 아니다.
+fallback하지 않는다. Core E2E는 opt-in `file-copy@1.0.0` Profile와 FFmpeg Capsule로 범용 계약을 검증한다.
 
 ## Local Profile API
 
 generic Core API는 실행 파일 경로나 argv 대신 설치된 Profile identity와 typed input을 전달한다.
-언어별 SDK 편의 API는 연결·제출·조회·취소 전체 API가 아니라 동기 Profile 실행 두 경로만 제공하는
-`ProfileRuntime`에 의존할 수 있다. `TaskCageClient`가 이 계약을 구현하며 runtime과 client lifecycle은 항상
-호출자가 소유한다.
+`TaskCageClient`가 제출·조회·취소와 동기 실행을 제공하며 client lifecycle은 항상 호출자가 소유한다.
 
 ```java
 ProfileRequest request = new ProfileRequest(
@@ -153,8 +149,7 @@ Artifact root, 실행 파일, working directory 또는 output file name을 선�
 
 다음 Capsule-first 공개 계약에서 `ProfileRequest`는 Capsule manifest가 등록한 Profile만 선택한다. Core SDK는
 Capsule의 signature나 Package를 신뢰하지 않으며, daemon이 Capsule allowlist, Package digest, input schema와
-resource override를 최종 검증한다. 언어별 SDK는 이 generic request를 해당 언어의 typed input/output API로
-노출하는 선택적 편의 계층이다. 자세한 계약은 [Capsule archive 형식](../docs/bundle-format.md)을 따른다.
+resource override를 최종 검증한다. 자세한 계약은 [Capsule archive 형식](../docs/bundle-format.md)을 따른다.
 
 현재 호출자는 필요할 때 자원 예산을 override하고 `run()`으로 동기 실행하거나 `TaskHandle`로 상태
 조회·완료 대기·취소를 수행할 수 있다. SDK는 Maven Central의 공개 좌표로 설치할 수 있다.
@@ -258,7 +253,7 @@ dependencies {
 ### FFmpeg Raw Command reference
 
 [FFmpeg Local Raw Command reference](../docs/reference-ffmpeg.md)는 Core SDK와 Ubuntu FFmpeg package만
-사용한다. 별도 FFmpeg Profile Binding을 만들지 않으며, 설치부터 변환 결과 확인까지 하나의 반복 가능한
+사용한다. 별도 FFmpeg 전용 Java artifact를 만들지 않으며, 설치부터 변환 결과 확인까지 하나의 반복 가능한
 workflow로 검증한다.
 
 예제는 최소한 다음을 보여준다.
