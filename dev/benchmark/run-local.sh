@@ -6,6 +6,7 @@ compose=(docker compose --file "${script_dir}/compose.yml" --profile benchmark)
 result_dir="${script_dir}/results"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 result_file="${result_dir}/local-${timestamp}.json"
+report_file="${result_dir}/report-local-${timestamp}.html"
 concurrency="${BENCHMARK_CONCURRENCY:-2}"
 max_concurrent_tasks="${BENCHMARK_MAX_CONCURRENT_TASKS:-${concurrency}}"
 scenarios="${BENCHMARK_SCENARIOS:-normal timeout_child memory_limit}"
@@ -70,4 +71,6 @@ for scenario in ${scenarios}; do
 done
 printf '\n  ]\n}\n' >>"${result_file}"
 
+python3 "${script_dir}/render-report.py" "${result_file}" "${report_file}"
+printf 'JSON: %s\nHTML: %s\n' "${result_file}" "${report_file}"
 cat "${result_file}"
