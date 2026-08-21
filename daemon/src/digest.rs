@@ -55,7 +55,7 @@ impl FromStr for Sha256Digest {
         }
 
         let mut bytes = [0_u8; 32];
-        for (index, chunk) in hexadecimal.as_bytes().chunks_exact(2).enumerate() {
+        for (index, chunk) in hexadecimal.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             bytes[index] = (hex_value(chunk[0]) << 4) | hex_value(chunk[1]);
         }
         Ok(Self(bytes))
