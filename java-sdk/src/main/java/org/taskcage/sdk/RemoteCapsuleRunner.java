@@ -1,5 +1,6 @@
 package org.taskcage.sdk;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.UUID;
@@ -42,5 +43,34 @@ public final class RemoteCapsuleRunner {
             UUID clientRequestId, RemoteCapsuleRequest request, Duration waitTimeout)
             throws InterruptedException, TimeoutException {
         return submit(clientRequestId, request).await(waitTimeout);
+    }
+
+    /**
+     * Uploads a caller-owned input file, executes the Capsule, and downloads its declared output on success.
+     *
+     * <p>Transfer and execution use this runner's existing authenticated TLS client. Local file paths never cross
+     * the daemon boundary; the daemon sees only its managed input Artifact reference.
+     */
+    public RemoteCapsuleExecutionResult execute(RemoteCapsuleFileRequest request, Duration waitTimeout)
+            throws IOException, InterruptedException, TimeoutException {
+        Objects.requireNonNull(request, "request");
+        RemoteArtifactUpload upload = client.upload(request.inputFile(), request.inputMediaType());
+        java.util.Map<String, RemoteProfileInputValue> inputs = new java.util.TreeMap<>(request.inputs());
+        inputs.put(request.inputSlot(), upload.asInput());
+        RemoteCapsuleExecutionResult result = execute(new RemoteCapsuleRequest(
+                request.capsule(),
+                new RemoteProfileRequest(
+                        new ProfileIdentity(request.capsule().name(), request.capsule().version()),
+                        inputs,
+                        request.resourceOverrides())), waitTimeout);
+        if (result.outcome() == ProfileOutcome.SUCCEEDED) {
+            ManagedOutputArtifact output = result.profileTask().artifacts().get(request.outputSlot());
+            if (output == null) {
+                throw new TaskCageProtocolException(
+                        "successful Capsule result did not contain output Artifact " + request.outputSlot());
+            }
+            client.download(output, request.outputFile());
+        }
+        return result;
     }
 }

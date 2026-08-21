@@ -71,23 +71,21 @@ Remote daemon에는 TLS 1.3과 service-account 인증이 필수다. Local UDS용
 try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(
         URI.create("taskcage+tls://taskcage.internal:7443"),
         ServiceCredentials.of("document-worker", Secret.fromEnvironment("TASKCAGE_CLIENT_SECRET")))) {
-    RemoteArtifactUpload source = client.upload(Path.of("input.wav"), "audio/wav");
     RemoteCapsuleExecutionResult result = RemoteCapsuleRunner.external(client).execute(
-        new RemoteCapsuleRequest(
-            new CapsuleIdentity("ffmpeg-audio-to-wav", "1.0.0"),
-            new RemoteProfileRequest(
-                new ProfileIdentity("ffmpeg-audio-to-wav", "1.0.0"),
-                Map.of(
-                    "source", source.asInput(),
-                    "sample_rate_hz", new RemoteInt64Input(16000),
-                    "channels", new RemoteInt64Input(1)))),
+        RemoteCapsuleFileRequest.builder("ffmpeg-audio-to-wav", "1.0.0")
+            .inputFile("source", Path.of("input.wav"), "audio/wav")
+            .int64("sample_rate_hz", 16_000)
+            .int64("channels", 1)
+            .outputFile("audio", Path.of("output.wav"))
+            .build(),
         Duration.ofMinutes(2));
 }
 ```
 
-`upload`은 daemon이 준 chunk 상한을 따르고 digest를 검증한다. input Artifact는 첫 수락된 Profile Task에
-단 한 번만 소비된다. 제출 응답이 유실되면 같은 `clientRequestId`와 같은 `RemoteProfileRequest`로 재제출해야
-한다. output은 완료 snapshot의 `ManagedOutputArtifact`를 `download()`로 local `Path`에 받는다.
+`RemoteCapsuleFileRequest`는 같은 TLS 연결에서 input `Path`를 upload하고, daemon-issued Artifact reference로
+Capsule을 실행한 뒤 성공한 output Artifact를 지정한 local `Path`로 download한다. Local file paths 자체는
+daemon으로 전송되지 않는다. 저수준 `upload`, `RemoteCapsuleRequest`, `download` API도 재시도나 고급 흐름을
+위해 그대로 제공한다.
 
 FFmpeg Capsule reference workflow는 정상 실행, timeout, memory limit, cancel과 프로세스 트리 정리를
 검증한다. Java 개발자는 Capsule archive를 import한 `taskcaged`에 선언된 Profile input으로 작업을 안전하게

@@ -70,16 +70,18 @@ class RemoteTlsDaemonContractTest {
         try {
             Files.write(source, wave(8_000));
             try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(options())) {
-                RemoteArtifactUpload uploaded = client.upload(source, "audio/wav");
                 RemoteCapsuleExecutionResult result = RemoteCapsuleRunner.external(client).execute(
-                        capsuleRequest(uploaded, ProfileResourceOverrides.none()), Duration.ofSeconds(20));
+                        RemoteCapsuleFileRequest.builder("ffmpeg-audio-to-wav", "1.0.0")
+                                .inputFile("source", source, "audio/wav")
+                                .int64("sample_rate_hz", 16_000)
+                                .int64("channels", 1)
+                                .outputFile("audio", destination)
+                                .build(),
+                        Duration.ofSeconds(20));
 
                 assertEquals(ProfileOutcome.SUCCEEDED, result.outcome());
                 assertEquals(TerminationReason.EXITED, result.execution().terminationReason());
                 assertTrue(result.cleanupConfirmed());
-                ManagedOutputArtifact output = result.profileTask().artifacts().get("audio");
-                assertEquals("audio/wav", output.mediaType());
-                client.download(output, destination);
                 byte[] bytes = Files.readAllBytes(destination);
                 assertArrayEquals(new byte[] {'R', 'I', 'F', 'F'}, java.util.Arrays.copyOfRange(bytes, 0, 4));
                 assertArrayEquals(new byte[] {'W', 'A', 'V', 'E'}, java.util.Arrays.copyOfRange(bytes, 8, 12));
