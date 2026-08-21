@@ -30,7 +30,7 @@ class CapsuleRunnerTest {
                 .build();
         FinishedProfileTaskSnapshot snapshot = success(profile);
 
-        CapsuleExecutionResult result = CapsuleRunner.external(new StubRuntime(snapshot))
+        CapsuleExecutionResult result = CapsuleRunner.external(new StubClient(snapshot))
                 .execute(UUID.randomUUID(), request, Duration.ofSeconds(1));
 
         assertEquals(request.capsule(), result.capsule());
@@ -49,7 +49,7 @@ class CapsuleRunnerTest {
 
         assertThrows(
                 TimeoutException.class,
-                () -> CapsuleRunner.external(new StubRuntime(null))
+                () -> CapsuleRunner.external(new StubClient(null))
                         .execute(request, Duration.ofSeconds(1)));
     }
 
@@ -74,10 +74,10 @@ class CapsuleRunnerTest {
                         .build());
     }
 
-    private static final class StubRuntime implements ProfileRuntime {
+    private static final class StubClient implements TaskCageClient {
         private final FinishedProfileTaskSnapshot snapshot;
 
-        private StubRuntime(FinishedProfileTaskSnapshot snapshot) {
+        private StubClient(FinishedProfileTaskSnapshot snapshot) {
             this.snapshot = snapshot;
         }
 
@@ -95,6 +95,36 @@ class CapsuleRunnerTest {
                 UUID clientRequestId, ProfileRequest request, Duration waitTimeout)
                 throws TimeoutException {
             return run(request, waitTimeout);
+        }
+
+        @Override
+        public TaskCageCapabilities capabilities() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public TaskSubmission submit(TaskSpec task) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public TaskSubmission submit(UUID clientRequestId, TaskSpec task) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public TaskSnapshot getTask(UUID taskId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public TaskCancellation cancelTask(UUID taskId) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void close() {
+            // Test client owns no resources.
         }
     }
 

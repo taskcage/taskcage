@@ -27,25 +27,25 @@ public interface CapsuleRunner extends AutoCloseable {
         // Backends with resources override this method. Stateless runners need no cleanup.
     }
 
-    /** Adapts the current daemon-backed ProfileRuntime to the Capsule contract. */
-    static CapsuleRunner external(ProfileRuntime runtime) {
-        Objects.requireNonNull(runtime, "runtime");
-        return new ExternalCapsuleRunner(runtime);
+    /** Adapts a daemon-backed local client to the Capsule contract. */
+    static CapsuleRunner external(TaskCageClient client) {
+        Objects.requireNonNull(client, "client");
+        return new ExternalCapsuleRunner(client);
     }
 
     /** Current daemon-backed adapter; EmbeddedRunner is introduced in the next phase. */
     final class ExternalCapsuleRunner implements CapsuleRunner {
-        private final ProfileRuntime runtime;
+        private final TaskCageClient client;
 
-        private ExternalCapsuleRunner(ProfileRuntime runtime) {
-            this.runtime = runtime;
+        private ExternalCapsuleRunner(TaskCageClient client) {
+            this.client = client;
         }
 
         @Override
         public CapsuleExecutionResult execute(CapsuleRequest request, Duration waitTimeout)
                 throws InterruptedException, TimeoutException {
             Objects.requireNonNull(request, "request");
-            return result(request, runtime.run(request.toProfileRequest(), waitTimeout));
+            return result(request, client.run(request.toProfileRequest(), waitTimeout));
         }
 
         @Override
@@ -56,7 +56,7 @@ public interface CapsuleRunner extends AutoCloseable {
             Objects.requireNonNull(request, "request");
             return result(
                     request,
-                    runtime.run(clientRequestId, request.toProfileRequest(), waitTimeout));
+                    client.run(clientRequestId, request.toProfileRequest(), waitTimeout));
         }
 
         private static CapsuleExecutionResult result(
