@@ -31,9 +31,6 @@ case "${release_component}" in
   java-sdk)
     manifest_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' java-sdk/build.gradle.kts | head -n 1)"
     ;;
-  ffmpeg-binding)
-    manifest_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' java-bindings/ffmpeg/build.gradle.kts | head -n 1)"
-    ;;
   *)
     fail "unsupported release component: ${release_component}"
     ;;

@@ -181,8 +181,8 @@ Bundle과 분리된 digest cache entry로 검증·저장한다. 큰 Package는 l
 
 ## 언어별 SDK 관계
 
-언어별 SDK는 Capsule의 Profile schema를 해당 언어의 typed input/output API로 노출하는 선택적 편의 계층이다.
-프로세스별 Binding artifact가 Capsule 실행의 필수 구성요소는 아니다.
+언어별 SDK는 Capsule의 Profile schema를 공통 input/output API로 노출한다. 프로세스별 전용 artifact는
+Capsule 실행의 필수 구성요소가 아니다.
 
 ```text
 Java SDK

@@ -74,7 +74,7 @@ Execution Profile은 어떤 도구를 어떤 입력으로, 어떤 자원 정책 
 않는 argv와 Task의 cgroup 경계를 구성한다.
 
 일반 사용자는 Capsule 이름과 Profile이 선언한 입력으로 의미 있는 작업을 호출한다. 언어별 SDK는
-동일한 Profile schema를 각 언어의 값 객체로 노출하는 편의 계층이며, 프로세스별 Binding을 제품의
+동일한 Profile schema를 각 언어의 공통 값 객체로 노출하며, 프로세스별 전용 artifact를 제품의
 필수 개념으로 만들지 않는다. 다음 Capsule-first 공개 계약에는 실행 파일과 argv를 직접 지정하는
 Raw Command를 포함하지 않는다. 현재 Local Raw Command는 기존 공개 릴리스의 호환 경로이며, 제한을
 우회하는 경로는 아니다.
@@ -121,7 +121,7 @@ fail-stop과 시작 복구를 선택한다.
 
 Capsule은 공식 도구 목록이 아니라 외부 제작자도 만들 수 있는 배포 단위다. 제작자는 Runtime Package와
 Execution Profile을 만들고, manifest·digest·서명으로 하나의 실행 계약을 배포한다. 언어별 SDK는 이
-선언된 schema를 공통 입력·출력 API로 노출하며, 특정 프로세스마다 별도 Binding을 요구하지 않는다.
+선언된 schema를 공통 입력·출력 API로 노출하며, 특정 프로세스마다 별도 artifact를 요구하지 않는다.
 
 ```text
 Capsule

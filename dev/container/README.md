@@ -81,16 +81,16 @@ upload/task input staging과 임시 output을 직접 검사한다. 관련 파일
 일반 CI의 `Remote TLS Capsule E2E` job이 이 전체 명령을 깨끗한 Compose volume에서 실행한다.
 인증서와 secret은 test fixture 전용이며 운영 credential이나 인증서로 재사용하면 안 된다.
 
-## FFmpeg Binding 예제
+## FFmpeg Capsule 예제
 
-다음 명령은 실제 FFmpeg Binding 예제 하나만 실행하고 결과 Artifact 경로를 출력한다.
+다음 명령은 generic Capsule API를 사용하는 FFmpeg 예제 하나를 실행하고 결과 Artifact 경로를 출력한다.
 
 ```bash
 bash dev/container/run-ffmpeg-example.sh
 ```
 
 예제 코드는 [`examples/ffmpeg-java`](../../examples/ffmpeg-java/README.md)에 있다. 애플리케이션은 FFmpeg
-실행 파일이나 argv를 전달하지 않고 typed request만 Binding에 전달한다.
+실행 파일이나 argv를 전달하지 않고 Capsule 이름과 typed input만 전달한다.
 
 ## 권한과 제한
 

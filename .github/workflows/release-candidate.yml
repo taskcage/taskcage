@@ -65,9 +65,7 @@ jobs:
         run: |
           bash scripts/release/verify-version.sh taskcaged "${DAEMON_VERSION}"
           java_sdk_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' java-sdk/build.gradle.kts | head -n 1)"
-          ffmpeg_binding_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' java-bindings/ffmpeg/build.gradle.kts | head -n 1)"
           bash scripts/release/verify-version.sh java-sdk "${java_sdk_version}"
-          bash scripts/release/verify-version.sh ffmpeg-binding "${ffmpeg_binding_version}"
       - name: Build daemon archive and checksum
         run: bash scripts/release/build-daemon-archive.sh "${DAEMON_VERSION}" dist
       - name: Build Java release candidates and verify a clean external consumer
