@@ -1,10 +1,12 @@
 package org.taskcage.sdk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
+import java.net.SocketTimeoutException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -12,6 +14,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.LockSupport;
 import org.junit.jupiter.api.Test;
 
 final class RemoteCapsuleRunnerTest {
@@ -102,6 +106,35 @@ final class RemoteCapsuleRunnerTest {
         assertEquals(2, client.downloadCalls);
         assertEquals(client.output, client.downloadedArtifact);
         assertEquals(FILE_REQUEST.outputFile(), client.downloadDestination);
+    }
+
+    @Test
+    void awaitBoundsTheSnapshotTransportCallByTheRemainingTimeout() throws Exception {
+        RecoverableRemoteClient client = new RecoverableRemoteClient();
+        client.expireNextResultRequest = true;
+        RemoteCapsuleTaskHandle task = new RemoteCapsuleTaskHandle(client, CAPSULE, client.taskId);
+
+        long startedAt = System.nanoTime();
+        TimeoutException exception = assertThrows(
+                TimeoutException.class, () -> task.await(Duration.ofMillis(25)));
+        long elapsedNanos = System.nanoTime() - startedAt;
+
+        assertInstanceOf(TaskCageConnectionException.class, exception.getCause());
+        assertTrue(client.resultRequestTimeout.compareTo(Duration.ofMillis(25)) <= 0);
+        assertTrue(!client.resultRequestTimeout.isZero() && !client.resultRequestTimeout.isNegative());
+        assertTrue(elapsedNanos < Duration.ofSeconds(1).toNanos());
+    }
+
+    @Test
+    void awaitDoesNotOverflowForALargeRepresentableTimeout() throws Exception {
+        RecoverableRemoteClient client = new RecoverableRemoteClient();
+        client.returnRunningResultOnce = true;
+        RemoteCapsuleTaskHandle task = new RemoteCapsuleTaskHandle(client, CAPSULE, client.taskId);
+
+        RemoteCapsuleExecutionResult result = task.await(Duration.ofNanos(Long.MAX_VALUE));
+
+        assertEquals(ProfileOutcome.SUCCEEDED, result.outcome());
+        assertEquals(2, client.resultCalls);
     }
 
     private static void assertInvalidWaitTimeouts(TimeoutInvocation invocation) {
@@ -202,9 +235,13 @@ final class RemoteCapsuleRunnerTest {
         private int uploadCalls;
         private int submitCalls;
         private int downloadCalls;
+        private int resultCalls;
         private boolean loseNextUploadResponse;
         private boolean loseNextSubmitResponse;
         private boolean failNextDownload;
+        private boolean expireNextResultRequest;
+        private boolean returnRunningResultOnce;
+        private Duration resultRequestTimeout;
 
         @Override
         public RemoteCapabilities capabilities() {
@@ -270,7 +307,28 @@ final class RemoteCapsuleRunnerTest {
 
         @Override
         public RemoteProfileTaskSnapshot getProfileResult(UUID requestedTaskId) {
+            throw new AssertionError("await must use the timeout-aware result request");
+        }
+
+        @Override
+        public RemoteProfileTaskSnapshot getProfileResult(
+                UUID requestedTaskId, Duration requestTimeout) {
             assertEquals(taskId, requestedTaskId);
+            resultCalls++;
+            resultRequestTimeout = requestTimeout;
+            if (expireNextResultRequest) {
+                expireNextResultRequest = false;
+                LockSupport.parkNanos(requestTimeout.toNanos() + Duration.ofMillis(5).toNanos());
+                throw new TaskCageConnectionException(
+                        "simulated transport timeout",
+                        new SocketTimeoutException("simulated transport timeout"));
+            }
+            if (returnRunningResultOnce) {
+                returnRunningResultOnce = false;
+                Instant startedAt = Instant.parse("2026-08-22T00:00:01Z");
+                return new RunningRemoteProfileTaskSnapshot(
+                        taskId, task.profile(), startedAt.minusSeconds(1), startedAt);
+            }
             return finished;
         }
 
