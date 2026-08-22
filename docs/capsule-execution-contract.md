@@ -29,7 +29,8 @@ Capsule identity는 immutable `(name, version)` pair다.
 {"name":"ffmpeg-audio-to-wav","version":"1.0.0"}
 ```
 
-- `name`은 `[a-z][a-z0-9-]{0,62}`다.
+- `name`은 전체 1~63 ASCII bytes이며, `.`으로 구분한 각 segment가 `[a-z][a-z0-9-]*`를 따른다.
+  예를 들어 `ffmpeg-audio-to-wav`와 `media.extract-audio`는 유효하다.
 - `version`은 prerelease/build metadata가 없는 strict `MAJOR.MINOR.PATCH`다.
 - 공개된 같은 identity는 변경하지 않는다. 계약·Package·정책이 바뀌면 새 version을 발행한다.
 

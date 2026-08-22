@@ -25,6 +25,7 @@ class CapsuleContractFixtureCompatibilityTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Set<String> EXPECTED_FIXTURES = Set.of(
             "error-capsule-profile-mismatch.json",
+            "identity-names.json",
             "request-valid.json",
             "result-cancelled.json",
             "result-failed.json",
@@ -37,6 +38,30 @@ class CapsuleContractFixtureCompatibilityTest {
         assertEquals(new TreeSet<>(EXPECTED_FIXTURES), fixtureNames());
         for (String name : EXPECTED_FIXTURES) {
             read(name);
+        }
+    }
+
+    @Test
+    void identityNameFixtureMatchesCapsuleAndProfileTypes() throws Exception {
+        ObjectNode fixture = read("identity-names.json");
+        JsonNode validNames = fixture.path("validNames");
+        JsonNode invalidNames = fixture.path("invalidNames");
+        assertTrue(validNames.isArray() && !validNames.isEmpty());
+        assertTrue(invalidNames.isArray() && !invalidNames.isEmpty());
+
+        for (JsonNode name : validNames) {
+            assertEquals(name.textValue(), new CapsuleIdentity(name.textValue(), "1.0.0").name());
+            assertEquals(name.textValue(), new ProfileIdentity(name.textValue(), "1.0.0").name());
+        }
+        for (JsonNode name : invalidNames) {
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> new CapsuleIdentity(name.textValue(), "1.0.0"),
+                    name.textValue());
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> new ProfileIdentity(name.textValue(), "1.0.0"),
+                    name.textValue());
         }
     }
 

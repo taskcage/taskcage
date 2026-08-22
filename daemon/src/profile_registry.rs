@@ -18,7 +18,7 @@ use crate::artifact::{
 };
 #[cfg(test)]
 use crate::bundle::BundleProfile;
-use crate::bundle::{BundleCatalog, BundleError};
+use crate::bundle::{BundleCatalog, BundleError, valid_capsule_name};
 use crate::capsule::{CapsuleCatalog, CapsuleError, CompiledCapsule};
 use crate::digest::Sha256Digest;
 use crate::execution_plan::ResolvedExecutionPlan;
@@ -759,17 +759,10 @@ fn profile_input_budget_error(error: ResourceBudgetError) -> ProfileError {
 }
 
 fn validate_profile_identity(profile: &ProfileIdentity) -> Result<(), ProfileError> {
-    let name = profile.name.as_bytes();
-    if name.is_empty()
-        || name.len() > 63
-        || !name[0].is_ascii_lowercase()
-        || !name[1..]
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
-    {
+    if !valid_capsule_name(&profile.name) {
         return Err(ProfileError::new(
             ErrorCode::InvalidProfileInput,
-            "profile.name must match [a-z][a-z0-9-]{0,62}",
+            "profile.name must use dot-separated [a-z][a-z0-9-]* segments (maximum 63 bytes)",
         ));
     }
     if !profile.version.split('.').all(valid_version_component)
@@ -1300,6 +1293,30 @@ mod tests {
     }
 
     #[test]
+    fn namespaced_bundle_identity_resolves_through_the_public_profile_gate() {
+        let (bundle_root, catalog, package_digest) = catalog_with_runtime_package();
+        let mut profile: serde_json::Value = serde_json::from_slice(&profile_bytes()).unwrap();
+        profile["name"] = json!("media.extract-audio");
+        let profile = serde_json::to_vec(&profile).unwrap();
+        let (archive, keys) = signed_bundle_archive(&profile, package_digest);
+        catalog.import(archive.path(), &keys).unwrap();
+        let registry = ProfileRegistry::open(
+            1024,
+            budget(),
+            None,
+            Some(&bundle_root.path().join("cache")),
+        )
+        .unwrap();
+        let mut request = request();
+        request.profile.name = "media.extract-audio".to_owned();
+
+        assert!(matches!(
+            registry.resolve(&request).unwrap().execution,
+            VerifiedProfileExecution::Bundle { .. }
+        ));
+    }
+
+    #[test]
     fn bundle_not_found_falls_back_to_file_copy_and_legacy_ffmpeg() {
         let (bundle_root, _catalog, _package_digest) = catalog_with_runtime_package();
         let (legacy_cache, legacy_digest) = import_package(
@@ -1685,6 +1702,29 @@ mod tests {
         assert!(validate_slot_name("output-2").is_ok());
         assert!(validate_slot_name("retainMetadata").is_err());
         assert!(validate_slot_name("Output").is_err());
+    }
+
+    #[test]
+    fn profile_names_use_the_capsule_namespaced_contract() {
+        let profile = |name: &str| ProfileIdentity {
+            name: name.to_owned(),
+            version: "1.0.0".to_owned(),
+        };
+
+        assert!(validate_profile_identity(&profile("ffmpeg-audio-to-wav")).is_ok());
+        assert!(validate_profile_identity(&profile("media.extract-audio")).is_ok());
+        for invalid in [
+            "Media.extract-audio",
+            ".media",
+            "media.",
+            "media..extract-audio",
+            "media.extract_audio",
+        ] {
+            assert!(
+                validate_profile_identity(&profile(invalid)).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
     }
 
     #[test]

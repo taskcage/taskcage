@@ -7,6 +7,7 @@ use serde_json::Value;
 use taskcage_core::CapsuleIdentity as CoreCapsuleIdentity;
 
 const REQUEST_FIXTURES: [&str; 2] = ["error-capsule-profile-mismatch.json", "request-valid.json"];
+const IDENTITY_FIXTURES: [&str; 1] = ["identity-names.json"];
 const RESULT_FIXTURES: [&str; 5] = [
     "result-cancelled.json",
     "result-failed.json",
@@ -20,6 +21,13 @@ const RESULT_FIXTURES: [&str; 5] = [
 struct Identity {
     name: String,
     version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct IdentityNamesFixture {
+    valid_names: Vec<String>,
+    invalid_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,11 +234,28 @@ fn fixture_corpus_matches_the_documented_capsule_v1_set() {
         .collect();
     let expected: BTreeSet<_> = REQUEST_FIXTURES
         .into_iter()
+        .chain(IDENTITY_FIXTURES)
         .chain(RESULT_FIXTURES)
         .map(str::to_owned)
         .collect();
 
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn identity_name_fixture_matches_the_public_capsule_contract() {
+    let fixture: IdentityNamesFixture = decode_fixture("identity-names.json");
+
+    for name in fixture.valid_names {
+        CoreCapsuleIdentity::new(&name, "1.0.0")
+            .unwrap_or_else(|error| panic!("rejected valid name {name:?}: {error}"));
+    }
+    for name in fixture.invalid_names {
+        assert!(
+            CoreCapsuleIdentity::new(&name, "1.0.0").is_err(),
+            "accepted invalid name {name:?}"
+        );
+    }
 }
 
 #[test]

@@ -1,0 +1,21 @@
+{
+  "validNames": [
+    "a",
+    "ffmpeg-audio-to-wav",
+    "media.extract-audio",
+    "a.b2-c",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "invalidNames": [
+    "",
+    "Ffmpeg",
+    "-ffmpeg",
+    ".media",
+    "media.",
+    "media..extract-audio",
+    "media.2extract",
+    "media.extract_audio",
+    "media/extract-audio",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ]
+}

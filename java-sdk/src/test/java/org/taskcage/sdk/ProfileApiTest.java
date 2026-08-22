@@ -22,6 +22,9 @@ class ProfileApiTest {
 
     @Test
     void profileValuesEnforceTheApprovedWireSyntax() {
+        assertEquals(
+                "media.extract-audio",
+                new ProfileIdentity("media.extract-audio", "1.0.0").name());
         assertThrows(IllegalArgumentException.class, () -> new ProfileIdentity("FileCopy", "1.0.0"));
         assertThrows(IllegalArgumentException.class, () -> new ProfileIdentity("file-copy", "1.0"));
         assertThrows(IllegalArgumentException.class, () -> new ArtifactPath("jobs/../secret"));

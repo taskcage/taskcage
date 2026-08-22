@@ -1009,16 +1009,7 @@ fn require_input_kind(inputs: &[BundleInput], slot: &str, kind: &str) -> BundleR
     }
 }
 pub(crate) fn valid_capsule_name(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    (1..=63).contains(&bytes.len())
-        && value.split('.').all(|segment| {
-            let bytes = segment.as_bytes();
-            !bytes.is_empty()
-                && bytes[0].is_ascii_lowercase()
-                && bytes[1..]
-                    .iter()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
-        })
+    taskcage_core::is_valid_capsule_name(value)
 }
 
 fn validate_identity(name: &str, version: &str) -> BundleResult<()> {
