@@ -15,8 +15,10 @@ class CapsuleRunnerTest {
     @Test
     void capsuleIdentityUsesTheSharedStrictIdentityShape() {
         CapsuleIdentity identity = new CapsuleIdentity("ffmpeg-audio-to-wav", "1.0.0");
+        CapsuleIdentity namespaced = new CapsuleIdentity("media.extract-audio", "1.0.0");
 
         assertEquals("ffmpeg-audio-to-wav", identity.name());
+        assertEquals("media.extract-audio", namespaced.name());
         assertEquals("1.0.0", identity.version());
         assertThrows(IllegalArgumentException.class, () -> new CapsuleIdentity("FFmpeg", "1.0.0"));
         assertThrows(IllegalArgumentException.class, () -> new CapsuleIdentity("tool", "1.0"));

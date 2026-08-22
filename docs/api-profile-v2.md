@@ -80,7 +80,8 @@ Profile은 daemon deployment가 명시적으로 설치한 immutable execution co
 }
 ```
 
-- `name`은 1~63 ASCII bytes이며 `[a-z][a-z0-9-]{0,62}`만 허용한다.
+- `name`은 전체 1~63 ASCII bytes이며, `.`으로 구분한 각 segment가 `[a-z][a-z0-9-]*`를 따른다.
+  예를 들어 `file-copy`와 `media.extract-audio`는 유효하다.
 - `version`은 strict `MAJOR.MINOR.PATCH`이며 각 component는 0 또는 0이 아닌 숫자로 시작하는 decimal
   integer다. prerelease와 build metadata는 v0.2 Core에서 허용하지 않는다.
 - 같은 `(name, version)`의 installed Profile은 교체할 수 없다. 변경은 새 version으로 설치한다.

@@ -3,6 +3,7 @@
 이 fixture corpus는 EmbeddedRunner와 ExternalRunner가 공유해야 하는 Capsule 실행 의미를 고정한다.
 Local Protocol v2의 envelope fixture와 달리 transport framing을 정의하지 않는다.
 
+- `identity-names.json`: 1~63 ASCII bytes의 dot-separated Capsule/Profile 이름 허용·거부 사례
 - `request-valid.json`: Capsule identity와 일치하는 Profile identity, typed input과 override
 - `error-capsule-profile-mismatch.json`: identity 불일치의 pre-execution rejection과 side-effect 금지
 - `result-success.json`: output publish와 cleanup이 확인된 성공

@@ -1,6 +1,6 @@
 {
-  "capsule": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
-  "profile": {"name": "ffmpeg-audio-to-wav", "version": "1.0.0"},
+  "capsule": {"name": "media.extract-audio", "version": "1.0.0"},
+  "profile": {"name": "media.extract-audio", "version": "1.0.0"},
   "inputs": {
     "source": {
       "kind": "ARTIFACT",

@@ -29,20 +29,25 @@ pub struct CapsuleIdentity {
     version: String,
 }
 
+/// Returns whether a Capsule name follows the public dot-separated naming contract.
+pub fn is_valid_capsule_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (1..=63).contains(&bytes.len())
+        && name.split('.').all(|segment| {
+            let bytes = segment.as_bytes();
+            !bytes.is_empty()
+                && bytes[0].is_ascii_lowercase()
+                && bytes[1..]
+                    .iter()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        })
+}
+
 impl CapsuleIdentity {
     /// Creates an immutable Capsule identity using the public naming and version contract.
     pub fn new(name: impl Into<String>, version: impl AsRef<str>) -> Result<Self, IdentityError> {
         let name = name.into();
-        let valid_name = (1..=63).contains(&name.len())
-            && name.split('.').all(|segment| {
-                let bytes = segment.as_bytes();
-                !bytes.is_empty()
-                    && bytes[0].is_ascii_lowercase()
-                    && bytes[1..].iter().all(|byte| {
-                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-'
-                    })
-            });
-        if !valid_name {
+        if !is_valid_capsule_name(&name) {
             return Err(IdentityError::InvalidName(name));
         }
 
