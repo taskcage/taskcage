@@ -9,6 +9,7 @@ import java.security.KeyStore;
 import java.security.cert.CertificateFactory;
 import java.time.Duration;
 import java.util.Map;
+import java.util.UUID;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
 import org.junit.jupiter.api.Test;
@@ -70,14 +71,21 @@ class RemoteTlsDaemonContractTest {
         try {
             Files.write(source, wave(8_000));
             try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(options())) {
-                RemoteCapsuleExecutionResult result = RemoteCapsuleRunner.external(client).execute(
-                        RemoteCapsuleFileRequest.builder("ffmpeg-audio-to-wav", "1.0.0")
-                                .inputFile("source", source, "audio/wav")
-                                .int64("sample_rate_hz", 16_000)
-                                .int64("channels", 1)
-                                .outputFile("audio", destination)
-                                .build(),
-                        Duration.ofSeconds(20));
+                RemoteCapsuleRunner runner = RemoteCapsuleRunner.external(client);
+                RemoteCapsuleFileRequest request = RemoteCapsuleFileRequest
+                        .builder("ffmpeg-audio-to-wav", "1.0.0")
+                        .inputFile("source", source, "audio/wav")
+                        .int64("sample_rate_hz", 16_000)
+                        .int64("channels", 1)
+                        .outputFile("audio", destination)
+                        .build();
+                RemoteArtifactUpload upload = runner.upload(UUID.randomUUID(), request);
+                UUID clientRequestId = UUID.randomUUID();
+                RemoteCapsuleTaskHandle submitted = runner.submit(clientRequestId, request, upload);
+                RemoteCapsuleTaskHandle recovered = runner.submit(clientRequestId, request, upload);
+                assertEquals(submitted.taskId(), recovered.taskId());
+                RemoteCapsuleExecutionResult result = recovered.await(Duration.ofSeconds(20));
+                runner.download(request, result);
 
                 assertEquals(ProfileOutcome.SUCCEEDED, result.outcome());
                 assertEquals(TerminationReason.EXITED, result.execution().terminationReason());

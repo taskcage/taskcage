@@ -76,6 +76,13 @@ identifier는 adapter가 해석하며, execution backend는 target을 시작하�
 path/reference, digest, size와 media type은 terminal result에 반환한다. 실패·취소·timeout에서는 Artifact map이
 비어 있어야 하며 partial output과 staging residue를 공개하지 않는다.
 
+Remote file adapter는 응답 유실 뒤 전체 작업을 다시 시작하지 않도록 upload, submit/terminal observation,
+download를 복구 가능한 단계로 노출한다. upload는 caller-owned artifact id를 받아 완료 receipt를 반환하며, caller는
+receipt를 보관한 뒤 같은 Artifact reference와 caller-owned `clientRequestId`로 submit을 재시도한다. submit 응답이
+유실된 뒤 upload를 다시 시작해서는 안 된다. download는 cleanup-confirmed 성공 결과의 output Artifact만 사용하며
+upload나 submit을 수행하지 않는다. 따라서 download 실패는 같은 terminal result로 download만 재시도하고 Capsule
+process를 다시 실행하지 않는다.
+
 ## 실행 순서와 안전 경계
 
 모든 Linux execution backend는 다음 순서를 지킨다.

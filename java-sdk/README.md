@@ -71,14 +71,23 @@ Remote daemon에는 TLS 1.3과 service-account 인증이 필수다. Local UDS용
 try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(
         URI.create("taskcage+tls://taskcage.internal:7443"),
         ServiceCredentials.of("document-worker", Secret.fromEnvironment("TASKCAGE_CLIENT_SECRET")))) {
-    RemoteCapsuleExecutionResult result = RemoteCapsuleRunner.external(client).execute(
-        RemoteCapsuleFileRequest.builder("ffmpeg-audio-to-wav", "1.0.0")
+    RemoteCapsuleRunner runner = RemoteCapsuleRunner.external(client);
+    RemoteCapsuleFileRequest request = RemoteCapsuleFileRequest.builder("ffmpeg-audio-to-wav", "1.0.0")
             .inputFile("source", Path.of("input.wav"), "audio/wav")
             .int64("sample_rate_hz", 16_000)
             .int64("channels", 1)
             .outputFile("audio", Path.of("output.wav"))
-            .build(),
-        Duration.ofMinutes(2));
+            .build();
+
+    UUID clientArtifactId = UUID.randomUUID();
+    UUID clientRequestId = UUID.randomUUID();
+    RemoteArtifactUpload upload = runner.upload(clientArtifactId, request);
+    // submit 전에 clientArtifactId, clientRequestId와 upload receipt를 영속화한다.
+    RemoteCapsuleTaskHandle task = runner.submit(clientRequestId, request, upload);
+    RemoteCapsuleExecutionResult result = task.await(Duration.ofMinutes(2));
+    if (result.outcome() == ProfileOutcome.SUCCEEDED) {
+        runner.download(request, result);
+    }
 }
 ```
 
@@ -86,6 +95,19 @@ try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(
 Capsule을 실행한 뒤 성공한 output Artifact를 지정한 local `Path`로 download한다. Local file paths 자체는
 daemon으로 전송되지 않는다. 저수준 `upload`, `RemoteCapsuleRequest`, `download` API도 재시도나 고급 흐름을
 위해 그대로 제공한다.
+
+복구 가능한 파일 실행은 다음 단계 경계를 지킨다.
+
+- upload 응답이 유실되면 변경되지 않은 input file과 같은 `clientArtifactId`로 `runner.upload(...)`만 재시도한다.
+- upload receipt를 받은 뒤에는 receipt를 보관하고 input을 다시 upload하지 않는다.
+- submit 응답 유실이나 wait timeout 뒤에는 같은 `clientRequestId`, file request와 upload receipt로
+  `runner.submit(...)`만 재시도한다. daemon은 task-owned input을 다시 찾기 전에 submission idempotency를
+  확인하므로 원래 Task handle을 복구한다.
+- terminal 성공 뒤 download가 실패하면 같은 result로 `runner.download(...)`만 재시도한다. 이 메서드는 upload나
+  submit을 수행하지 않는다.
+
+`execute(RemoteCapsuleFileRequest, Duration)`는 내부 UUID를 사용하는 one-shot 편의 API다. 응답 유실을 복구해야
+하는 Worker는 전체 `execute(...)`를 재호출하지 않고 위 단계형 API를 사용한다.
 
 FFmpeg Capsule reference workflow는 정상 실행, timeout, memory limit, cancel과 프로세스 트리 정리를
 검증한다. Java 개발자는 Capsule archive를 import한 `taskcaged`에 선언된 Profile input으로 작업을 안전하게

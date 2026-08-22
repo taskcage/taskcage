@@ -11,7 +11,8 @@ import java.util.TreeMap;
  *
  * <p>The local {@link Path} values are SDK concerns: they are never sent to the daemon as Profile input values.
  * {@link RemoteCapsuleRunner} uploads the input over its authenticated TLS connection, submits the daemon-issued
- * Artifact reference, and downloads the requested output after successful execution.
+ * Artifact reference, and downloads the requested output after successful execution. Recoverable callers use the
+ * runner's separate upload, submit, await, and download stages and retain the upload receipt between stages.
  */
 public final class RemoteCapsuleFileRequest {
     private final CapsuleIdentity capsule;
