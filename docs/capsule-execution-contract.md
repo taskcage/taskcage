@@ -18,6 +18,9 @@
 - ExternalRunner와 이후 EmbeddedRunner가 지켜야 할 동등성 기준
 
 archive format, Package download, Hub, TLS handshake와 credential 형식은 각각의 별도 계약이 담당한다.
+Capsule-first 도입 원칙과 ProcessBuilder 호환성의 장기 목표는
+[Capsule 도입과 ProcessBuilder 호환성](capsule-adoption.md)을 따른다. 해당 문서가 말하는 지원 목표는
+이 v1 wire 계약에 아직 없는 field를 즉시 요구하지 않는다.
 
 ## 핵심 객체
 
@@ -197,6 +200,21 @@ Embedded backend가 cgroup 제한이나 whole-task cleanup을 증명할 수 없�
 - caller-provided Raw Command Capsule
 - Hub 검색, 자동 Package download와 remote package fetch
 - 보안 sandbox(namespace, seccomp, filesystem/network isolation)
+
+## 이후 호환성 확장 기준
+
+Capsule은 `ProcessBuilder`를 그대로 가로채는 API가 아니라, 신뢰된 batch CLI 호출을 실행 계약으로
+옮기는 모델이다. 이후 schema를 확장할 때는 다음 우선순위를 따른다.
+
+1. artifact input/output, scalar·list input, workspace와 allowlist environment처럼 재현 가능한 batch
+   CLI 의미를 먼저 표현한다.
+2. stdin artifact, structured stdout, named log artifact와 제한된 static pipeline은 실제 호출 corpus에서
+   반복되는 요구가 확인된 뒤 추가한다.
+3. shell, arbitrary executable, arbitrary host environment, interactive terminal, unbounded pipe graph와
+   shared long-running session은 이 Job Capsule 계약에 추가하지 않는다.
+
+각 확장은 실제 Java `ProcessBuilder` 호출 corpus에서 표현 가능한 신뢰된 batch CLI 비율을 측정하고,
+Capsule contract fixture와 Java/Rust conformance test로 의미를 고정해야 한다.
 
 ## Conformance fixture
 

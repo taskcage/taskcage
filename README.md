@@ -30,6 +30,11 @@ taskcaged
 Task cgroup ──► FFmpeg / OCR / PDF tool / compiler
 ```
 
+순수 Java 라이브러리로 충분한 작업은 TaskCage의 대상이 아니다. TaskCage는 FFmpeg, LibreOffice,
+Tesseract처럼 JVM 밖의 신뢰된 CLI를 반드시 사용해야 할 때 그 실행을 관리한다. Capsule-first 전환과
+기존 `ProcessBuilder`·wrapper 호환성의 설계 기준은
+[Capsule 도입과 ProcessBuilder 호환성](docs/capsule-adoption.md)을 참고한다.
+
 ## 첫 번째 Capsule: FFmpeg
 
 Capsule은 단순한 실행 파일 묶음이 아니다. `ffmpeg-audio-to-wav@1.0.0` Capsule은 FFmpeg Runtime Package, 입력·출력 schema, 허용된 argv 구성, 자원 정책, 결과 검증을 함께 고정한다.
@@ -109,6 +114,7 @@ Docker가 프로그램의 실행 환경을 재현 가능하게 만든다면, Tas
 - [FFmpeg Audio-to-WAV Capsule](docs/ffmpeg-capsule.md)
 - [Capsule 실행 계약](docs/capsule-execution-contract.md)
 - [Capsule archive 형식](docs/bundle-format.md)
+- [Capsule 도입과 ProcessBuilder 호환성](docs/capsule-adoption.md)
 - [제품 철학과 용어](docs/product-philosophy.md)
 
 ## 검증과 기여
