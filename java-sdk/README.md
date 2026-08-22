@@ -279,53 +279,6 @@ dependencies {
 }
 ```
 
-### FFmpeg Raw Command reference
-
-[FFmpeg Local Raw Command reference](../docs/reference-ffmpeg.md)는 Core SDK와 Ubuntu FFmpeg package만
-사용한다. 별도 FFmpeg 전용 Java artifact를 만들지 않으며, 설치부터 변환 결과 확인까지 하나의 반복 가능한
-workflow로 검증한다.
-
-예제는 최소한 다음을 보여준다.
-
-- `/usr/bin/ffmpeg`와 argv 배열을 이용한 변환
-- 안전한 기본 정책과 작업별 timeout override
-- 성공·실패·timeout 결과 처리
-- stdout/stderr tail과 자원 사용량 확인
-- timeout 뒤 잔여 자식 프로세스가 없다는 Linux E2E 검증 경로
-
-## 구현 순서
-
-각 단계는 독립적으로 리뷰 가능한 PR과 커밋으로 나눈다.
-
-1. **공개 API 확정 — 구현됨:** `ExternalCommand`, `ResourceBudget`, `FinishedTaskSnapshot`과
-   `ExecutionResult`를 유지하고 Alpha에 불필요한 중복 타입을 추가하지 않았다.
-2. **Task 편의 API — 구현됨:** `TaskHandle`, `get`, `await`, `cancel`과 polling·deadline·interruption
-   계약을 구현하고 가짜 daemon 단위 테스트와 실제 daemon reference E2E를 추가했다.
-3. **동기 실행 — 구현됨:** `run()`을 `TaskHandle` 계약 위에 구현하고 실제 daemon·FFmpeg E2E로 정상
-   종료·Task wall-time timeout·출력 결과를 검증했다. 명시적 취소는 `TaskHandle.cancel()`을 사용한다.
-4. **배포 — 0.4.0 Maven Central 공개:** 서명된 main, sources와 javadoc artifact를
-   `org.taskcage:taskcage-java-sdk:0.4.0` 좌표로 공개했다.
-5. **첫 사용자 경로 — 구현됨:** FFmpeg reference workflow와 설치·daemon 연결·실행·문제 해결 문서를
-   제공한다.
-
-## 품질 기준
-
-- Java 17에서 단위 테스트와 실제 Ubuntu 24.04 daemon E2E가 통과한다.
-- 제한 없는 기본 실행 경로가 없다.
-- `run`, `await`, `cancel`이 같은 종료·정리 계약을 유지한다.
-- Maven Central에서 SDK를 설치할 수 있다.
-- 새 사용자가 문서만 보고 10분 안에 FFmpeg 변환을 실행할 수 있다.
-- Alpha 버전과 Protocol v1 호환 범위가 문서에 명시된다.
-
-## 현재 범위 밖
-
-- Capsule Profile schema를 위한 추가 typed input/output API
-- TaskCage Hub 연동
-- Remote Raw Command와 Local UDS로의 자동 fallback
-- Spring Boot starter와 다른 언어 SDK
-
-이 기능들은 현재 Public Alpha의 실제 사용 경험과 반복 요구를 확인한 뒤 별도 범위로 다룬다.
-
 ## 빌드
 
 ```bash
@@ -485,6 +438,5 @@ TASKCAGE_OUTPUT_FLOOD=/home/ubuntu/TaskCage/target/debug/output-flood \
 현재 E2E는 `run()`, `TaskHandle` 제출·조회·완료 대기·취소, exec 시작 실패, timeout, 자식 프로세스 정리,
 출력 tail, 멱등 제출을 검증한다. wire 계약은 [Protocol v1 API 명세](../docs/api-mvp.md)를 따른다.
 
-실제 FFmpeg 정상 실행, 일반 `ProcessBuilder`의 root-only 종료 비교와 TaskCage timeout descendant cleanup은
-[FFmpeg Local Raw Command reference](../docs/reference-ffmpeg.md)와 전용 `ffmpegE2eTest` source set에서
-검증한다. 이 workflow는 성능 benchmark가 아니다.
+Legacy Raw Command E2E는 기존 API의 회귀를 검증한다. 새 integration의 FFmpeg Capsule 실행과 cleanup은
+[Compose 기반 Remote E2E](../dev/container/README.md)와 `remoteE2eTest` source set에서 검증한다.

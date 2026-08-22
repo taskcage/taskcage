@@ -4,7 +4,8 @@
 
 TaskCage는 신뢰된 외부 프로세스를 호출 코드의 부수 효과가 아니라, 재현 가능하고 제한된 실행 계약으로 다루게 하는 Linux-native process runtime이다.
 
-이 문서는 제품 수준의 방향과 공개 용어를 정의한다. 현재 구현된 wire 계약은
+이 문서는 제품 수준의 방향과 공개 용어를 정의한다. Capsule-first 전환과 ProcessBuilder 호환성의
+상세 기준은 [Capsule 도입과 ProcessBuilder 호환성](capsule-adoption.md)을 따른다. 현재 구현된 wire 계약은
 [Local Protocol v1 API 명세](api-mvp.md), [Local Profile Core API v2](api-profile-v2.md)와
 [Remote Protocol v1](remote-protocol-v1.md)을 따른다. Remote는 TLS 1.3, service-account 인증,
 Profile authorization과 관리되는 Artifact 전송을 사용하는 별도 opt-in 경로이며 Local framing을 그대로
@@ -79,6 +80,11 @@ Execution Profile은 어떤 도구를 어떤 입력으로, 어떤 자원 정책 
 Raw Command를 포함하지 않는다. 현재 Local Raw Command는 기존 공개 릴리스의 호환 경로이며, 제한을
 우회하는 경로는 아니다.
 
+Capsule은 `ProcessBuilder`의 완전한 상위 호환이 아니다. 신뢰된 일회성 batch CLI에서 필요한 executable,
+argv template, artifact input/output, 제한된 environment, workspace, stdin/stdout와 결과 검증을 표현하는
+안전한 부분집합을 목표로 한다. shell, 임의 host environment, 대화형 terminal, 요청별 arbitrary executable과
+실행 중인 PID attach는 이 계약에 포함하지 않는다.
+
 ### 4. 재현성과 이식성은 선언해야 얻어진다
 
 cgroup은 실행을 제한하지만 실행 파일·라이브러리·codec·font·환경 변수·CPU 아키텍처까지 같게 만들지는
@@ -125,7 +131,7 @@ Execution Profile을 만들고, manifest·digest·서명으로 하나의 실행 
 
 ```text
 Capsule
-  → Generic ProfileRequest 또는 언어별 typed input으로 실행
+  → CapsuleRequest와 언어별 공통 값 객체로 실행
 ```
 
 언어별 SDK는 Capsule의 신뢰를 부여하지 않는다. daemon은 SDK가 보낸 요청도 Capsule 서명, allowlist,
@@ -158,7 +164,19 @@ service-account authentication, authorization, Artifact reference와 failure con
 [Remote Protocol v1](remote-protocol-v1.md)에서 별도로 정의한다. 이 계약은 Remote Raw Command와
 Local UDS fallback을 허용하지 않는다.
 
-### 8. 기존 인프라를 대체하지 않고 연결한다
+공개 Java SDK는 장기적으로 `CapsuleRequest`, `CapsuleRunner`, `ExecutionResult`를 중심으로 둔다.
+`ProfileRequest`, `ProfileIdentity`, transport별 request/result와 helper lifecycle은 기존 호환과 wire
+구현을 위한 세부사항이며 일반 Capsule 사용자에게 요구하지 않는다.
+
+### 8. 기존 wrapper를 대체하지 않고 실행 backend가 된다
+
+TaskCage는 Selenium·Playwright처럼 풍부한 도메인 API를 직접 구현하거나, 모든 CLI wrapper의 public API를
+따라 하지 않는다. CLI wrapper 작성자는 자신의 요청 객체를 `CapsuleRequest`로 변환하는 adapter를
+선택적으로 제공할 수 있다. 상주 WebDriver나 LibreOffice pool은 Job Capsule이 아니라 향후
+session/worker 모델의 대상이다. 전환 경로의 상세 기준은
+[Capsule 도입과 ProcessBuilder 호환성](capsule-adoption.md)을 따른다.
+
+### 9. 기존 인프라를 대체하지 않고 연결한다
 
 TaskCage는 Kafka, Kubernetes, Docker 또는 Temporal의 대체재가 아니다.
 

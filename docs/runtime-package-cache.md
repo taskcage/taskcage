@@ -1,14 +1,13 @@
-# Local Runtime Package cache
+# Capsule Runtime Package cache
 
 ## 상태와 범위
 
-이 문서는 TaskCage v0.2 Local Product Alpha의 Runtime Package import와 digest cache 계약이다.
+이 문서는 Capsule 실행에 사용되는 Runtime Package import와 digest cache 계약이다.
 Runtime Package는 신뢰된 Linux 실행 파일과 필요한 library·license·SBOM을 하나의 검증 가능한 file set으로
-고정한다. 이 기능은 Hub, URL download, 자동 update, eviction 또는 container image를 제공하지 않는다. Bundle은
-이 cache의 이미 검증된 digest를 참조한다.
+고정한다. 이 기능은 Hub, URL download, 자동 update, eviction 또는 container image를 제공하지 않는다.
+Capsule archive는 이 cache의 이미 검증된 digest를 참조한다.
 
-> **릴리스 구분:** Runtime Package import와 정적 FFmpeg Profile 등록은 공개 daemon `0.4.0`에서 사용할 수
-> 있다. Local Capsule archive import와 `--bundle-cache-root` catalog는 daemon `0.5.0`에서 사용할 수 있다.
+Capsule archive import와 catalog resolution은 daemon `0.5.0`부터 제공된다.
 
 Capsule archive import와 signature 검증은 [Bundle 형식](bundle-format.md)에서 정의한다. Capsule 실행은 이
 cache 계약을 우회하거나 Package를 mutable path로 실행하게 해서는 안 된다.
@@ -131,24 +130,3 @@ filesystem에서는 실패한다. 그러므로 concurrent reader는 partial Pack
 Task 실행 경로는 Package를 digest로 열고 manifest, platform과 전체 content를 다시 검증한다. 검증된
 rootfs와 entrypoint file descriptor를 실행 준비가 끝날 때까지 보유하므로 cache path가 바뀌어도 검증하지
 않은 inode로 전환되지 않는다. Protocol v1 Raw Command의 absolute executable 동작은 변경하지 않는다.
-
-## daemon 0.4.0의 FFmpeg Profile 정적 등록
-
-`ffmpeg-audio-to-wav@1.0.0`은 generic registry 없이 하나의 cache root와 digest를 정적으로 등록한다.
-AMD64와 ARM64 FFmpeg Package는 서로 다른 binary content와 digest를 가지므로, 각 host에는 자신의
-architecture에 맞는 digest를 설정한다.
-Artifact 설정과 아래 두 옵션을 모두 지정해야 한다.
-
-```text
---runtime-package-cache-root /var/lib/taskcage
---ffmpeg-audio-to-wav-package-digest sha256:<64-lowercase-hex>
-```
-
-daemon은 시작할 때 등록 digest를 resolve하고 package `id`가 `org.taskcage.ffmpeg`, `entrypoint`가
-`bin/ffmpeg`인지 확인한다. missing, incompatible, corrupted package와 계약 불일치는 daemon 시작 실패다.
-각 새 Task도 같은 digest의 manifest, platform, 전체 content를 다시 검증하고 고정 entrypoint descriptor를
-`execveat(AT_EMPTY_PATH)`로 실행한다. shell과 PATH lookup은 사용하지 않는다.
-
-daemon `0.5.0`의 Capsule catalog 경로는 정적 digest flag 대신 `--bundle-cache-root /var/lib/taskcage`를
-사용한다. 설치된 Capsule catalog가 `ProfileRequest`의 name/version을 Runtime Package digest와 선언형
-argv로 해석한다.
