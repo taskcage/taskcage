@@ -3,6 +3,7 @@ package org.taskcage.sdk;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /** Client-bound handle for an accepted Remote Capsule Task. */
@@ -29,38 +30,68 @@ public final class RemoteCapsuleTaskHandle {
         return client.cancelTask(taskId);
     }
 
-    /** Waits without cancelling the Task when the caller's deadline expires. */
+    /**
+     * Waits without cancelling the Task when the caller's deadline expires.
+     *
+     * <p>The timeout covers polling delays and each built-in TLS snapshot request. A timeout never
+     * cancels the accepted Remote Task.
+     */
     public RemoteCapsuleExecutionResult await(Duration waitTimeout)
             throws InterruptedException, TimeoutException {
-        Objects.requireNonNull(waitTimeout, "waitTimeout");
-        if (waitTimeout.isZero() || waitTimeout.isNegative()) {
-            throw new IllegalArgumentException("waitTimeout must be positive");
-        }
+        long timeoutNanos = TaskHandle.requirePositiveNanos(waitTimeout, "waitTimeout");
         RemoteCapsuleExecutionResult cached = finished;
         if (cached != null) {
             return cached;
         }
 
-        long deadline = System.nanoTime() + waitTimeout.toNanos();
+        long startedAt = System.nanoTime();
         while (true) {
-            if (Thread.interrupted()) {
-                throw new InterruptedException();
+            TaskHandle.throwIfInterrupted(null);
+            long remainingNanos = remainingNanos(startedAt, timeoutNanos);
+            if (remainingNanos <= 0) {
+                throw timeoutException(null);
             }
-            RemoteProfileTaskSnapshot snapshot = client.getProfileResult(taskId);
+
+            RemoteProfileTaskSnapshot snapshot;
+            try {
+                snapshot = client.getProfileResult(taskId, Duration.ofNanos(remainingNanos));
+            } catch (TaskCageConnectionException exception) {
+                TaskHandle.throwIfInterrupted(exception);
+                if (remainingNanos(startedAt, timeoutNanos) <= 0) {
+                    throw timeoutException(exception);
+                }
+                throw exception;
+            }
             if (snapshot instanceof FinishedRemoteProfileTaskSnapshot terminal) {
                 RemoteCapsuleExecutionResult result = new RemoteCapsuleExecutionResult(capsule, terminal);
                 finished = result;
                 return result;
             }
 
-            long remainingNanos = deadline - System.nanoTime();
+            remainingNanos = remainingNanos(startedAt, timeoutNanos);
             if (remainingNanos <= 0) {
-                throw new TimeoutException("Remote Capsule Task " + taskId + " did not finish before the wait timeout");
+                throw timeoutException(null);
             }
-            long sleepMillis = Math.min(
-                    DEFAULT_POLL_INTERVAL.toMillis(),
-                    Math.max(1, Duration.ofNanos(remainingNanos).toMillis()));
-            Thread.sleep(sleepMillis);
+            try {
+                TimeUnit.NANOSECONDS.sleep(
+                        Math.min(DEFAULT_POLL_INTERVAL.toNanos(), remainingNanos));
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw exception;
+            }
         }
+    }
+
+    private static long remainingNanos(long startedAt, long timeoutNanos) {
+        return timeoutNanos - (System.nanoTime() - startedAt);
+    }
+
+    private TimeoutException timeoutException(Throwable cause) {
+        TimeoutException exception = new TimeoutException(
+                "Remote Capsule Task " + taskId + " did not finish before the wait timeout");
+        if (cause != null) {
+            exception.initCause(cause);
+        }
+        return exception;
     }
 }

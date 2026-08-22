@@ -109,6 +109,15 @@ daemon으로 전송되지 않는다. 저수준 `upload`, `RemoteCapsuleRequest`,
 `execute(RemoteCapsuleFileRequest, Duration)`는 내부 UUID를 사용하는 one-shot 편의 API다. 응답 유실을 복구해야
 하는 Worker는 전체 `execute(...)`를 재호출하지 않고 위 단계형 API를 사용한다.
 
+`RemoteCapsuleTaskHandle.await(waitTimeout)`의 timeout은 polling sleep뿐 아니라 각 result snapshot의 TLS 연결,
+인증과 응답 read에도 남은 시간으로 전달된다. timeout이 끝나면 accepted Task를 취소하지 않고
+`TimeoutException`을 반환하므로, caller는 같은 task handle이나 idempotency key로 terminal result를 다시 확인할 수
+있다.
+
+download는 목적지와 같은 디렉터리에 UUID 기반의 고유 임시 파일을 `CREATE_NEW`로 연다. Artifact의 size와 digest를
+검증한 뒤에만 목적지로 atomic move하며, network·protocol·검증·move 실패 시 임시 파일을 삭제한다. 기존의 예측
+가능한 partial 파일을 열거나 재사용하지 않는다.
+
 FFmpeg Capsule reference workflow는 정상 실행, timeout, memory limit, cancel과 프로세스 트리 정리를
 검증한다. Java 개발자는 Capsule archive를 import한 `taskcaged`에 선언된 Profile input으로 작업을 안전하게
 실행한다. Hub는 이 흐름의 필수 구성요소가 아니다.

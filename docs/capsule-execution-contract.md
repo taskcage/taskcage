@@ -84,6 +84,14 @@ receipt를 보관한 뒤 같은 Artifact reference와 caller-owned `clientReques
 upload나 submit을 수행하지 않는다. 따라서 download 실패는 같은 terminal result로 download만 재시도하고 Capsule
 process를 다시 실행하지 않는다.
 
+Remote terminal wait의 caller timeout은 `timeout - elapsed`로 계산하며, 각 result snapshot의 TLS 연결·인증·응답
+read에는 남은 시간만 허용한다. 큰 timeout도 절대 deadline 덧셈으로 계산하지 않는다. wait timeout은 accepted Task를
+취소하지 않는다.
+
+Remote download는 목적지와 같은 디렉터리에 예측 불가능한 고유 이름을 `CREATE_NEW`로 열어야 한다. size와 digest
+검증이 끝난 뒤에만 목적지로 atomic move하며, move가 완료되지 않은 모든 경로에서 임시 파일을 삭제한다. 고정 partial
+이름을 사용하거나 기존 파일 또는 symlink를 download stream으로 열어서는 안 된다.
+
 ## 실행 순서와 안전 경계
 
 모든 Linux execution backend는 다음 순서를 지킨다.

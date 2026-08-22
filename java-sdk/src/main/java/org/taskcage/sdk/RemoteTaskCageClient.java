@@ -3,6 +3,7 @@ package org.taskcage.sdk;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.UUID;
 import org.taskcage.sdk.internal.remote.DefaultRemoteTaskCageClient;
 
@@ -28,6 +29,12 @@ public interface RemoteTaskCageClient extends AutoCloseable {
 
     RemoteArtifactUpload upload(UUID clientArtifactId, Path source, String mediaType) throws IOException;
 
+    /**
+     * Downloads and verifies an Artifact before atomically replacing the destination.
+     *
+     * <p>The built-in client uses a unique, exclusively created temporary file in the destination
+     * directory and removes it unless the atomic move succeeds.
+     */
     void download(ManagedOutputArtifact artifact, Path destination) throws IOException;
 
     RemoteProfileTask submitProfile(RemoteProfileRequest request);
@@ -35,6 +42,17 @@ public interface RemoteTaskCageClient extends AutoCloseable {
     RemoteProfileTask submitProfile(UUID clientRequestId, RemoteProfileRequest request);
 
     RemoteProfileTaskSnapshot getProfileResult(UUID taskId);
+
+    /**
+     * Requests a Remote Profile snapshot with a caller-supplied transport timeout.
+     *
+     * <p>The default implementation preserves compatibility for custom clients. The built-in TLS
+     * client applies this timeout to connection setup, authentication, and response reads.
+     */
+    default RemoteProfileTaskSnapshot getProfileResult(UUID taskId, Duration requestTimeout) {
+        TaskHandle.requirePositiveNanos(requestTimeout, "requestTimeout");
+        return getProfileResult(taskId);
+    }
 
     TaskCancellation cancelTask(UUID taskId);
 
