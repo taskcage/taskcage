@@ -35,6 +35,8 @@ public final class RemoteCapsuleRunner {
     /** Executes a Capsule and waits for its cleanup-confirmed terminal result. */
     public RemoteCapsuleExecutionResult execute(RemoteCapsuleRequest request, Duration waitTimeout)
             throws InterruptedException, TimeoutException {
+        Objects.requireNonNull(request, "request");
+        TaskHandle.requirePositiveNanos(waitTimeout, "waitTimeout");
         return submit(request).await(waitTimeout);
     }
 
@@ -42,6 +44,9 @@ public final class RemoteCapsuleRunner {
     public RemoteCapsuleExecutionResult execute(
             UUID clientRequestId, RemoteCapsuleRequest request, Duration waitTimeout)
             throws InterruptedException, TimeoutException {
+        Objects.requireNonNull(clientRequestId, "clientRequestId");
+        Objects.requireNonNull(request, "request");
+        TaskHandle.requirePositiveNanos(waitTimeout, "waitTimeout");
         return submit(clientRequestId, request).await(waitTimeout);
     }
 
@@ -54,6 +59,7 @@ public final class RemoteCapsuleRunner {
     public RemoteCapsuleExecutionResult execute(RemoteCapsuleFileRequest request, Duration waitTimeout)
             throws IOException, InterruptedException, TimeoutException {
         Objects.requireNonNull(request, "request");
+        TaskHandle.requirePositiveNanos(waitTimeout, "waitTimeout");
         RemoteArtifactUpload upload = client.upload(request.inputFile(), request.inputMediaType());
         java.util.Map<String, RemoteProfileInputValue> inputs = new java.util.TreeMap<>(request.inputs());
         inputs.put(request.inputSlot(), upload.asInput());
