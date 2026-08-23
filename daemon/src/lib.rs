@@ -4,7 +4,7 @@ pub mod artifact;
 mod bootstrap;
 pub use bootstrap::{DaemonConfig, DeploymentResourceMaximum, LocalProfileConfig, run};
 #[cfg(target_os = "linux")]
-pub use taskcage_core::cleanup_fault;
+pub use taskcage_linux_runtime::cleanup_fault;
 #[cfg(any(target_os = "linux", test))]
 mod audit;
 #[cfg(target_os = "linux")]
@@ -18,14 +18,14 @@ pub mod capability;
 mod capacity;
 #[cfg(target_os = "linux")]
 pub mod capsule;
-pub use taskcage_core::cgroup;
+pub use taskcage_linux_runtime::cgroup;
 pub mod codec;
-pub(crate) use taskcage_core::deadline;
+pub(crate) use taskcage_linux_runtime::deadline;
 mod deployment_policy;
 pub mod digest;
 mod execution_plan;
 #[cfg(target_os = "linux")]
-pub(crate) use taskcage_core::executor;
+pub(crate) use taskcage_linux_runtime::executor;
 mod fail_stop;
 #[cfg(any(target_os = "linux", test))]
 mod handlers;
@@ -49,7 +49,7 @@ pub mod output {
         }
     }
 }
-pub use taskcage_core::preflight;
+pub use taskcage_linux_runtime::preflight;
 #[cfg(target_os = "linux")]
 mod profile;
 #[cfg(target_os = "linux")]
@@ -79,7 +79,7 @@ mod server;
 #[cfg(target_os = "linux")]
 mod startup;
 #[cfg(target_os = "linux")]
-mod startup_cgroup;
+use taskcage_linux_runtime::cgroup::recovery as startup_cgroup;
 #[cfg(target_os = "linux")]
 pub mod status;
 #[cfg_attr(

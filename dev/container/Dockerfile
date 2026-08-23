@@ -5,6 +5,7 @@ FROM rust:1.88-bookworm AS rust-builder
 WORKDIR /workspace
 COPY Cargo.toml Cargo.lock ./
 COPY core ./core
+COPY linux-runtime ./linux-runtime
 COPY daemon ./daemon
 COPY test-fixtures ./test-fixtures
 RUN cargo build --workspace --release --locked

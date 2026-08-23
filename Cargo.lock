@@ -717,16 +717,25 @@ dependencies = [
 name = "taskcage-core"
 version = "0.1.0"
 dependencies = [
- "libc",
  "semver",
  "serde",
  "thiserror",
- "tokio",
 ]
 
 [[package]]
 name = "taskcage-fixtures"
 version = "0.1.0"
+
+[[package]]
+name = "taskcage-linux-runtime"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "taskcage-core",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "taskcaged"
@@ -747,6 +756,7 @@ dependencies = [
  "sha2",
  "tar",
  "taskcage-core",
+ "taskcage-linux-runtime",
  "tempfile",
  "thiserror",
  "time",

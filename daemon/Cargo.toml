@@ -17,6 +17,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = "2"
 semver = "1"
 taskcage-core = { path = "../core" }
+taskcage-linux-runtime = { path = "../linux-runtime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_json_canonicalizer = "0.3.2"
