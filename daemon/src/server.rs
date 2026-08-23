@@ -19,18 +19,19 @@ use thiserror::Error;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinSet;
 
+use crate::application::task::SubmitContext;
+#[cfg(test)]
+use crate::application::task::TaskRegistrySettings;
+use crate::application::task::{SubmitCoordinator, SubmitMetadata, TaskStartTime};
 use crate::audit;
 use crate::codec::{FrameError, decode_json, read_frame_or_eof, write_json_frame};
 use crate::deadline::MonotonicDeadline;
 use crate::fail_stop::FailStopCoordinator;
-use crate::handlers::{ProtocolHandlers, SubmitContext};
+use crate::handlers::ProtocolHandlers;
 use crate::protocol::{
     ErrorCode, ErrorPayload, PROFILE_PROTOCOL_VERSION, PROTOCOL_VERSION, Request, Response,
 };
 use crate::startup::StartupOwnership;
-#[cfg(test)]
-use crate::submit::TaskRegistrySettings;
-use crate::submit::{SubmitCoordinator, SubmitMetadata, TaskStartTime};
 
 type DispatchFuture = Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
 type Dispatch = Arc<dyn Fn(Request) -> DispatchFuture + Send + Sync + 'static>;

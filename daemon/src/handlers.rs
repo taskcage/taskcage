@@ -1,7 +1,9 @@
 //! protocol v1 typed 요청을 기존 capability, submit과 Registry 경계에 연결한다.
 
+#[cfg(test)]
 use std::future::Future;
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::Instant;
 #[cfg(target_os = "linux")]
 use std::{collections::HashMap, fs::File, sync::Mutex};
@@ -10,6 +12,19 @@ use taskcage_core::task::{
     TaskSnapshot as TaskPayload, TerminationReason as DomainTerminationReason,
 };
 
+#[cfg(target_os = "linux")]
+use crate::application::task::SubmitCoordinator;
+#[cfg(test)]
+use crate::application::task::SubmitMetadata;
+#[cfg(target_os = "linux")]
+use crate::application::task::TaskRegistrySettings;
+#[cfg(test)]
+use crate::application::task::TaskStartTime;
+use crate::application::task::ports::TaskUseCases as ProtocolTaskCore;
+use crate::application::task::{
+    RegistryError, SubmitContext, SubmitError, SubmitFailure, SubmitObservation, SubmitOutcome,
+    SubmitValidationError, ValidatedSubmit,
+};
 use crate::capability::{CapabilityAdapter, CapabilityInitialization};
 use crate::capacity::TaskCapacitySettings;
 use crate::deployment_policy::DeploymentResourcePolicy;
@@ -26,89 +41,12 @@ use crate::protocol::{
     PROFILE_PROTOCOL_VERSION, ProfileAcceptedPayload, ProfileEffectiveResources,
 };
 use crate::protocol_mapper;
-#[cfg(target_os = "linux")]
-use crate::submit::SubmitCoordinator;
-#[cfg(target_os = "linux")]
-use crate::submit::TaskRegistrySettings;
-#[cfg(test)]
-use crate::submit::TaskStartTime;
-use crate::submit::{
-    RegistryError, SubmitError, SubmitFailure, SubmitMetadata, SubmitObservation, SubmitOutcome,
-    SubmitValidationError, ValidatedSubmit,
-};
-
-type FinishedTime = Box<dyn FnOnce() -> (String, Instant) + Send + 'static>;
-
-/// task ID와 시각 생성은 environment gate를 통과한 뒤에만 이 값으로 확정한다.
-pub(crate) struct SubmitContext {
-    metadata: SubmitMetadata,
-    finished_time: FinishedTime,
-}
-
-impl SubmitContext {
-    pub(crate) fn new(metadata: SubmitMetadata, finished_time: FinishedTime) -> Self {
-        Self {
-            metadata,
-            finished_time,
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn preallocate_task_id(&mut self) -> String {
-        self.metadata.preallocate_task_id()
-    }
-}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RequestHandling {
     Handled(Response),
     /// 개별 typed helper가 다른 요청 종류를 wire 오류로 바꾸지 않는다.
     Unhandled(Request),
-}
-
-pub(crate) trait ProtocolTaskCore {
-    fn submit_validated(
-        &self,
-        request_id: String,
-        validated: ValidatedSubmit,
-        context: SubmitContext,
-    ) -> impl Future<Output = Result<SubmitOutcome, SubmitError>> + Send;
-
-    fn snapshot(&self, task_id: &str) -> Result<Option<TaskPayload>, RegistryError>;
-
-    fn cancel(
-        &self,
-        task_id: &str,
-    ) -> impl Future<Output = Result<TaskPayload, RegistryError>> + Send;
-}
-
-#[cfg(target_os = "linux")]
-impl ProtocolTaskCore for SubmitCoordinator {
-    fn submit_validated(
-        &self,
-        request_id: String,
-        validated: ValidatedSubmit,
-        context: SubmitContext,
-    ) -> impl Future<Output = Result<SubmitOutcome, SubmitError>> + Send {
-        SubmitCoordinator::submit_validated(
-            self,
-            request_id,
-            validated,
-            context.metadata,
-            context.finished_time,
-        )
-    }
-
-    fn snapshot(&self, task_id: &str) -> Result<Option<TaskPayload>, RegistryError> {
-        SubmitCoordinator::snapshot(self, task_id)
-    }
-
-    fn cancel(
-        &self,
-        task_id: &str,
-    ) -> impl Future<Output = Result<TaskPayload, RegistryError>> + Send {
-        SubmitCoordinator::cancel(self, task_id)
-    }
 }
 
 #[derive(Debug)]
@@ -439,12 +377,13 @@ impl ProtocolHandlers<SubmitCoordinator> {
         if let Some(principal) = &remote_principal {
             self.register_remote_task(task_id.clone(), principal.clone());
         }
+        let (metadata, finished_time) = context.into_parts();
         let outcome = core
             .submit_profile_validated(
                 request_id.clone(),
                 ValidatedSubmit::from_profile(profile_request, plan),
-                context.metadata,
-                context.finished_time,
+                metadata,
+                finished_time,
                 Arc::clone(&profile_task),
                 staged_artifacts,
             )
@@ -1187,7 +1126,7 @@ mod tests {
             _validated: ValidatedSubmit,
             context: SubmitContext,
         ) -> impl Future<Output = Result<SubmitOutcome, SubmitError>> + Send {
-            let _ = (context.metadata, context.finished_time);
+            let _ = context.into_parts();
             self.submit_calls.fetch_add(1, Ordering::SeqCst);
             let result = self
                 .submit_result

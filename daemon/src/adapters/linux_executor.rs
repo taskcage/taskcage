@@ -4,10 +4,14 @@ use std::future::pending;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::application::task::ports::{
+    CompletedTask, FinishedTime, RunnerPermit, TaskExecutionPort, TaskRunConfig, TaskRunFailure,
+    TaskRunFailureKind, TaskStartTime, TaskStartTimeSource, VerifiedRunningTask,
+};
 use crate::cancellation::CancellationRuntime;
 use crate::cgroup::{CgroupError, CgroupManager, JobCgroup, JobStats, VerifiedCgroupLimits};
 use crate::deadline::MonotonicDeadline;
-use crate::execution_plan::{ResolvedCommand, ResolvedExecutable, ResolvedExecutionPlan};
+use crate::execution_plan::{ResolvedCommand, ResolvedExecutable};
 #[cfg(not(test))]
 use crate::executor::spawn_in_cgroup;
 #[cfg(test)]
@@ -22,88 +26,13 @@ use crate::lifecycle::{
 };
 use crate::output::{CaptureLimits, CapturedOutput};
 use crate::preflight::VerifiedEnvironment;
-use crate::submit::{RunnerPermit, TaskStartTime, TaskStartTimeSource, VerifiedRunningTask};
 use crate::{Error, Result};
-use taskcage_core::task::TaskSnapshot as TaskPayload;
-
-#[derive(Debug)]
-/// cgroup과 출력 reader 정리가 끝난 뒤 Runner만 만들 수 있는 완료 결과다.
-pub(crate) struct CompletedTask {
-    payload: TaskPayload,
-}
-
-impl CompletedTask {
-    fn new(payload: TaskPayload) -> Result<Self> {
-        if !matches!(payload, TaskPayload::Finished { .. }) {
-            return Err(Error::TaskLifecycle(
-                "정리가 끝난 lifecycle이 FINISHED 결과를 만들지 않았습니다".to_owned(),
-            ));
-        }
-        Ok(Self { payload })
-    }
-
-    pub(crate) fn into_payload(self) -> TaskPayload {
-        self.payload
-    }
-}
-
-#[derive(Debug)]
-/// wire 검증이 끝난 작업을 실행 코어에 넘기는 내부 입력이다.
-pub(crate) struct TaskRunConfig {
-    pub(crate) task_id: String,
-    pub(crate) submitted_at: String,
-    pub(crate) start_time: TaskStartTimeSource,
-    pub(crate) cleanup_timeout: Duration,
-    pub(crate) plan: ResolvedExecutionPlan,
-}
 
 #[derive(Debug)]
 /// 같은 cgroup manager와 정리 안전 상태를 공유하는 작업 실행 경계다.
 pub(crate) struct TaskRunner {
     manager: CgroupManager,
     fail_stop: Arc<FailStopCoordinator>,
-}
-
-#[derive(Debug)]
-pub(crate) struct TaskRunFailure {
-    error: Error,
-    kind: TaskRunFailureKind,
-    capacity_reusable: bool,
-    cleanup_complete: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TaskRunFailureKind {
-    CgroupReadBackMismatch,
-    CgroupReadBackRollbackUncertain,
-    Other,
-}
-
-impl TaskRunFailure {
-    fn with_reusable_capacity(error: Error) -> Self {
-        Self {
-            error,
-            kind: TaskRunFailureKind::Other,
-            capacity_reusable: true,
-            cleanup_complete: true,
-        }
-    }
-
-    pub(crate) fn capacity_reusable(&self) -> bool {
-        self.capacity_reusable
-    }
-
-    pub(crate) fn into_error(self) -> Error {
-        self.error
-    }
-
-    pub(crate) fn kind(&self) -> TaskRunFailureKind {
-        self.kind
-    }
-
-    pub(crate) fn cleanup_complete(&self) -> bool {
-        self.cleanup_complete
-    }
 }
 
 impl TaskRunner {
@@ -155,12 +84,12 @@ impl TaskRunner {
         F: FnOnce() -> (String, Instant),
     {
         if self.fail_stop.is_fail_stopping() {
-            return Err(TaskRunFailure {
-                error: Error::CleanupUncertain,
-                kind: TaskRunFailureKind::Other,
-                capacity_reusable: false,
-                cleanup_complete: true,
-            });
+            return Err(TaskRunFailure::new(
+                Error::CleanupUncertain,
+                TaskRunFailureKind::Other,
+                false,
+                true,
+            ));
         }
 
         let TaskRunConfig {
@@ -211,12 +140,12 @@ impl TaskRunner {
                 if failure.block_future_runs {
                     self.fail_stop.activate(failure.report.clone());
                 }
-                return Err(TaskRunFailure {
-                    error: *failure.error,
-                    kind: failure.kind,
-                    capacity_reusable: !failure.block_future_runs,
-                    cleanup_complete: failure.cleanup_complete,
-                });
+                return Err(TaskRunFailure::new(
+                    *failure.error,
+                    failure.kind,
+                    !failure.block_future_runs,
+                    failure.cleanup_complete,
+                ));
             }
         };
         let start_time = cleaned.start_time().clone();
@@ -241,6 +170,30 @@ impl TaskRunner {
     #[cfg(test)]
     pub(crate) fn cleanup_is_uncertain(&self) -> bool {
         self.fail_stop.is_fail_stopping()
+    }
+}
+
+impl TaskExecutionPort for TaskRunner {
+    fn execute_task(
+        &self,
+        permit: RunnerPermit,
+        config: TaskRunConfig,
+        running_sender: tokio::sync::oneshot::Sender<VerifiedRunningTask>,
+        cancellation: CancellationRuntime,
+        finished_time: FinishedTime,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::result::Result<CompletedTask, TaskRunFailure>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(self.run_task(permit, config, running_sender, cancellation, finished_time))
+    }
+
+    #[cfg(test)]
+    fn cleanup_is_uncertain(&self) -> bool {
+        TaskRunner::cleanup_is_uncertain(self)
     }
 }
 

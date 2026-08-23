@@ -13,14 +13,18 @@ use crate::cancellation::cancellation_channel;
 use crate::cancellation::{CancellationWaiter, RunningCancellation};
 use taskcage_core::task::TaskSnapshot as TaskPayload;
 
+#[cfg(test)]
+use crate::application::task::ports::REGISTRY_CAPACITY_EXHAUSTED_MESSAGE;
+use crate::application::task::ports::{
+    CompletionPublicationPort, RegistryError, SubmitFailure, SubmitObservation, SubmitOwnerPort,
+    SubmitReservation as PortSubmitReservation, SubmitWaiterPort, TaskCancellationPort,
+    TaskQueryPort, TaskSubmissionPort,
+};
+use crate::application::task::submit::{SubmissionIdentity, ValidatedSubmit};
 use crate::protocol::ErrorCode;
 use crate::resource_budget::VerifiedEffectiveLimits;
-use crate::submit::{SubmissionIdentity, ValidatedSubmit};
 
 pub(crate) const MIN_FINISHED_RETENTION: Duration = Duration::from_secs(10 * 60);
-
-pub(crate) const REGISTRY_CAPACITY_EXHAUSTED_MESSAGE: &str =
-    "task registry retention capacity is exhausted";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TaskRegistrySettings {
@@ -55,44 +59,6 @@ pub(crate) struct MonotonicClock;
 impl RegistryClock for MonotonicClock {
     fn now(&self) -> Instant {
         Instant::now()
-    }
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-pub(crate) enum RegistryError {
-    #[error("새 작업은 RUNNING snapshot으로 등록해야 합니다")]
-    RunningSnapshotRequired,
-    #[error("작업 완료에는 FINISHED snapshot이 필요합니다")]
-    FinishedSnapshotRequired,
-    #[error("taskId가 이미 등록되어 있습니다: {0}")]
-    TaskAlreadyExists(String),
-    #[error("같은 clientRequestId에 다른 submit payload가 사용됐습니다: {0}")]
-    IdempotencyConflict(String),
-    #[error("작업을 찾을 수 없습니다: {0}")]
-    TaskNotFound(String),
-    #[error("완료된 작업 결과는 바꿀 수 없습니다: {0}")]
-    TaskAlreadyFinished(String),
-    #[error("완료 결과의 taskId가 예약과 다릅니다: expected={expected}, actual={actual}")]
-    TaskIdMismatch { expected: String, actual: String },
-    #[error("Task Registry 상태 잠금을 사용할 수 없습니다")]
-    StateUnavailable,
-    #[error("RUNNING 작업에 적용 확인된 effectiveLimits가 없습니다: {0}")]
-    VerifiedEffectiveLimitsRequired(String),
-    #[error("{REGISTRY_CAPACITY_EXHAUSTED_MESSAGE}")]
-    CapacityExhausted,
-}
-
-impl RegistryError {
-    pub(crate) fn error_code(&self) -> Option<ErrorCode> {
-        match self {
-            Self::IdempotencyConflict(_) => Some(ErrorCode::IdempotencyConflict),
-            Self::TaskNotFound(_) => Some(ErrorCode::TaskNotFound),
-            Self::TaskAlreadyFinished(_) => Some(ErrorCode::TaskAlreadyFinished),
-            Self::StateUnavailable => Some(ErrorCode::InternalError),
-            Self::VerifiedEffectiveLimitsRequired(_) => Some(ErrorCode::InternalError),
-            Self::CapacityExhausted => Some(ErrorCode::CapacityExhausted),
-            _ => None,
-        }
     }
 }
 
@@ -482,6 +448,147 @@ where
     }
 }
 
+impl<C> TaskQueryPort for TaskRegistry<C>
+where
+    C: RegistryClock,
+{
+    fn snapshot(&self, task_id: &str) -> Result<Option<TaskPayload>, RegistryError> {
+        TaskRegistry::snapshot(self, task_id)
+    }
+
+    fn snapshot_by_client_request_id(
+        &self,
+        client_request_id: &str,
+    ) -> Result<Option<TaskPayload>, RegistryError> {
+        TaskRegistry::snapshot_by_client_request_id(self, client_request_id)
+    }
+
+    fn has_client_request_id(&self, client_request_id: &str) -> Result<bool, RegistryError> {
+        TaskRegistry::has_client_request_id(self, client_request_id)
+    }
+}
+
+impl<C> TaskCancellationPort for TaskRegistry<C>
+where
+    C: RegistryClock + Send,
+{
+    fn cancel_and_wait(
+        &self,
+        task_id: &str,
+    ) -> impl std::future::Future<Output = Result<TaskPayload, RegistryError>> + Send {
+        let waiter = self.request_cancel(task_id);
+        async move { Ok(waiter?.wait().await) }
+    }
+}
+
+impl SubmitWaiterPort for SubmitWaiter {
+    fn task_id(&self) -> &str {
+        SubmitWaiter::task_id(self)
+    }
+
+    fn wait(
+        self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = SubmitObservation> + Send>> {
+        Box::pin(SubmitWaiter::wait(self))
+    }
+}
+
+impl CompletionPublicationPort for FinishedTaskPublication {
+    fn publish_completion(self) -> TaskPayload {
+        FinishedTaskPublication::publish_completion(self)
+    }
+}
+
+impl<C> SubmitOwnerPort for SubmitExecutionOwner<C>
+where
+    C: RegistryClock + Send + 'static,
+{
+    type Publication = FinishedTaskPublication;
+
+    fn task_id(&self) -> &str {
+        SubmitExecutionOwner::task_id(self)
+    }
+
+    fn request(&self) -> &ValidatedSubmit {
+        SubmitExecutionOwner::request(self)
+    }
+
+    fn publish_running_with_cancellation(
+        &self,
+        snapshot: TaskPayload,
+        effective_limits: VerifiedEffectiveLimits,
+        cancellation: RunningCancellation,
+    ) -> Result<TaskPayload, RegistryError> {
+        SubmitExecutionOwner::publish_running_with_cancellation(
+            self,
+            snapshot,
+            effective_limits,
+            cancellation,
+        )
+    }
+
+    fn finish(self, snapshot: TaskPayload) -> Result<Self::Publication, RegistryError> {
+        #[cfg(target_os = "linux")]
+        {
+            SubmitExecutionOwner::finish_payload(self, snapshot)
+        }
+        #[cfg(all(test, not(target_os = "linux")))]
+        {
+            SubmitExecutionOwner::prepare_finish_for_test(self, snapshot)
+        }
+    }
+
+    fn fail(self, failure: SubmitFailure) -> SubmitObservation {
+        SubmitExecutionOwner::fail(self, failure)
+    }
+
+    fn rollback_before_running(
+        self,
+        failure: SubmitFailure,
+    ) -> Result<SubmitObservation, RegistryError> {
+        SubmitExecutionOwner::rollback_before_running(self, failure)
+    }
+}
+
+impl<C> TaskSubmissionPort for TaskRegistry<C>
+where
+    C: RegistryClock + Send + 'static,
+{
+    type Owner = SubmitExecutionOwner<C>;
+    type Waiter = SubmitWaiter;
+
+    fn existing_submit(
+        &self,
+        request: &ValidatedSubmit,
+    ) -> Result<Option<Self::Waiter>, RegistryError> {
+        TaskRegistry::existing_submit(self, request)
+    }
+
+    fn reserve_submit_with<F>(
+        &self,
+        request: ValidatedSubmit,
+        make_task_id: F,
+    ) -> Result<PortSubmitReservation<Self::Owner, Self::Waiter>, RegistryError>
+    where
+        F: FnOnce() -> String,
+    {
+        TaskRegistry::reserve_submit_with(self, request, make_task_id).map(|reservation| {
+            match reservation {
+                SubmitReservation::Owner(owner) => PortSubmitReservation::Owner(owner),
+                SubmitReservation::Existing(waiter) => PortSubmitReservation::Existing(waiter),
+            }
+        })
+    }
+
+    fn effective_limits_for(
+        &self,
+        task_id: &str,
+        observation: &SubmitObservation,
+    ) -> Result<Option<VerifiedEffectiveLimits>, RegistryError> {
+        TaskRegistry::effective_limits_for(self, task_id, observation)
+    }
+}
+
 impl<C> RegistryState<C>
 where
     C: RegistryClock,
@@ -531,27 +638,6 @@ fn verify_task_id(expected: &str, actual: &str) -> Result<(), RegistryError> {
             actual: actual.to_owned(),
         })
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SubmitFailure {
-    pub(crate) code: ErrorCode,
-    pub(crate) message: String,
-}
-
-impl SubmitFailure {
-    pub(crate) fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SubmitObservation {
-    Task(TaskPayload),
-    Failed(SubmitFailure),
 }
 
 #[derive(Debug)]
