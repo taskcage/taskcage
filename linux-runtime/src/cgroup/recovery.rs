@@ -22,18 +22,18 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Error)]
 #[error("{stage} 단계가 {path:?}에서 실패했습니다: {detail}")]
-pub(crate) struct StartupCgroupError {
+pub struct StartupCgroupError {
     stage: &'static str,
     path: PathBuf,
     detail: String,
 }
 
 impl StartupCgroupError {
-    pub(crate) fn stage(&self) -> &'static str {
+    pub fn stage(&self) -> &'static str {
         self.stage
     }
 
-    pub(crate) fn remaining_path(&self) -> &Path {
+    pub fn remaining_path(&self) -> &Path {
         &self.path
     }
 
@@ -51,13 +51,13 @@ impl StartupCgroupError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StartupRecoveryReport {
-    pub(crate) removed_jobs: usize,
-    pub(crate) placement: StartupCgroupPlacement,
+pub struct StartupRecoveryReport {
+    pub removed_jobs: usize,
+    pub placement: StartupCgroupPlacement,
 }
 
 /// stale socket 소유권을 얻은 뒤, preflight보다 먼저 호출해야 한다.
-pub(crate) fn recover_from_environment(
+pub fn recover_from_environment(
     timeout: Duration,
 ) -> Result<StartupRecoveryReport, StartupCgroupError> {
     let configured = configured_root_from_environment().map_err(|error| {
@@ -1314,8 +1314,8 @@ mod tests {
 
         use crate::cgroup::CgroupManager;
         use crate::executor::{PreparedCommand, SpawnOutcome, spawn_in_cgroup};
-        use crate::output::CaptureLimits;
         use crate::preflight::{CapabilityProbe, SystemProbe};
+        use taskcage_core::output::CaptureLimits;
 
         if std::env::var_os("TASKCAGE_RUN_LINUX_STARTUP_RECOVERY_INTEGRATION").is_none() {
             return;

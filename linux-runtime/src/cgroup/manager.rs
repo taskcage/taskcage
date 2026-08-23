@@ -1,41 +1,24 @@
-//! 데몬이 제어할 cgroup v2 경로를 찾고 경로 이탈을 막는다.
-//!
-//! 이 모듈은 아직 작업을 실행하지 않는다. 실행 기능이 추가될 때도 여기서 확인한
-//! 위임 경로 안에서만 작업 cgroup을 만들도록 경로 규칙을 한곳에 모아 둔다.
+//! cgroup 위임 경로를 검증하고 작업 cgroup 생성을 조립한다.
 
-#[cfg(any(target_os = "linux", test))]
-use std::ffi::OsStr;
-use std::ffi::OsString;
-use std::fs;
-use std::io;
-use std::num::NonZeroU64;
+use std::collections::BTreeSet;
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::Duration;
 
-#[cfg(target_os = "linux")]
-use std::collections::{BTreeMap, BTreeSet};
-#[cfg(target_os = "linux")]
-use std::fs::{File, OpenOptions};
-#[cfg(target_os = "linux")]
-use std::io::Write;
-#[cfg(target_os = "linux")]
-use std::os::fd::{AsRawFd, RawFd};
-#[cfg(target_os = "linux")]
-use std::sync::Arc;
-#[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-
-use serde::Serialize;
 use thiserror::Error;
-#[cfg(target_os = "linux")]
-use tokio::time::sleep;
 
-#[cfg(target_os = "linux")]
-use crate::cleanup_fault::{CleanupFaultPoint, CleanupFaults};
-#[cfg(target_os = "linux")]
-use crate::deadline::MonotonicDeadline;
-#[cfg(target_os = "linux")]
+use crate::cleanup_fault::CleanupFaults;
 use crate::preflight::VerifiedEnvironment;
+
+use super::events::{KernelEvents, read_word_set};
+use super::limits::{
+    CgroupLimits, VerifiedCgroupLimits, configure_job, configure_job_with_read_back_mismatch,
+};
+use super::task_group::JobCgroup;
 
 pub const DEFAULT_CGROUP_MOUNT: &str = "/sys/fs/cgroup";
 pub const SELF_CGROUP_FILE: &str = "/proc/self/cgroup";
@@ -165,78 +148,6 @@ pub enum CgroupError {
         mismatch: Box<CgroupError>,
         cleanup: String,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// 한 주기 안에서 CPU를 얼마나 오래 사용할지 정한다.
-pub struct CpuLimit {
-    pub quota_micros: NonZeroU64,
-    pub period_micros: NonZeroU64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// 작업 cgroup 하나에 적용할 자원 상한이다.
-pub struct CgroupLimits {
-    pub memory_max_bytes: NonZeroU64,
-    pub max_processes: NonZeroU64,
-    pub cpu: CpuLimit,
-}
-
-#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// 모든 cgroup 제한을 쓰고 같은 값으로 다시 읽은 뒤에만 만드는 내부 증거다.
-pub struct VerifiedCgroupLimits {
-    limits: CgroupLimits,
-}
-
-#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
-impl VerifiedCgroupLimits {
-    fn new(limits: CgroupLimits) -> Self {
-        Self { limits }
-    }
-
-    pub fn limits(self) -> CgroupLimits {
-        self.limits
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn for_test(limits: CgroupLimits) -> Self {
-        Self::new(limits)
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-/// 커널이 누적해서 기록하는 메모리 부족과 프로세스 제한 사건이다.
-pub struct KernelEvents {
-    pub memory_oom: u64,
-    pub memory_oom_kill: u64,
-    pub pids_max: u64,
-}
-
-impl KernelEvents {
-    /// 작업 시작 전 수치와 비교해 이번 작업에서 늘어난 값만 계산한다.
-    pub fn delta_from(&self, baseline: &Self) -> Self {
-        Self {
-            memory_oom: self.memory_oom.saturating_sub(baseline.memory_oom),
-            memory_oom_kill: self
-                .memory_oom_kill
-                .saturating_sub(baseline.memory_oom_kill),
-            pids_max: self.pids_max.saturating_sub(baseline.pids_max),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-/// 작업 종료 전에 읽은 커널 자원 사용량이다.
-pub struct JobStats {
-    pub cpu_usage_micros: u64,
-    pub memory_current_bytes: u64,
-    pub memory_peak_bytes: u64,
-    pub current_processes: u64,
-    pub peak_processes: Option<u64>,
-    pub event_delta: KernelEvents,
 }
 
 /// 위임받은 cgroup과 데몬·작업용 하위 경로를 한 묶음으로 보관한다.
@@ -446,7 +357,6 @@ fn io_error(operation: &'static str, path: &Path, source: io::Error) -> CgroupPa
     }
 }
 
-#[cfg(target_os = "linux")]
 const REQUIRED_CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
 
 #[cfg(target_os = "linux")]
@@ -479,6 +389,10 @@ impl CgroupCreateFaults {
 
     fn take_mode(&self) -> u8 {
         self.mode.swap(0, Ordering::AcqRel)
+    }
+
+    pub(super) fn record_read_back_attempt(&self) {
+        self.read_back_attempts.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn read_back_attempts(&self) -> usize {
@@ -670,275 +584,6 @@ impl CgroupManager {
 }
 
 #[cfg(target_os = "linux")]
-fn configure_job_with_read_back_mismatch(
-    path: &Path,
-    limits: CgroupLimits,
-    faults: &CgroupCreateFaults,
-) -> Result<(File, KernelEvents, VerifiedCgroupLimits), CgroupError> {
-    faults.read_back_attempts.fetch_add(1, Ordering::AcqRel);
-    let expected = limits.memory_max_bytes.get().to_string();
-    write_and_verify_with_injected_actual(
-        &path.join("memory.max"),
-        &expected,
-        "injected-read-back-value",
-    )?;
-    unreachable!("주입된 read-back 값은 요청값과 달라야 합니다")
-}
-
-#[cfg(target_os = "linux")]
-fn configure_job(
-    path: &Path,
-    limits: CgroupLimits,
-) -> Result<(File, KernelEvents, VerifiedCgroupLimits), CgroupError> {
-    // 커널 제어 파일은 쓰기 성공만으로 적용됐다고 단정하지 않고 다시 읽어 확인한다.
-    write_and_verify(
-        &path.join("memory.max"),
-        &limits.memory_max_bytes.get().to_string(),
-    )?;
-    let oom_group = path.join("memory.oom.group");
-    if oom_group.exists() {
-        write_and_verify(&oom_group, "1")?;
-    }
-    write_and_verify(
-        &path.join("pids.max"),
-        &limits.max_processes.get().to_string(),
-    )?;
-    write_and_verify(
-        &path.join("cpu.max"),
-        &format!(
-            "{} {}",
-            limits.cpu.quota_micros.get(),
-            limits.cpu.period_micros.get()
-        ),
-    )?;
-    require_regular_file(&path.join("cgroup.kill"), "작업 전체 종료")?;
-    require_regular_file(&path.join("cgroup.events"), "작업 상태")?;
-    let directory =
-        File::open(path).map_err(|source| cgroup_io_error("작업 cgroup 열기", path, source))?;
-    let baseline = read_kernel_events(path)?;
-    Ok((directory, baseline, VerifiedCgroupLimits::new(limits)))
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Debug)]
-/// 실행 중인 작업 하나와 그 cgroup 파일 설명자를 함께 보관한다.
-pub struct JobCgroup {
-    job_id: String,
-    path: PathBuf,
-    directory: File,
-    baseline: KernelEvents,
-    verified_limits: VerifiedCgroupLimits,
-    cleaned: bool,
-    #[cfg(target_os = "linux")]
-    cleanup_faults: Option<Arc<CleanupFaults>>,
-}
-
-#[cfg(target_os = "linux")]
-impl JobCgroup {
-    pub fn id(&self) -> &str {
-        &self.job_id
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn raw_fd(&self) -> RawFd {
-        self.directory.as_raw_fd()
-    }
-
-    pub fn verified_limits(&self) -> VerifiedCgroupLimits {
-        self.verified_limits
-    }
-
-    pub fn is_cleaned(&self) -> bool {
-        self.cleaned
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn cleanup_faults(&self) -> Option<Arc<CleanupFaults>> {
-        self.cleanup_faults.clone()
-    }
-
-    pub fn is_populated(&self) -> Result<bool, CgroupError> {
-        let path = self.path.join("cgroup.events");
-        #[cfg(target_os = "linux")]
-        if self
-            .cleanup_faults
-            .as_ref()
-            .is_some_and(|faults| faults.should_fail(CleanupFaultPoint::PopulatedZero))
-        {
-            return Err(injected_cleanup_error(
-                "작업 상태 확인",
-                &path,
-                CleanupFaultPoint::PopulatedZero,
-            ));
-        }
-        let events = read_flat_keys(&path)?;
-        Ok(required_key(&events, &path, "populated")? != 0)
-    }
-
-    pub fn contains_pid(&self, pid: libc::pid_t) -> Result<bool, CgroupError> {
-        let path = self.path.join("cgroup.procs");
-        let processes = fs::read_to_string(&path)
-            .map_err(|source| cgroup_io_error("작업 프로세스 읽기", &path, source))?;
-        Ok(processes
-            .lines()
-            .filter_map(|value| value.parse::<libc::pid_t>().ok())
-            .any(|value| value == pid))
-    }
-
-    /// 대표 PID 하나가 아니라 작업 cgroup 아래의 모든 프로세스를 종료한다.
-    pub fn kill_all(&self) -> Result<(), CgroupError> {
-        let path = self.path.join("cgroup.kill");
-        #[cfg(target_os = "linux")]
-        if self
-            .cleanup_faults
-            .as_ref()
-            .is_some_and(|faults| faults.should_fail(CleanupFaultPoint::CgroupKill))
-        {
-            return Err(injected_cleanup_error(
-                "작업 전체 종료",
-                &path,
-                CleanupFaultPoint::CgroupKill,
-            ));
-        }
-        write_control(&path, "1\n")
-    }
-
-    pub async fn wait_empty_until(&self, deadline: MonotonicDeadline) -> Result<(), CgroupError> {
-        loop {
-            if !self.is_populated()? {
-                return Ok(());
-            }
-            let Some(remaining) = deadline.remaining() else {
-                return Err(CgroupError::EmptyTimeout {
-                    path: self.path.clone(),
-                    timeout: deadline.budget(),
-                });
-            };
-            sleep(remaining.min(Duration::from_millis(10))).await;
-        }
-    }
-
-    pub fn stats(&self) -> Result<JobStats, CgroupError> {
-        let cpu_path = self.path.join("cpu.stat");
-        #[cfg(target_os = "linux")]
-        if self
-            .cleanup_faults
-            .as_ref()
-            .is_some_and(|faults| faults.should_fail(CleanupFaultPoint::Statistics))
-        {
-            return Err(injected_cleanup_error(
-                "작업 통계 수집",
-                &cpu_path,
-                CleanupFaultPoint::Statistics,
-            ));
-        }
-        let cpu = read_flat_keys(&cpu_path)?;
-        let current_events = read_kernel_events(&self.path)?;
-        let memory_current = read_u64(&self.path.join("memory.current"))?;
-        let memory_peak =
-            read_optional_u64(&self.path.join("memory.peak"))?.unwrap_or(memory_current);
-        let current_processes = read_u64(&self.path.join("pids.current"))?;
-        let peak_processes = read_optional_u64(&self.path.join("pids.peak"))?;
-
-        Ok(JobStats {
-            cpu_usage_micros: required_key(&cpu, &cpu_path, "usage_usec")?,
-            memory_current_bytes: memory_current,
-            memory_peak_bytes: memory_peak,
-            current_processes,
-            peak_processes,
-            event_delta: current_events.delta_from(&self.baseline),
-        })
-    }
-
-    /// 전체 종료, 빈 상태 확인, 통계 읽기, cgroup 제거 순서를 지킨다.
-    pub async fn finish_until(
-        &mut self,
-        deadline: MonotonicDeadline,
-    ) -> Result<JobStats, CgroupError> {
-        if self.is_populated()? {
-            self.kill_all()?;
-        }
-        self.finish_after_kill_until(deadline).await
-    }
-
-    /// 이미 cgroup.kill을 보낸 제어 종료 경로는 같은 종료 명령을 중복 전송하지 않는다.
-    pub async fn finish_after_kill_until(
-        &mut self,
-        deadline: MonotonicDeadline,
-    ) -> Result<JobStats, CgroupError> {
-        self.wait_empty_until(deadline).await?;
-
-        if deadline.remaining().is_none() {
-            return Err(CgroupError::EmptyTimeout {
-                path: self.path.clone(),
-                timeout: deadline.budget(),
-            });
-        }
-
-        // 통계 읽기에 실패해도 빈 cgroup 제거는 반드시 시도한다.
-        let stats = self.stats();
-        #[cfg(target_os = "linux")]
-        let removal = if self
-            .cleanup_faults
-            .as_ref()
-            .is_some_and(|faults| faults.should_fail(CleanupFaultPoint::CgroupRemoval))
-        {
-            Err(injected_cleanup_error(
-                "작업 cgroup 제거",
-                &self.path,
-                CleanupFaultPoint::CgroupRemoval,
-            ))
-        } else {
-            fs::remove_dir(&self.path)
-                .map_err(|source| cgroup_io_error("작업 cgroup 제거", &self.path, source))
-        };
-        #[cfg(not(target_os = "linux"))]
-        let removal = fs::remove_dir(&self.path)
-            .map_err(|source| cgroup_io_error("작업 cgroup 제거", &self.path, source));
-        if removal.is_ok() {
-            self.cleaned = true;
-        }
-        match (stats, removal) {
-            (Ok(stats), Ok(())) => Ok(stats),
-            (Err(primary), Ok(())) => Err(primary),
-            (Ok(_), Err(cleanup)) => Err(cleanup),
-            (Err(primary), Err(cleanup)) => Err(CgroupError::CleanupCombined {
-                primary: primary.to_string(),
-                cleanup: cleanup.to_string(),
-            }),
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn injected_cleanup_error(
-    operation: &'static str,
-    path: &Path,
-    point: CleanupFaultPoint,
-) -> CgroupError {
-    CgroupError::Io {
-        operation,
-        path: path.to_path_buf(),
-        source: CleanupFaults::error(point),
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for JobCgroup {
-    fn drop(&mut self) {
-        if self.cleaned || !self.path.exists() {
-            return;
-        }
-        // 오류 반환이 불가능한 마지막 방어선이다. 정상 경로에서는 `finish`가 빈 상태를 확인한다.
-        let _ = write_control(&self.path.join("cgroup.kill"), "1\n");
-        let _ = fs::remove_dir(&self.path);
-    }
-}
-
-#[cfg(target_os = "linux")]
 fn enable_required_controllers(path: &Path) -> Result<(), CgroupError> {
     let available = read_word_set(&path.join("cgroup.controllers"))?;
     ensure_controllers(&available, path)?;
@@ -968,116 +613,7 @@ fn ensure_controllers(controllers: &BTreeSet<String>, path: &Path) -> Result<(),
     }
 }
 
-#[cfg(target_os = "linux")]
-fn read_kernel_events(path: &Path) -> Result<KernelEvents, CgroupError> {
-    let memory_path = path.join("memory.events.local");
-    let pids_path = path.join("pids.events");
-    let memory = read_flat_keys(&memory_path)?;
-    let pids = read_flat_keys(&pids_path)?;
-    Ok(KernelEvents {
-        memory_oom: required_key(&memory, &memory_path, "oom")?,
-        memory_oom_kill: required_key(&memory, &memory_path, "oom_kill")?,
-        pids_max: required_key(&pids, &pids_path, "max")?,
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn read_flat_keys(path: &Path) -> Result<BTreeMap<String, u64>, CgroupError> {
-    let contents = fs::read_to_string(path)
-        .map_err(|source| cgroup_io_error("cgroup 항목 읽기", path, source))?;
-    let mut values = BTreeMap::new();
-    for line in contents.lines() {
-        let mut fields = line.split_whitespace();
-        let (Some(key), Some(raw_value), None) = (fields.next(), fields.next(), fields.next())
-        else {
-            continue;
-        };
-        if let Ok(value) = raw_value.parse::<u64>() {
-            values.insert(key.to_owned(), value);
-        }
-    }
-    Ok(values)
-}
-
-#[cfg(target_os = "linux")]
-fn required_key(
-    values: &BTreeMap<String, u64>,
-    path: &Path,
-    key: &'static str,
-) -> Result<u64, CgroupError> {
-    values
-        .get(key)
-        .copied()
-        .ok_or_else(|| CgroupError::MissingKey {
-            path: path.to_path_buf(),
-            key,
-        })
-}
-
-#[cfg(target_os = "linux")]
-fn read_word_set(path: &Path) -> Result<BTreeSet<String>, CgroupError> {
-    let contents = fs::read_to_string(path)
-        .map_err(|source| cgroup_io_error("cgroup 제어기 읽기", path, source))?;
-    Ok(contents.split_whitespace().map(str::to_owned).collect())
-}
-
-#[cfg(target_os = "linux")]
-fn read_u64(path: &Path) -> Result<u64, CgroupError> {
-    let value = fs::read_to_string(path)
-        .map_err(|source| cgroup_io_error("cgroup 숫자 읽기", path, source))?;
-    value.trim().parse::<u64>().map_err(|source| {
-        cgroup_io_error(
-            "cgroup 숫자 변환",
-            path,
-            io::Error::new(io::ErrorKind::InvalidData, source),
-        )
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn read_optional_u64(path: &Path) -> Result<Option<u64>, CgroupError> {
-    if path.exists() {
-        read_u64(path).map(Some)
-    } else {
-        Ok(None)
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn write_and_verify(path: &Path, value: &str) -> Result<(), CgroupError> {
-    write_control(path, &format!("{value}\n"))?;
-    let actual = fs::read_to_string(path)
-        .map_err(|source| cgroup_io_error("cgroup 값 재확인", path, source))?;
-    verify_read_back(path, value, actual.trim())
-}
-
-#[cfg(target_os = "linux")]
-fn write_and_verify_with_injected_actual(
-    path: &Path,
-    value: &str,
-    injected_actual: &str,
-) -> Result<(), CgroupError> {
-    write_control(path, &format!("{value}\n"))?;
-    let _actual = fs::read_to_string(path)
-        .map_err(|source| cgroup_io_error("cgroup 값 재확인", path, source))?;
-    verify_read_back(path, value, injected_actual)
-}
-
-#[cfg(target_os = "linux")]
-fn verify_read_back(path: &Path, value: &str, actual: &str) -> Result<(), CgroupError> {
-    if actual == value {
-        Ok(())
-    } else {
-        Err(CgroupError::ValueMismatch {
-            path: path.to_path_buf(),
-            expected: value.to_owned(),
-            actual: actual.to_owned(),
-        })
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn write_control(path: &Path, value: &str) -> Result<(), CgroupError> {
+pub(super) fn write_control(path: &Path, value: &str) -> Result<(), CgroupError> {
     let mut file = OpenOptions::new()
         .write(true)
         .open(path)
@@ -1087,7 +623,10 @@ fn write_control(path: &Path, value: &str) -> Result<(), CgroupError> {
 }
 
 #[cfg(target_os = "linux")]
-fn require_regular_file(path: &Path, capability: &'static str) -> Result<(), CgroupError> {
+pub(super) fn require_regular_file(
+    path: &Path,
+    capability: &'static str,
+) -> Result<(), CgroupError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => Ok(()),
         Ok(_) => Err(cgroup_io_error(
@@ -1100,7 +639,11 @@ fn require_regular_file(path: &Path, capability: &'static str) -> Result<(), Cgr
 }
 
 #[cfg(target_os = "linux")]
-fn cgroup_io_error(operation: &'static str, path: &Path, source: io::Error) -> CgroupError {
+pub(super) fn cgroup_io_error(
+    operation: &'static str,
+    path: &Path,
+    source: io::Error,
+) -> CgroupError {
     CgroupError::Io {
         operation,
         path: path.to_path_buf(),
@@ -1111,7 +654,11 @@ fn cgroup_io_error(operation: &'static str, path: &Path, source: io::Error) -> C
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroU64;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::cgroup::CpuLimit;
+    use crate::cgroup::limits::write_and_verify;
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 

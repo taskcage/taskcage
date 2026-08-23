@@ -44,10 +44,10 @@ jobs:
             fi
           }
 
-          set_output runtime '^(Cargo\.(toml|lock)$|core/|daemon/|test-fixtures/|integration-tests/(preflight-fail-closed|cgroup-runner-smoke)\.sh$|\.github/workflows/ci\.yml$)'
-          set_output container '^(Cargo\.(toml|lock)$|core/|daemon/|test-fixtures/|java-sdk/|protocol-fixtures/|examples/ffmpeg-java/|dev/container/|\.github/workflows/ci\.yml$)'
-          set_output systemd '^(Cargo\.(toml|lock)$|core/|daemon/|test-fixtures/|packaging/ubuntu/|integration-tests/systemd-service-smoke\.sh$|\.github/workflows/ci\.yml$)'
-          set_output ffmpeg '^(Cargo\.(toml|lock)$|core/|daemon/|test-fixtures/|java-sdk/|protocol-fixtures/|examples/ffmpeg-java/|dev/container/(Dockerfile|entrypoint\.sh|prepare-ffmpeg-package\.sh|prepare-ffmpeg-bundle\.sh)|integration-tests/ffmpeg-reference-workflow\.sh|scripts/ci/install-ffmpeg\.sh|\.github/workflows/ci\.yml$)'
+          set_output runtime '^(Cargo\.(toml|lock)$|core/|daemon/|linux-runtime/|test-fixtures/|integration-tests/(preflight-fail-closed|cgroup-runner-smoke)\.sh$|\.github/workflows/ci\.yml$)'
+          set_output container '^(Cargo\.(toml|lock)$|core/|daemon/|linux-runtime/|test-fixtures/|java-sdk/|protocol-fixtures/|examples/ffmpeg-java/|dev/container/|\.github/workflows/ci\.yml$)'
+          set_output systemd '^(Cargo\.(toml|lock)$|core/|daemon/|linux-runtime/|test-fixtures/|packaging/ubuntu/|integration-tests/systemd-service-smoke\.sh$|\.github/workflows/ci\.yml$)'
+          set_output ffmpeg '^(Cargo\.(toml|lock)$|core/|daemon/|linux-runtime/|test-fixtures/|java-sdk/|protocol-fixtures/|examples/ffmpeg-java/|dev/container/(Dockerfile|entrypoint\.sh|prepare-ffmpeg-package\.sh|prepare-ffmpeg-bundle\.sh)|integration-tests/ffmpeg-reference-workflow\.sh|scripts/ci/install-ffmpeg\.sh|\.github/workflows/ci\.yml$)'
 
   java:
     name: Java SDK protocol fixtures

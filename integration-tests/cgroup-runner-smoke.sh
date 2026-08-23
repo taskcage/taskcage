@@ -193,6 +193,20 @@ if [[ -z "${submit_test}" || ! -x "${submit_test}" ]]; then
   exit 1
 fi
 
+linux_runtime_test=""
+while IFS= read -r artifact; do
+  if [[ "${artifact}" == *'"target":{"kind":["lib"]'* &&
+        "${artifact}" == *'"test":true'* &&
+        "${artifact}" == *'"executable":"'* ]]; then
+    linux_runtime_test="${artifact#*\"executable\":\"}"
+    linux_runtime_test="${linux_runtime_test%%\"*}"
+  fi
+done < <(cargo test -p taskcage-linux-runtime --lib --no-run --message-format=json)
+if [[ -z "${linux_runtime_test}" || ! -x "${linux_runtime_test}" ]]; then
+  echo "FAIL: Linux runtime 통합 시험 실행 파일을 찾지 못했습니다" >&2
+  exit 1
+fi
+
 # 비정상 종료는 lock FD를 해제하고, 다음 시작은 같은 UID·0600·동일 inode의 stale socket만 제거한다.
 "${submit_test}" \
   'startup::tests::abrupt_exit_releases_lock_and_leaves_only_a_recoverable_socket' \
@@ -211,8 +225,8 @@ unit_sequence=$((unit_sequence + 1))
   --property=Delegate=yes \
   --setenv=TASKCAGE_RUN_LINUX_STARTUP_RECOVERY_INTEGRATION=1 \
   --setenv=TASKCAGE_STARTUP_RECOVERY_GHOST_BIN="${ghost_bin}" \
-  "${submit_test}" \
-  'startup_cgroup::tests::actual_recovery_kills_descendants_removes_jobs_and_allows_preflight' \
+  "${linux_runtime_test}" \
+  'cgroup::recovery::tests::actual_recovery_kills_descendants_removes_jobs_and_allows_preflight' \
   --exact \
   --nocapture
 
