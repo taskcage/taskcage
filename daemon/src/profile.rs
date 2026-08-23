@@ -8,6 +8,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use taskcage_core::task::{TaskSnapshot as TaskPayload, TerminationReason};
 use thiserror::Error;
 use tokio::sync::Notify;
 
@@ -19,9 +20,9 @@ use crate::digest::Sha256Digest;
 use crate::profile_registry::{ProfileRegistry, ResolvedProfile, StagedProfile};
 use crate::protocol::{
     ErrorCode, ProfileFailurePayload, ProfileIdentity, ProfileOutcome, ProfileRequestPayload,
-    ProfileTaskPayload, PublishedArtifactKind, PublishedArtifactPayload, TaskPayload,
-    TerminationReason,
+    ProfileTaskPayload, PublishedArtifactKind, PublishedArtifactPayload,
 };
+use crate::protocol_mapper;
 use crate::resource_budget::ResourceBudget;
 
 #[cfg(test)]
@@ -472,11 +473,11 @@ fn finished_profile_payload(
             task_id,
             profile,
             profile_outcome: ProfileOutcome::Succeeded,
-            termination_reason,
-            process,
-            timing,
-            usage,
-            output,
+            termination_reason: protocol_mapper::termination_reason_to_protocol(termination_reason),
+            process: protocol_mapper::process_result(process),
+            timing: protocol_mapper::task_timing(timing),
+            usage: protocol_mapper::task_usage(usage),
+            output: protocol_mapper::task_output(output),
             artifacts: BTreeMap::from([(output_slot, published_wire(artifact))]),
             failure: None,
         },
@@ -484,11 +485,11 @@ fn finished_profile_payload(
             task_id,
             profile,
             profile_outcome: ProfileOutcome::Failed,
-            termination_reason,
-            process,
-            timing,
-            usage,
-            output,
+            termination_reason: protocol_mapper::termination_reason_to_protocol(termination_reason),
+            process: protocol_mapper::process_result(process),
+            timing: protocol_mapper::task_timing(timing),
+            usage: protocol_mapper::task_usage(usage),
+            output: protocol_mapper::task_output(output),
             artifacts: BTreeMap::new(),
             failure: Some(failure),
         },

@@ -6,6 +6,10 @@ use std::time::Instant;
 #[cfg(target_os = "linux")]
 use std::{collections::HashMap, fs::File, sync::Mutex};
 
+use taskcage_core::task::{
+    TaskSnapshot as TaskPayload, TerminationReason as DomainTerminationReason,
+};
+
 use crate::capability::{CapabilityAdapter, CapabilityInitialization};
 use crate::capacity::TaskCapacitySettings;
 use crate::deployment_policy::DeploymentResourcePolicy;
@@ -15,12 +19,13 @@ use crate::preflight::{PreflightError, VerifiedEnvironment};
 use crate::profile::{LocalProfileRuntime, ProfileReservation, ProfileTaskRecord};
 use crate::protocol::{
     ErrorCode, ErrorPayload, PROTOCOL_VERSION, Request, Response, TaskAcceptedPayload,
-    TaskCancelledPayload, TaskPayload, TaskState, TerminationReason,
+    TaskCancelledPayload, TaskState,
 };
 #[cfg(target_os = "linux")]
 use crate::protocol::{
     PROFILE_PROTOCOL_VERSION, ProfileAcceptedPayload, ProfileEffectiveResources,
 };
+use crate::protocol_mapper;
 #[cfg(target_os = "linux")]
 use crate::submit::SubmitCoordinator;
 #[cfg(target_os = "linux")]
@@ -910,7 +915,7 @@ where
             Ok(Some(payload)) => Response::Task {
                 protocol_version: PROTOCOL_VERSION,
                 request_id,
-                payload,
+                payload: protocol_mapper::task_snapshot(payload),
             },
             Ok(None) => error_response(
                 request_id,
@@ -943,7 +948,7 @@ where
         RequestHandling::Handled(match result {
             Ok(TaskPayload::Finished {
                 task_id,
-                termination_reason: TerminationReason::Cancelled,
+                termination_reason: DomainTerminationReason::Cancelled,
                 ..
             }) => Response::TaskCancelled {
                 protocol_version: PROTOCOL_VERSION,
@@ -951,7 +956,7 @@ where
                 payload: TaskCancelledPayload {
                     task_id,
                     state: TaskState::Finished,
-                    termination_reason: TerminationReason::Cancelled,
+                    termination_reason: crate::protocol::TerminationReason::Cancelled,
                 },
             },
             Ok(TaskPayload::Finished { task_id, .. }) => error_response(
@@ -1016,7 +1021,7 @@ fn submit_response(request_id: String, outcome: SubmitOutcome) -> Response {
         SubmitObservation::Task(payload @ TaskPayload::Finished { .. }) => Response::Task {
             protocol_version: PROTOCOL_VERSION,
             request_id,
-            payload,
+            payload: protocol_mapper::task_snapshot(payload),
         },
         SubmitObservation::Failed(failure) => submit_failure_response(request_id, failure),
     }
@@ -1086,6 +1091,9 @@ mod tests {
     use serde_json::Value;
     #[cfg(target_os = "linux")]
     use sha2::{Digest, Sha256};
+    use taskcage_core::task::{
+        ProcessResult, TaskOutput, TaskTiming, TaskUsage, TerminationReason,
+    };
     #[cfg(target_os = "linux")]
     use tokio::time::{Duration as TokioDuration, timeout};
 
@@ -1100,8 +1108,8 @@ mod tests {
         FILE_COPY_PROFILE_NAME, FILE_COPY_PROFILE_VERSION,
     };
     use crate::protocol::{
-        CommandSpec, CpuMax, EmptyPayload, OutputLimits, ProcessResult, ResourceLimits,
-        SubmitTaskPayload, TaskIdPayload, TaskOutput, TaskTiming, TaskUsage, TerminationReason,
+        CommandSpec, CpuMax, EmptyPayload, OutputLimits, ResourceLimits, SubmitTaskPayload,
+        TaskIdPayload,
     };
     #[cfg(target_os = "linux")]
     use crate::resource_budget::ResourceBudget;
@@ -1834,7 +1842,9 @@ mod tests {
                 request_id: OTHER_REQUEST_ID.to_owned(),
                 task_id: TASK_ID.to_owned(),
                 effective_limits: None,
-                observation: SubmitObservation::Task(payload.clone()),
+                observation: SubmitObservation::Task(protocol_mapper::task_snapshot_from_protocol(
+                    payload,
+                )),
             })),
             1,
         );
@@ -1880,7 +1890,7 @@ mod tests {
                 Response::Task {
                     protocol_version: PROTOCOL_VERSION,
                     request_id: request_id.to_owned(),
-                    payload: expected,
+                    payload: protocol_mapper::task_snapshot(expected),
                 }
             );
         }
@@ -2059,7 +2069,7 @@ mod tests {
                 payload: TaskCancelledPayload {
                     task_id: TASK_ID.to_owned(),
                     state: TaskState::Finished,
-                    termination_reason: TerminationReason::Cancelled,
+                    termination_reason: crate::protocol::TerminationReason::Cancelled,
                 },
             }
         );
@@ -2329,7 +2339,7 @@ mod tests {
                     },
                 }));
                 if let Response::Task {
-                    payload: payload @ TaskPayload::Finished { .. },
+                    payload: payload @ crate::protocol::TaskPayload::Finished { .. },
                     ..
                 } = response
                 {
@@ -2342,8 +2352,8 @@ mod tests {
         .expect("정리 뒤 FINISHED를 getTask로 조회해야 합니다");
         assert!(matches!(
             finished,
-            TaskPayload::Finished {
-                termination_reason: TerminationReason::Exited,
+            crate::protocol::TaskPayload::Finished {
+                termination_reason: crate::protocol::TerminationReason::Exited,
                 ..
             }
         ));
@@ -2370,9 +2380,9 @@ mod tests {
             exec_failed,
             Response::Task {
                 request_id,
-                payload: TaskPayload::Finished {
-                    termination_reason: TerminationReason::ExecutionFailed,
-                    process: ProcessResult {
+                payload: crate::protocol::TaskPayload::Finished {
+                    termination_reason: crate::protocol::TerminationReason::ExecutionFailed,
+                    process: crate::protocol::ProcessResult {
                         exit_code: None,
                         signal: None,
                     },
@@ -2549,7 +2559,7 @@ mod tests {
             finished,
             crate::protocol::ProfileTaskPayload::Finished {
                 profile_outcome: crate::protocol::ProfileOutcome::Succeeded,
-                termination_reason: TerminationReason::Exited,
+                termination_reason: crate::protocol::TerminationReason::Exited,
                 ref artifacts,
                 failure: None,
                 ..
@@ -2573,8 +2583,8 @@ mod tests {
         assert!(matches!(
             raw_snapshot,
             Response::Task {
-                payload: TaskPayload::Finished {
-                    termination_reason: TerminationReason::Exited,
+                payload: crate::protocol::TaskPayload::Finished {
+                    termination_reason: crate::protocol::TerminationReason::Exited,
                     ..
                 },
                 ..
@@ -2667,7 +2677,7 @@ mod tests {
         let success = wait_for_profile_result(&handlers, SUCCESS_TASK).await;
         let crate::protocol::ProfileTaskPayload::Finished {
             profile_outcome: crate::protocol::ProfileOutcome::Succeeded,
-            termination_reason: TerminationReason::Exited,
+            termination_reason: crate::protocol::TerminationReason::Exited,
             process,
             artifacts: published,
             failure: None,
@@ -2708,7 +2718,7 @@ mod tests {
             failure,
             crate::protocol::ProfileTaskPayload::Finished {
                 profile_outcome: crate::protocol::ProfileOutcome::Failed,
-                termination_reason: TerminationReason::Exited,
+                termination_reason: crate::protocol::TerminationReason::Exited,
                 ref artifacts,
                 failure: Some(crate::protocol::ProfileFailurePayload { ref code, .. }),
                 ..
@@ -2740,7 +2750,7 @@ mod tests {
         let timeout_result = wait_for_profile_result(&handlers, TIMEOUT_TASK).await;
         let crate::protocol::ProfileTaskPayload::Finished {
             profile_outcome: crate::protocol::ProfileOutcome::Failed,
-            termination_reason: TerminationReason::TimedOut,
+            termination_reason: crate::protocol::TerminationReason::TimedOut,
             output,
             artifacts: timeout_artifacts,
             failure: Some(timeout_failure),
@@ -2794,7 +2804,7 @@ mod tests {
             cancelled,
             Response::TaskCancelled {
                 payload: TaskCancelledPayload {
-                    termination_reason: TerminationReason::Cancelled,
+                    termination_reason: crate::protocol::TerminationReason::Cancelled,
                     ..
                 },
                 ..
@@ -2805,7 +2815,7 @@ mod tests {
             cancel_result,
             crate::protocol::ProfileTaskPayload::Finished {
                 profile_outcome: crate::protocol::ProfileOutcome::Failed,
-                termination_reason: TerminationReason::Cancelled,
+                termination_reason: crate::protocol::TerminationReason::Cancelled,
                 ref artifacts,
                 failure: Some(crate::protocol::ProfileFailurePayload { ref code, .. }),
                 ..
@@ -2916,7 +2926,7 @@ mod tests {
         let result = wait_for_profile_result(&handlers, REAL_TASK).await;
         let crate::protocol::ProfileTaskPayload::Finished {
             profile_outcome: crate::protocol::ProfileOutcome::Succeeded,
-            termination_reason: TerminationReason::Exited,
+            termination_reason: crate::protocol::TerminationReason::Exited,
             artifacts: published,
             failure: None,
             ..
@@ -3278,7 +3288,7 @@ mod tests {
                 Response::TaskCancelled {
                     payload: TaskCancelledPayload {
                         state: TaskState::Finished,
-                        termination_reason: TerminationReason::Cancelled,
+                        termination_reason: crate::protocol::TerminationReason::Cancelled,
                         ..
                     },
                     ..
@@ -3301,9 +3311,9 @@ mod tests {
         assert!(matches!(
             cancelled,
             Response::Task {
-                payload: TaskPayload::Finished {
-                    termination_reason: TerminationReason::Cancelled,
-                    process: ProcessResult {
+                payload: crate::protocol::TaskPayload::Finished {
+                    termination_reason: crate::protocol::TerminationReason::Cancelled,
+                    process: crate::protocol::ProcessResult {
                         exit_code: None,
                         signal: Some(_),
                     },
@@ -3386,8 +3396,8 @@ mod tests {
         assert!(matches!(
             timed_out,
             Response::Task {
-                payload: TaskPayload::Finished {
-                    termination_reason: TerminationReason::TimedOut,
+                payload: crate::protocol::TaskPayload::Finished {
+                    termination_reason: crate::protocol::TerminationReason::TimedOut,
                     ..
                 },
                 ..

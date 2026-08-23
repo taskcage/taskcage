@@ -22,9 +22,9 @@ use crate::lifecycle::{
 };
 use crate::output::{CaptureLimits, CapturedOutput};
 use crate::preflight::VerifiedEnvironment;
-use crate::protocol::TaskPayload;
 use crate::submit::{RunnerPermit, TaskStartTime, TaskStartTimeSource, VerifiedRunningTask};
 use crate::{Error, Result};
+use taskcage_core::task::TaskSnapshot as TaskPayload;
 
 #[derive(Debug)]
 /// cgroup과 출력 reader 정리가 끝난 뒤 Runner만 만들 수 있는 완료 결과다.
