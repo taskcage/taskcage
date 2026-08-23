@@ -5,6 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::application::task::SubmitCoordinator;
 use crate::fail_stop::CleanupFailureReport;
 use crate::handlers::{ProtocolHandlers, RequestHandling};
 use crate::protocol as local;
@@ -14,7 +15,6 @@ use crate::remote_dispatch::{RemoteBoolFuture, RemoteTaskBackend, RemoteTaskFutu
 use crate::remote_protocol as remote;
 use crate::remote_protocol_mapper as mapper;
 use crate::remote_server::error_response;
-use crate::submit::SubmitCoordinator;
 
 #[derive(Clone)]
 pub(crate) struct LocalProfileRemoteBackend {
@@ -633,6 +633,7 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+    use crate::application::task::TaskRegistrySettings;
     use crate::capacity::TaskCapacitySettings;
     use crate::deployment_policy::DeploymentResourcePolicy;
     use crate::fail_stop::{FailStopCoordinator, FailStopSettings};
@@ -640,7 +641,6 @@ mod tests {
     use crate::profile::{FILE_COPY_PROFILE_NAME, FILE_COPY_PROFILE_VERSION, LocalProfileRuntime};
     use crate::remote_config::ProfileIdentityKey;
     use crate::resource_budget::ResourceBudget;
-    use crate::submit::TaskRegistrySettings;
 
     fn profile_budget() -> ResourceBudget {
         ResourceBudget::try_from_protocol(

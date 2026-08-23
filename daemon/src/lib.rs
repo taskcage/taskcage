@@ -1,5 +1,7 @@
 //! TaskCage Rust 데몬의 사전 검사와 작업 실행 생명주기를 제공한다.
 
+mod adapters;
+mod application;
 pub mod artifact;
 mod bootstrap;
 pub use bootstrap::{DaemonConfig, DeploymentResourceMaximum, LocalProfileConfig, run};
@@ -71,8 +73,6 @@ pub mod remote_protocol;
 mod remote_protocol_mapper;
 pub mod remote_server;
 pub mod resource_budget;
-#[cfg(target_os = "linux")]
-mod runner;
 pub mod runtime_package;
 #[cfg(target_os = "linux")]
 mod server;
@@ -86,14 +86,16 @@ pub mod status;
     not(target_os = "linux"),
     allow(dead_code, reason = "protocol task 실행은 Linux에서만 제공됩니다")
 )]
-mod submit;
-
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use adapters::linux_executor::{ExecutionConfig, execute};
+#[cfg(target_os = "linux")]
+use application::task::{TaskStartTime, TaskStartTimeSource};
 #[cfg(target_os = "linux")]
 use cancellation::cancellation_channel;
 #[cfg(target_os = "linux")]
@@ -104,11 +106,7 @@ use executor::{ExecutorError, PreparedCommand};
 use output::CaptureLimits;
 use preflight::{CapabilityProbe, CapabilityReport, PreflightError, SystemProbe};
 use protocol::TaskOutput;
-#[cfg(target_os = "linux")]
-use runner::{ExecutionConfig, execute};
 use serde::Serialize;
-#[cfg(target_os = "linux")]
-use submit::{TaskStartTime, TaskStartTimeSource};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

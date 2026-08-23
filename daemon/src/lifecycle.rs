@@ -203,7 +203,7 @@ impl SingleTaskLifecycle {
     #[cfg(target_os = "linux")]
     pub(crate) fn complete(
         &mut self,
-        completion: crate::runner::CleanedRun,
+        completion: crate::adapters::linux_executor::CleanedRun,
         finished_at: String,
         finished_monotonic: Instant,
     ) -> Result<&TaskPayload, LifecycleError> {

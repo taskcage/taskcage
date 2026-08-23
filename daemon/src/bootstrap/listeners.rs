@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::signals::{reload_remote_credentials, shutdown_signal, wait_for_listener_shutdown};
+use crate::application::task::SubmitCoordinator;
 use crate::handlers::ProtocolHandlers;
 use crate::remote_backend::LocalProfileRemoteBackend;
 use crate::remote_config::RemoteDaemonConfig;
 use crate::remote_dispatch::RemoteDispatcher;
 use crate::startup::StartupOwnership;
-use crate::submit::SubmitCoordinator;
 use crate::{Error, Result, remote_artifact, remote_auth, remote_server, server};
 
 pub(super) async fn serve(

@@ -5,6 +5,8 @@ use super::config::DaemonConfig;
 #[cfg(target_os = "linux")]
 use super::listeners;
 #[cfg(target_os = "linux")]
+use crate::application::task::TaskRegistrySettings;
+#[cfg(target_os = "linux")]
 use crate::capacity::TaskCapacitySettings;
 #[cfg(target_os = "linux")]
 use crate::fail_stop::{FailStopCoordinator, FailStopSettings};
@@ -16,8 +18,6 @@ use crate::preflight::SystemProbe;
 use crate::startup::StartupOwnership;
 #[cfg(target_os = "linux")]
 use crate::startup_cgroup::recover_from_environment;
-#[cfg(target_os = "linux")]
-use crate::submit::TaskRegistrySettings;
 use crate::{Error, Result};
 
 /// 명시적 UDS 설정으로 protocol v1 daemon을 실행한다.

@@ -1,8 +1,5 @@
 //! protocol v1 submit 검증부터 멱등 예약과 Runner 상태 저장까지 한 경계에서 조정한다.
 
-#[path = "registry.rs"]
-mod registry;
-
 #[cfg(any(target_os = "linux", test))]
 use std::future::Future;
 #[cfg(any(target_os = "linux", test))]
@@ -15,53 +12,54 @@ use tokio::sync::oneshot;
 #[cfg(any(target_os = "linux", test))]
 use std::sync::Arc;
 
-#[cfg(target_os = "linux")]
-use self::registry::MonotonicClock;
 #[cfg(any(target_os = "linux", test))]
-pub(crate) use self::registry::TaskRegistrySettings;
+use super::completion;
 #[cfg(any(target_os = "linux", test))]
-use self::registry::{
-    FinishedTaskPublication, RegistryClock, SubmitExecutionOwner, SubmitReservation, TaskRegistry,
+use super::ports::{
+    FinishedTime, SubmitOwnerPort, SubmitReservation, SubmitWaiterPort, TaskSubmissionPort,
 };
 #[cfg(any(target_os = "linux", test))]
-pub(crate) use self::registry::{RegistryError, SubmitFailure, SubmitObservation};
+pub(crate) use super::ports::{RegistryError, SubmitFailure, SubmitObservation};
+#[cfg(any(target_os = "linux", test))]
+use super::ports::{
+    RunnerPermit, TaskRunConfig, TaskStartTime, TaskStartTimeSource, VerifiedRunningTask,
+};
+#[cfg(target_os = "linux")]
+use super::ports::{TaskExecutionPort, TaskRunFailure, TaskRunFailureKind, TaskUseCases};
+#[cfg(target_os = "linux")]
+use super::{cancel, query};
+#[cfg(target_os = "linux")]
+use crate::adapters::task_registry::MonotonicClock;
+#[cfg(any(target_os = "linux", test))]
+use crate::adapters::task_registry::TaskRegistry;
+#[cfg(any(target_os = "linux", test))]
+pub(crate) use crate::adapters::task_registry::TaskRegistrySettings;
 #[cfg(any(target_os = "linux", test))]
 use crate::cancellation::{CancellationRuntime, RunningCancellation, cancellation_channel};
 #[cfg(any(target_os = "linux", test))]
 use crate::capacity::{TaskCapacity, TaskCapacityPermit, TaskCapacitySettings};
 use crate::execution_plan::ResolvedExecutionPlan;
+#[cfg(test)]
+use crate::fail_stop::CleanupFailureReport;
 #[cfg(any(target_os = "linux", test))]
-use crate::fail_stop::{
-    ActiveExecution, CleanupFailureReport, FailStopCoordinator, FailStopSettings,
-};
+use crate::fail_stop::{ActiveExecution, FailStopCoordinator, FailStopSettings};
 #[cfg(target_os = "linux")]
 use crate::preflight::VerifiedEnvironment;
 #[cfg(any(target_os = "linux", test))]
 use taskcage_core::task::TaskSnapshot as TaskPayload;
 
+#[cfg(target_os = "linux")]
+use crate::adapters::linux_executor::TaskRunner;
 use crate::protocol::ErrorCode;
 use crate::protocol::{PROTOCOL_VERSION, ProfileRequestPayload, Request, SubmitTaskPayload};
 #[cfg(any(target_os = "linux", test))]
 use crate::resource_budget::VerifiedEffectiveLimits;
 use crate::resource_budget::{ResourceBudget, ResourceBudgetError};
 #[cfg(target_os = "linux")]
-use crate::runner::{TaskRunConfig, TaskRunFailureKind, TaskRunner};
-#[cfg(target_os = "linux")]
 use crate::{artifact::StagedArtifactTask, profile::ProfileTaskRecord};
 
 #[cfg(any(target_os = "linux", test))]
 const CAPACITY_EXHAUSTED_MESSAGE: &str = "all task execution slots are in use";
-
-/// 원자적 예약을 얻은 submit 조정 경로만 Runner 호출 권한을 만들 수 있다.
-#[cfg(target_os = "linux")]
-pub(crate) struct RunnerPermit(());
-
-#[cfg(target_os = "linux")]
-impl RunnerPermit {
-    fn new() -> Self {
-        Self(())
-    }
-}
 
 #[cfg(any(target_os = "linux", test))]
 pub(crate) enum TaskIdSource {
@@ -88,55 +86,27 @@ pub(crate) struct SubmitMetadata {
     pub(crate) cleanup_timeout: Duration,
 }
 
-#[cfg(any(target_os = "linux", test))]
-#[derive(Debug, Clone)]
-pub(crate) struct TaskStartTime {
-    wall_clock: String,
-    monotonic: Instant,
+/// task ID와 시각 생성은 environment gate를 통과한 뒤에만 이 값으로 확정한다.
+pub(crate) struct SubmitContext {
+    metadata: SubmitMetadata,
+    finished_time: FinishedTime,
 }
 
-#[cfg(any(target_os = "linux", test))]
-impl TaskStartTime {
-    pub(crate) fn new(wall_clock: String, monotonic: Instant) -> Self {
+impl SubmitContext {
+    pub(crate) fn new(metadata: SubmitMetadata, finished_time: FinishedTime) -> Self {
         Self {
-            wall_clock,
-            monotonic,
+            metadata,
+            finished_time,
         }
     }
 
-    pub(crate) fn wall_clock(&self) -> &str {
-        &self.wall_clock
+    pub(crate) fn into_parts(self) -> (SubmitMetadata, FinishedTime) {
+        (self.metadata, self.finished_time)
     }
 
-    pub(crate) fn monotonic(&self) -> Instant {
-        self.monotonic
-    }
-}
-
-#[cfg(any(target_os = "linux", test))]
-pub(crate) struct TaskStartTimeSource {
-    capture: Option<Box<dyn FnOnce() -> TaskStartTime + Send + 'static>>,
-}
-
-#[cfg(any(target_os = "linux", test))]
-impl std::fmt::Debug for TaskStartTimeSource {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("TaskStartTimeSource(<lazy clock>)")
-    }
-}
-
-#[cfg(any(target_os = "linux", test))]
-impl TaskStartTimeSource {
-    pub(crate) fn new(capture: impl FnOnce() -> TaskStartTime + Send + 'static) -> Self {
-        Self {
-            capture: Some(Box::new(capture)),
-        }
-    }
-
-    pub(crate) fn capture(mut self) -> TaskStartTime {
-        self.capture
-            .take()
-            .expect("작업 시작 시각 source는 한 번만 호출할 수 있습니다")()
+    #[cfg(target_os = "linux")]
+    pub(crate) fn preallocate_task_id(&mut self) -> String {
+        self.metadata.preallocate_task_id()
     }
 }
 
@@ -194,27 +164,6 @@ pub(crate) struct SubmitOutcome {
     pub(crate) task_id: String,
     pub(crate) effective_limits: Option<VerifiedEffectiveLimits>,
     pub(crate) observation: SubmitObservation,
-}
-
-#[cfg(any(target_os = "linux", test))]
-#[derive(Debug)]
-pub(crate) struct VerifiedRunningTask {
-    snapshot: TaskPayload,
-    effective_limits: VerifiedEffectiveLimits,
-}
-
-#[cfg(any(target_os = "linux", test))]
-impl VerifiedRunningTask {
-    pub(crate) fn new(snapshot: TaskPayload, effective_limits: VerifiedEffectiveLimits) -> Self {
-        Self {
-            snapshot,
-            effective_limits,
-        }
-    }
-
-    fn into_parts(self) -> (TaskPayload, VerifiedEffectiveLimits) {
-        (self.snapshot, self.effective_limits)
-    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -279,7 +228,7 @@ impl ExecutionFailure {
 #[derive(Debug)]
 pub(crate) struct SubmitCoordinator {
     registry: TaskRegistry<MonotonicClock>,
-    runner: Arc<TaskRunner>,
+    runner: Arc<dyn TaskExecutionPort>,
     capacity: Arc<TaskCapacity>,
     fail_stop: Arc<FailStopCoordinator>,
 }
@@ -381,7 +330,7 @@ impl SubmitCoordinator {
             metadata,
             move |config, running_sender, cancellation| async move {
                 runner
-                    .run_task(
+                    .execute_task(
                         RunnerPermit::new(),
                         TaskRunConfig {
                             task_id: config.task_id,
@@ -392,7 +341,7 @@ impl SubmitCoordinator {
                         },
                         running_sender,
                         cancellation,
-                        finished_time,
+                        Box::new(finished_time),
                     )
                     .await
                     .map(|completed| ExecutionCompletion::Real(completed.into_payload()))
@@ -424,7 +373,7 @@ impl SubmitCoordinator {
             metadata,
             move |config, running_sender, cancellation| async move {
                 let completed = runner
-                    .run_task(
+                    .execute_task(
                         RunnerPermit::new(),
                         TaskRunConfig {
                             task_id: config.task_id,
@@ -435,7 +384,7 @@ impl SubmitCoordinator {
                         },
                         running_sender,
                         cancellation,
-                        finished_time,
+                        Box::new(finished_time),
                     )
                     .await
                     .map_err(runner_execution_failure)?;
@@ -456,8 +405,7 @@ impl SubmitCoordinator {
     }
 
     pub(crate) async fn cancel(&self, task_id: &str) -> Result<TaskPayload, RegistryError> {
-        let finished = self.registry.request_cancel(task_id)?.wait().await;
-        Ok(finished)
+        cancel::cancel_task(&self.registry, task_id).await
     }
 
     pub(crate) async fn wait_idle(&self) {
@@ -465,7 +413,7 @@ impl SubmitCoordinator {
     }
 
     pub(crate) fn snapshot(&self, task_id: &str) -> Result<Option<TaskPayload>, RegistryError> {
-        self.registry.snapshot(task_id)
+        query::task_snapshot(&self.registry, task_id)
     }
 
     #[cfg_attr(
@@ -479,15 +427,14 @@ impl SubmitCoordinator {
         &self,
         client_request_id: &str,
     ) -> Result<Option<TaskPayload>, RegistryError> {
-        self.registry
-            .snapshot_by_client_request_id(client_request_id)
+        query::task_snapshot_by_client_request_id(&self.registry, client_request_id)
     }
 
     pub(crate) fn has_client_request_id(
         &self,
         client_request_id: &str,
     ) -> Result<bool, RegistryError> {
-        self.registry.has_client_request_id(client_request_id)
+        query::has_client_request_id(&self.registry, client_request_id)
     }
 
     #[cfg(test)]
@@ -501,6 +448,35 @@ impl SubmitCoordinator {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl TaskUseCases for SubmitCoordinator {
+    fn submit_validated(
+        &self,
+        request_id: String,
+        validated: ValidatedSubmit,
+        context: SubmitContext,
+    ) -> impl Future<Output = Result<SubmitOutcome, SubmitError>> + Send {
+        SubmitCoordinator::submit_validated(
+            self,
+            request_id,
+            validated,
+            context.metadata,
+            context.finished_time,
+        )
+    }
+
+    fn snapshot(&self, task_id: &str) -> Result<Option<TaskPayload>, RegistryError> {
+        SubmitCoordinator::snapshot(self, task_id)
+    }
+
+    fn cancel(
+        &self,
+        task_id: &str,
+    ) -> impl Future<Output = Result<TaskPayload, RegistryError>> + Send {
+        SubmitCoordinator::cancel(self, task_id)
+    }
+}
+
 #[cfg(any(target_os = "linux", test))]
 #[cfg_attr(
     not(test),
@@ -509,15 +485,15 @@ impl SubmitCoordinator {
         reason = "단위 시험은 raw Request 경계를, production handler는 검증된 경계를 사용합니다"
     )
 )]
-async fn coordinate_submit<C, E, Fut>(
-    registry: TaskRegistry<C>,
+async fn coordinate_submit<R, E, Fut>(
+    registry: R,
     capacity: Arc<TaskCapacity>,
     request: Request,
     metadata: SubmitMetadata,
     executor: E,
 ) -> Result<SubmitOutcome, SubmitError>
 where
-    C: RegistryClock + Send + 'static,
+    R: TaskSubmissionPort,
     E: FnOnce(
             SubmitExecutionConfig,
             oneshot::Sender<VerifiedRunningTask>,
@@ -540,8 +516,8 @@ where
 }
 
 #[cfg(any(target_os = "linux", test))]
-async fn coordinate_validated_submit<C, E, Fut>(
-    registry: TaskRegistry<C>,
+async fn coordinate_validated_submit<R, E, Fut>(
+    registry: R,
     capacity: Arc<TaskCapacity>,
     fail_stop: Arc<FailStopCoordinator>,
     request_id: String,
@@ -550,7 +526,7 @@ async fn coordinate_validated_submit<C, E, Fut>(
     executor: E,
 ) -> Result<SubmitOutcome, SubmitError>
 where
-    C: RegistryClock + Send + 'static,
+    R: TaskSubmissionPort,
     E: FnOnce(
             SubmitExecutionConfig,
             oneshot::Sender<VerifiedRunningTask>,
@@ -560,6 +536,7 @@ where
         + 'static,
     Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>> + Send + 'static,
 {
+    // 순서 계약: validation은 호출 전에 끝났고, 기존 멱등 관찰을 새 admission보다 먼저 판정한다.
     if let Some(waiter) = registry.existing_submit(&validated)? {
         let task_id = waiter.task_id().to_owned();
         let observation = waiter.wait().await;
@@ -583,6 +560,7 @@ where
                 )),
             });
         };
+        // 새 작업은 멱등 예약 뒤에만 active owner가 되고, capacity는 그 다음에만 확보한다.
         let reservation = registry.reserve_submit_with(validated, || metadata.make_task_id())?;
         match &reservation {
             SubmitReservation::Existing(_) => (reservation, None),
@@ -625,6 +603,7 @@ where
                 cleanup_timeout: metadata.cleanup_timeout,
                 plan: owner.request().plan().clone(),
             };
+            // 실행 port가 종료 판별과 전체 cleanup을 마친 결과만 completion 경계로 돌려준다.
             let (initial_sender, initial_receiver) = oneshot::channel();
             tokio::spawn(run_owner(
                 owner,
@@ -651,8 +630,8 @@ where
 }
 
 #[cfg(any(target_os = "linux", test))]
-async fn run_owner<C, E, Fut>(
-    owner: SubmitExecutionOwner<C>,
+async fn run_owner<O, E, Fut>(
+    owner: O,
     config: SubmitExecutionConfig,
     executor: E,
     initial_sender: oneshot::Sender<SubmitObservation>,
@@ -660,7 +639,7 @@ async fn run_owner<C, E, Fut>(
     active: ActiveExecution,
     fail_stop: Arc<FailStopCoordinator>,
 ) where
-    C: RegistryClock,
+    O: SubmitOwnerPort,
     E: FnOnce(
         SubmitExecutionConfig,
         oneshot::Sender<VerifiedRunningTask>,
@@ -719,15 +698,15 @@ async fn run_owner<C, E, Fut>(
 }
 
 #[cfg(any(target_os = "linux", test))]
-async fn run_after_running<C, Fut>(
-    owner: SubmitExecutionOwner<C>,
+async fn run_after_running<O, Fut>(
+    owner: O,
     running: VerifiedRunningTask,
     execution: Fut,
     cancellation: RunningCancellation,
     initial_sender: oneshot::Sender<SubmitObservation>,
     runtime: OwnerRuntime,
 ) where
-    C: RegistryClock,
+    O: SubmitOwnerPort,
     Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>>,
 {
     let OwnerRuntime {
@@ -740,7 +719,7 @@ async fn run_after_running<C, Fut>(
         match owner.publish_running_with_cancellation(running, effective_limits, cancellation) {
             Ok(running) => running,
             Err(error) => {
-                report_running_publication_failure(&fail_stop, owner.task_id());
+                completion::report_running_publication_failure(&fail_stop, owner.task_id());
                 let failure = SubmitFailure::new(ErrorCode::InternalError, error.to_string());
                 let observation = owner.fail(failure);
                 let _ = initial_sender.send(observation);
@@ -754,14 +733,14 @@ async fn run_after_running<C, Fut>(
     match execution.await {
         Ok(completed) => match finish_owner(owner, completed) {
             Ok(publication) => {
-                complete_finished_execution(publication, capacity_permit, active, &fail_stop);
+                completion::publish_finished(publication, capacity_permit, active, &fail_stop);
             }
             Err(_) => {
                 capacity_permit.retain_for_fail_stop();
             }
         },
         Err(failure) => {
-            report_running_failure(&fail_stop, owner.task_id());
+            completion::report_running_failure(&fail_stop, owner.task_id());
             owner.fail(failure.submit);
             if failure.cleanup_complete {
                 active.complete();
@@ -772,15 +751,15 @@ async fn run_after_running<C, Fut>(
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn finish_after_running<C>(
-    owner: SubmitExecutionOwner<C>,
+fn finish_after_running<O>(
+    owner: O,
     running: VerifiedRunningTask,
     cancellation: RunningCancellation,
     completion: Result<ExecutionCompletion, ExecutionFailure>,
     initial_sender: oneshot::Sender<SubmitObservation>,
     runtime: OwnerRuntime,
 ) where
-    C: RegistryClock,
+    O: SubmitOwnerPort,
 {
     let OwnerRuntime {
         capacity_permit,
@@ -792,7 +771,7 @@ fn finish_after_running<C>(
         match owner.publish_running_with_cancellation(running, effective_limits, cancellation) {
             Ok(running) => running,
             Err(error) => {
-                report_running_publication_failure(&fail_stop, owner.task_id());
+                completion::report_running_publication_failure(&fail_stop, owner.task_id());
                 let failure = SubmitFailure::new(ErrorCode::InternalError, error.to_string());
                 let observation = owner.fail(failure);
                 let _ = initial_sender.send(observation);
@@ -804,14 +783,14 @@ fn finish_after_running<C>(
     match completion {
         Ok(completed) => match finish_owner(owner, completed) {
             Ok(publication) => {
-                complete_finished_execution(publication, capacity_permit, active, &fail_stop);
+                completion::publish_finished(publication, capacity_permit, active, &fail_stop);
             }
             Err(_) => {
                 capacity_permit.retain_for_fail_stop();
             }
         },
         Err(failure) => {
-            report_running_failure(&fail_stop, owner.task_id());
+            completion::report_running_failure(&fail_stop, owner.task_id());
             owner.fail(failure.submit);
             if failure.cleanup_complete {
                 active.complete();
@@ -822,13 +801,13 @@ fn finish_after_running<C>(
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn finish_without_running<C>(
-    owner: SubmitExecutionOwner<C>,
+fn finish_without_running<O>(
+    owner: O,
     completion: Result<ExecutionCompletion, ExecutionFailure>,
     initial_sender: oneshot::Sender<SubmitObservation>,
     runtime: OwnerRuntime,
 ) where
-    C: RegistryClock,
+    O: SubmitOwnerPort,
 {
     let OwnerRuntime {
         capacity_permit,
@@ -839,7 +818,7 @@ fn finish_without_running<C>(
         Ok(completed) => match finish_owner(owner, completed) {
             Ok(publication) => {
                 let finished =
-                    complete_finished_execution(publication, capacity_permit, active, &fail_stop);
+                    completion::publish_finished(publication, capacity_permit, active, &fail_stop);
                 let observation = SubmitObservation::Task(finished);
                 let _ = initial_sender.send(observation);
             }
@@ -853,7 +832,7 @@ fn finish_without_running<C>(
                 match owner.rollback_before_running(failure.submit) {
                     Ok(observation) => {
                         active.complete();
-                        finish_capacity(capacity_permit, &fail_stop);
+                        completion::release_capacity(capacity_permit, &fail_stop);
                         let _ = initial_sender.send(observation);
                     }
                     Err(error) => {
@@ -874,48 +853,6 @@ fn finish_without_running<C>(
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn complete_finished_execution(
-    publication: FinishedTaskPublication,
-    capacity_permit: TaskCapacityPermit,
-    active: ActiveExecution,
-    fail_stop: &FailStopCoordinator,
-) -> TaskPayload {
-    // FINISHED 저장 뒤 실행 소유권과 슬롯을 정리하고 마지막에 호출자를 깨운다.
-    active.complete();
-    finish_capacity(capacity_permit, fail_stop);
-    let finished = publication.publish_completion();
-    crate::audit::log_task_finished(&crate::protocol_mapper::task_snapshot(finished.clone()));
-    finished
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn finish_capacity(capacity_permit: TaskCapacityPermit, fail_stop: &FailStopCoordinator) {
-    if fail_stop.is_fail_stopping() {
-        capacity_permit.retain_for_fail_stop();
-    }
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn report_running_failure(fail_stop: &FailStopCoordinator, task_id: &str) {
-    fail_stop.activate(CleanupFailureReport::new(
-        task_id,
-        "RUNNING 작업 완료",
-        vec!["검증된 FINISHED 결과"],
-        "RUNNING snapshot을 유지하고 daemon 종료를 시작함",
-    ));
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn report_running_publication_failure(fail_stop: &FailStopCoordinator, task_id: &str) {
-    fail_stop.activate(CleanupFailureReport::new(
-        task_id,
-        "RUNNING 저장",
-        vec!["공개 RUNNING snapshot"],
-        "exec 시작 뒤 작업 상태를 저장하지 못해 daemon 종료를 시작함",
-    ));
-}
-
-#[cfg(any(target_os = "linux", test))]
 fn send_initial_failure(initial_sender: oneshot::Sender<SubmitObservation>, error: RegistryError) {
     let _ = initial_sender.send(SubmitObservation::Failed(SubmitFailure::new(
         ErrorCode::InternalError,
@@ -924,23 +861,26 @@ fn send_initial_failure(initial_sender: oneshot::Sender<SubmitObservation>, erro
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn finish_owner<C>(
-    owner: SubmitExecutionOwner<C>,
+fn finish_owner<O>(
+    owner: O,
     completion: ExecutionCompletion,
-) -> Result<FinishedTaskPublication, RegistryError>
+) -> Result<O::Publication, RegistryError>
 where
-    C: RegistryClock,
+    O: SubmitOwnerPort,
 {
-    match completion {
-        #[cfg(target_os = "linux")]
-        ExecutionCompletion::Real(payload) => owner.finish_payload(payload),
-        #[cfg(test)]
-        ExecutionCompletion::Test(finished) => owner.prepare_finish_for_test(finished),
-    }
+    #[cfg(all(target_os = "linux", not(test)))]
+    let ExecutionCompletion::Real(payload) = completion;
+    #[cfg(all(target_os = "linux", test))]
+    let payload = match completion {
+        ExecutionCompletion::Real(payload) | ExecutionCompletion::Test(payload) => payload,
+    };
+    #[cfg(all(not(target_os = "linux"), test))]
+    let ExecutionCompletion::Test(payload) = completion;
+    owner.finish(payload)
 }
 
 #[cfg(target_os = "linux")]
-fn runner_execution_failure(error: crate::runner::TaskRunFailure) -> ExecutionFailure {
+fn runner_execution_failure(error: TaskRunFailure) -> ExecutionFailure {
     let capacity_reusable = error.capacity_reusable();
     let cleanup_complete = error.cleanup_complete();
     let failure = match error.kind() {
@@ -1434,7 +1374,7 @@ mod tests {
 
     #[test]
     fn fixture_is_validated_without_changing_the_typed_payload() {
-        let fixture = include_str!("../../protocol-fixtures/v1/submit-task-valid.json");
+        let fixture = include_str!("../../../../protocol-fixtures/v1/submit-task-valid.json");
         let request: Request = serde_json::from_str(fixture).unwrap();
         let expected = match &request {
             Request::SubmitTask { payload, .. } => payload.clone(),
