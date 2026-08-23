@@ -36,6 +36,7 @@ mod handlers;
     allow(dead_code, reason = "protocol task lifecycle은 Linux에서만 제공됩니다")
 )]
 mod lifecycle;
+mod metrics;
 pub mod output {
     pub use taskcage_core::output::{CaptureLimits, CapturedOutput, CapturedStream};
 

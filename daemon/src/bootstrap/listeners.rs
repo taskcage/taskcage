@@ -1,4 +1,5 @@
 use std::io;
+use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +19,7 @@ pub(super) async fn serve(
     max_local_connections: NonZeroUsize,
     has_local_profile: bool,
     remote: Option<RemoteDaemonConfig>,
+    metrics_listen: Option<SocketAddr>,
     handlers: Arc<ProtocolHandlers<SubmitCoordinator>>,
 ) -> Result<()> {
     if remote.is_some() && !has_local_profile {
@@ -25,7 +27,19 @@ pub(super) async fn serve(
             "Remote listener에는 daemon-installed Profile 설정이 필요합니다".to_owned(),
         ));
     }
-    if let Some(remote) = remote {
+    let metrics_task = if let Some(address) = metrics_listen {
+        let listener = tokio::net::TcpListener::bind(address)
+            .await
+            .map_err(|error| Error::Server(format!("metrics listener bind 실패: {error}")))?;
+        tracing::info!(event = "metrics_listener_started", %address, "Prometheus metrics listener started");
+        Some(tokio::spawn(crate::metrics::serve(
+            listener,
+            Arc::clone(&handlers),
+        )))
+    } else {
+        None
+    };
+    let result = if let Some(remote) = remote {
         let artifacts = remote_artifact::RemoteArtifactStore::open(
             &remote.artifact_root,
             remote.max_artifact_bytes.get(),
@@ -59,7 +73,11 @@ pub(super) async fn serve(
         )
         .await
         .map_err(map_local_server_error)
+    };
+    if let Some(metrics_task) = metrics_task {
+        metrics_task.abort();
     }
+    result
 }
 
 #[allow(

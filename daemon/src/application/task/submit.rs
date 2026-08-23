@@ -50,6 +50,8 @@ use taskcage_core::task::TaskSnapshot as TaskPayload;
 
 #[cfg(target_os = "linux")]
 use crate::adapters::linux_executor::TaskRunner;
+#[cfg(any(target_os = "linux", test))]
+use crate::metrics::RuntimeMetrics;
 use crate::protocol::ErrorCode;
 use crate::protocol::{PROTOCOL_VERSION, ProfileRequestPayload, Request, SubmitTaskPayload};
 #[cfg(any(target_os = "linux", test))]
@@ -210,6 +212,15 @@ struct OwnerRuntime {
     capacity_permit: TaskCapacityPermit,
     active: ActiveExecution,
     fail_stop: Arc<FailStopCoordinator>,
+    metrics: Arc<RuntimeMetrics>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone)]
+struct SubmissionRuntime {
+    capacity: Arc<TaskCapacity>,
+    fail_stop: Arc<FailStopCoordinator>,
+    metrics: Arc<RuntimeMetrics>,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -231,6 +242,7 @@ pub(crate) struct SubmitCoordinator {
     runner: Arc<dyn TaskExecutionPort>,
     capacity: Arc<TaskCapacity>,
     fail_stop: Arc<FailStopCoordinator>,
+    metrics: Arc<RuntimeMetrics>,
 }
 
 #[cfg(target_os = "linux")]
@@ -246,6 +258,7 @@ impl SubmitCoordinator {
             runner: Arc::new(TaskRunner::initialize(environment, Arc::clone(&fail_stop))?),
             capacity: Arc::new(TaskCapacity::new(capacity_settings)),
             fail_stop,
+            metrics: Arc::new(RuntimeMetrics::default()),
         })
     }
 
@@ -266,6 +279,7 @@ impl SubmitCoordinator {
             )?),
             capacity: Arc::new(TaskCapacity::new(capacity_settings)),
             fail_stop,
+            metrics: Arc::new(RuntimeMetrics::default()),
         })
     }
 
@@ -286,6 +300,7 @@ impl SubmitCoordinator {
             )?),
             capacity: Arc::new(TaskCapacity::new(capacity_settings)),
             fail_stop,
+            metrics: Arc::new(RuntimeMetrics::default()),
         })
     }
 
@@ -321,10 +336,9 @@ impl SubmitCoordinator {
         F: FnOnce() -> (String, Instant) + Send + 'static,
     {
         let runner = Arc::clone(&self.runner);
-        coordinate_validated_submit(
+        coordinate_validated_submit_with_runtime(
             self.registry.clone(),
-            Arc::clone(&self.capacity),
-            Arc::clone(&self.fail_stop),
+            self.submission_runtime(),
             request_id,
             validated,
             metadata,
@@ -364,10 +378,9 @@ impl SubmitCoordinator {
         F: FnOnce() -> (String, Instant) + Send + 'static,
     {
         let runner = Arc::clone(&self.runner);
-        coordinate_validated_submit(
+        coordinate_validated_submit_with_runtime(
             self.registry.clone(),
-            Arc::clone(&self.capacity),
-            Arc::clone(&self.fail_stop),
+            self.submission_runtime(),
             request_id,
             validated,
             metadata,
@@ -410,6 +423,21 @@ impl SubmitCoordinator {
 
     pub(crate) async fn wait_idle(&self) {
         self.capacity.wait_idle().await;
+    }
+
+    pub(crate) fn render_metrics(&self) -> String {
+        self.metrics.render(
+            self.capacity.in_use(),
+            self.capacity.settings().max_concurrent_tasks(),
+        )
+    }
+
+    fn submission_runtime(&self) -> SubmissionRuntime {
+        SubmissionRuntime {
+            capacity: Arc::clone(&self.capacity),
+            fail_stop: Arc::clone(&self.fail_stop),
+            metrics: Arc::clone(&self.metrics),
+        }
     }
 
     pub(crate) fn snapshot(&self, task_id: &str) -> Result<Option<TaskPayload>, RegistryError> {
@@ -536,6 +564,41 @@ where
         + 'static,
     Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>> + Send + 'static,
 {
+    coordinate_validated_submit_with_runtime(
+        registry,
+        SubmissionRuntime {
+            capacity,
+            fail_stop,
+            metrics: Arc::new(RuntimeMetrics::default()),
+        },
+        request_id,
+        validated,
+        metadata,
+        executor,
+    )
+    .await
+}
+
+#[cfg(any(target_os = "linux", test))]
+async fn coordinate_validated_submit_with_runtime<R, E, Fut>(
+    registry: R,
+    runtime: SubmissionRuntime,
+    request_id: String,
+    validated: ValidatedSubmit,
+    metadata: SubmitMetadata,
+    executor: E,
+) -> Result<SubmitOutcome, SubmitError>
+where
+    R: TaskSubmissionPort,
+    E: FnOnce(
+            SubmitExecutionConfig,
+            oneshot::Sender<VerifiedRunningTask>,
+            CancellationRuntime,
+        ) -> Fut
+        + Send
+        + 'static,
+    Fut: Future<Output = Result<ExecutionCompletion, ExecutionFailure>> + Send + 'static,
+{
     // 순서 계약: validation은 호출 전에 끝났고, 기존 멱등 관찰을 새 admission보다 먼저 판정한다.
     if let Some(waiter) = registry.existing_submit(&validated)? {
         let task_id = waiter.task_id().to_owned();
@@ -549,7 +612,7 @@ where
     }
     let mut metadata = metadata;
     let (reservation, active) = {
-        let Some(admission) = fail_stop.try_admit() else {
+        let Some(admission) = runtime.fail_stop.try_admit() else {
             return Ok(SubmitOutcome {
                 request_id,
                 task_id: String::new(),
@@ -583,7 +646,7 @@ where
         SubmitReservation::Owner(owner) => {
             let task_id = owner.task_id().to_owned();
             let active = active.expect("새 실행 owner에는 활성 실행 소유권이 있어야 합니다");
-            let Some(capacity_permit) = capacity.try_acquire() else {
+            let Some(capacity_permit) = runtime.capacity.try_acquire() else {
                 let observation = owner.rollback_before_running(SubmitFailure::new(
                     ErrorCode::CapacityExhausted,
                     CAPACITY_EXHAUSTED_MESSAGE,
@@ -605,14 +668,18 @@ where
             };
             // 실행 port가 종료 판별과 전체 cleanup을 마친 결과만 completion 경계로 돌려준다.
             let (initial_sender, initial_receiver) = oneshot::channel();
+            runtime.metrics.task_started();
             tokio::spawn(run_owner(
                 owner,
                 config,
                 executor,
                 initial_sender,
-                capacity_permit,
-                active,
-                Arc::clone(&fail_stop),
+                OwnerRuntime {
+                    capacity_permit,
+                    active,
+                    fail_stop: Arc::clone(&runtime.fail_stop),
+                    metrics: Arc::clone(&runtime.metrics),
+                },
             ));
             let observation = initial_receiver
                 .await
@@ -635,9 +702,7 @@ async fn run_owner<O, E, Fut>(
     config: SubmitExecutionConfig,
     executor: E,
     initial_sender: oneshot::Sender<SubmitObservation>,
-    capacity_permit: TaskCapacityPermit,
-    active: ActiveExecution,
-    fail_stop: Arc<FailStopCoordinator>,
+    runtime: OwnerRuntime,
 ) where
     O: SubmitOwnerPort,
     E: FnOnce(
@@ -650,11 +715,6 @@ async fn run_owner<O, E, Fut>(
     let (running_sender, mut running_receiver) = oneshot::channel();
     let (cancellation_runtime, running_cancellation) = cancellation_channel();
     let execution = executor(config, running_sender, cancellation_runtime);
-    let runtime = OwnerRuntime {
-        capacity_permit,
-        active,
-        fail_stop,
-    };
     tokio::pin!(execution);
     tokio::select! {
         biased;
@@ -713,6 +773,7 @@ async fn run_after_running<O, Fut>(
         capacity_permit,
         active,
         fail_stop,
+        metrics,
     } = runtime;
     let (running, effective_limits) = running.into_parts();
     let running =
@@ -733,7 +794,13 @@ async fn run_after_running<O, Fut>(
     match execution.await {
         Ok(completed) => match finish_owner(owner, completed) {
             Ok(publication) => {
-                completion::publish_finished(publication, capacity_permit, active, &fail_stop);
+                completion::publish_finished(
+                    publication,
+                    capacity_permit,
+                    active,
+                    &fail_stop,
+                    &metrics,
+                );
             }
             Err(_) => {
                 capacity_permit.retain_for_fail_stop();
@@ -765,6 +832,7 @@ fn finish_after_running<O>(
         capacity_permit,
         active,
         fail_stop,
+        metrics,
     } = runtime;
     let (running, effective_limits) = running.into_parts();
     let running =
@@ -783,7 +851,13 @@ fn finish_after_running<O>(
     match completion {
         Ok(completed) => match finish_owner(owner, completed) {
             Ok(publication) => {
-                completion::publish_finished(publication, capacity_permit, active, &fail_stop);
+                completion::publish_finished(
+                    publication,
+                    capacity_permit,
+                    active,
+                    &fail_stop,
+                    &metrics,
+                );
             }
             Err(_) => {
                 capacity_permit.retain_for_fail_stop();
@@ -813,12 +887,18 @@ fn finish_without_running<O>(
         capacity_permit,
         active,
         fail_stop,
+        metrics,
     } = runtime;
     match completion {
         Ok(completed) => match finish_owner(owner, completed) {
             Ok(publication) => {
-                let finished =
-                    completion::publish_finished(publication, capacity_permit, active, &fail_stop);
+                let finished = completion::publish_finished(
+                    publication,
+                    capacity_permit,
+                    active,
+                    &fail_stop,
+                    &metrics,
+                );
                 let observation = SubmitObservation::Task(finished);
                 let _ = initial_sender.send(observation);
             }

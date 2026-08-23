@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ pub struct DaemonConfig {
     pub(super) deployment_policy: DeploymentResourcePolicy,
     pub(super) local_profile: Option<LocalProfileConfig>,
     pub(super) remote: Option<RemoteDaemonConfig>,
+    pub(super) metrics_listen: Option<SocketAddr>,
 }
 
 /// 명시적으로 활성화한 v0.2 test Profile의 daemon-owned Artifact root 설정이다.
@@ -119,6 +121,7 @@ impl DaemonConfig {
             deployment_policy,
             local_profile: None,
             remote: None,
+            metrics_listen: None,
         })
     }
 
@@ -217,6 +220,16 @@ impl DaemonConfig {
         let remote = RemoteDaemonConfig::load(&path)
             .map_err(|error| Error::InvalidArgument(error.to_string()))?;
         self.remote = Some(remote);
+        Ok(self)
+    }
+
+    /// Prometheus metrics는 명시적으로 설정한 HTTP address에서만 노출한다.
+    pub fn with_metrics_listen(mut self, address: SocketAddr) -> Result<Self> {
+        if self.metrics_listen.replace(address).is_some() {
+            return Err(Error::InvalidArgument(
+                "metrics listener가 이미 설정되었습니다".to_owned(),
+            ));
+        }
         Ok(self)
     }
 }

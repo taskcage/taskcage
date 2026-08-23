@@ -183,6 +183,15 @@ impl ProtocolHandlers<SubmitCoordinator> {
         &self.fail_stop
     }
 
+    pub(crate) fn render_metrics(&self) -> String {
+        match &self.state {
+            HandlerState::Ready { core, .. } => core.render_metrics(),
+            HandlerState::Unavailable { .. } => {
+                crate::metrics::RuntimeMetrics::default().render(0, 0)
+            }
+        }
+    }
+
     /// daemon production dispatcher다. Protocol v1 handler를 보존하면서 additive v2 Profile 요청만
     /// 별도 경계에서 받는다.
     pub(crate) async fn handle_daemon_request<F>(

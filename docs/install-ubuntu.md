@@ -141,6 +141,7 @@ installer를 `--start`로 다시 실행하면 실행 중인 service를 restart�
 | `TASKCAGE_MAX_TASK_STDERR_TAIL_BYTES` | `65536` | stderr tail 최대값 |
 | `TASKCAGE_LOG_FORMAT` | `json` | `json` 또는 개발용 `compact` log 형식 |
 | `RUST_LOG` | `taskcaged=info` | daemon log filter |
+| `TASKCAGE_METRICS_ARGS` | 빈 값 | 선택적 Prometheus endpoint 인자. 예: `--metrics-listen 127.0.0.1:9098` |
 
 `TASKCAGE_MAX_TASK_*` 값은 Task 하나가 요청할 수 있는 배포 최대값이다. Java SDK의
 `ResourceBudget.safeDefaults()`는 CPU `100000/100000`, memory 512 MiB, PID 32, 2분, 출력 tail 각각
@@ -156,6 +157,24 @@ stop 정책도 함께 검토한다.
 sudoedit /etc/taskcage/taskcaged.env
 sudo systemctl restart taskcaged.service
 ```
+
+### Prometheus metrics (선택)
+
+metrics endpoint는 기본적으로 비활성이다. 운영 모니터링이 필요할 때 loopback 또는 접근이 제한된
+private address만 명시적으로 설정한다.
+
+```bash
+sudoedit /etc/taskcage/taskcaged.env
+# TASKCAGE_METRICS_ARGS=--metrics-listen 127.0.0.1:9098
+sudo systemctl restart taskcaged.service
+
+curl -fsS http://127.0.0.1:9098/metrics
+```
+
+endpoint는 Prometheus text format으로 daemon 전체의 `taskcage_up`, 실행 중인 Task 수, capacity,
+시작·종료·cleanup counter, Task wall-clock duration histogram만 노출한다. `task_id`, request ID, PID,
+경로, artifact 이름처럼 cardinality가 커지거나 민감할 수 있는 label은 노출하지 않는다. endpoint 자체에는
+인증이 없으므로 public interface에 bind하지 않는다.
 
 ## 확인
 
