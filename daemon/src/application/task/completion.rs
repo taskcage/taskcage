@@ -4,6 +4,7 @@ use taskcage_core::task::TaskSnapshot;
 
 use crate::capacity::TaskCapacityPermit;
 use crate::fail_stop::{ActiveExecution, CleanupFailureReport, FailStopCoordinator};
+use crate::metrics::RuntimeMetrics;
 
 use super::ports::CompletionPublicationPort;
 
@@ -22,6 +23,7 @@ pub(crate) fn publish_finished<P>(
     capacity_permit: TaskCapacityPermit,
     active: ActiveExecution,
     fail_stop: &FailStopCoordinator,
+    metrics: &RuntimeMetrics,
 ) -> TaskSnapshot
 where
     P: CompletionPublicationPort,
@@ -30,6 +32,7 @@ where
     active.complete();
     release_capacity(capacity_permit, fail_stop);
     let finished = publication.publish_completion();
+    metrics.task_finished(&finished);
     crate::audit::log_task_finished(&crate::protocol_mapper::task_snapshot(finished.clone()));
     finished
 }

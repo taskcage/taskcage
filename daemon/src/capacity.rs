@@ -62,6 +62,10 @@ impl TaskCapacity {
         self.settings
     }
 
+    pub(crate) fn in_use(&self) -> u32 {
+        self.in_use.load(Ordering::Acquire)
+    }
+
     /// 대기하지 않고 즉시 실행 슬롯 하나를 얻는다.
     pub(crate) fn try_acquire(self: &Arc<Self>) -> Option<TaskCapacityPermit> {
         let maximum = self.settings.max_concurrent_tasks();

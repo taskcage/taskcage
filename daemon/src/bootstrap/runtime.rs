@@ -33,6 +33,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         deployment_policy,
         local_profile,
         remote,
+        metrics_listen,
     } = config;
     let startup = StartupOwnership::acquire(&socket_path)
         .map_err(|error| Error::Startup(error.to_string()))?;
@@ -108,6 +109,7 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
         max_concurrent_connections,
         local_profile.is_some(),
         remote,
+        metrics_listen,
         handlers,
     )
     .await;

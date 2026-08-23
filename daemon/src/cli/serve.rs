@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -28,6 +29,7 @@ pub(crate) fn parse(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
     let mut ffmpeg_audio_to_wav_package_digest = None;
     let mut bundle_cache_root = None;
     let mut remote_config = None;
+    let mut metrics_listen = None;
     let mut index = 0;
     while index < args.len() {
         let name = args[index].to_str().ok_or_else(|| {
@@ -105,6 +107,14 @@ pub(crate) fn parse(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             "--remote-config" if remote_config.is_none() => {
                 remote_config = Some(PathBuf::from(value));
             }
+            "--metrics-listen" if metrics_listen.is_none() => {
+                let value = value.to_str().ok_or_else(|| {
+                    Error::InvalidArgument("metrics listen address는 UTF-8이어야 합니다".to_owned())
+                })?;
+                metrics_listen = Some(value.parse::<SocketAddr>().map_err(|error| {
+                    Error::InvalidArgument(format!("잘못된 --metrics-listen 값입니다: {error}"))
+                })?);
+            }
             "--socket"
             | "--max-concurrent-tasks"
             | "--max-registry-tasks"
@@ -123,7 +133,8 @@ pub(crate) fn parse(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
             | "--runtime-package-cache-root"
             | "--ffmpeg-audio-to-wav-package-digest"
             | "--bundle-cache-root"
-            | "--remote-config" => {
+            | "--remote-config"
+            | "--metrics-listen" => {
                 return Err(Error::InvalidArgument(format!(
                     "serve 옵션이 중복되었습니다: {name}"
                 )));
@@ -204,8 +215,12 @@ pub(crate) fn parse(args: Vec<OsString>) -> taskcaged::Result<DaemonConfig> {
         Some(cache_root) => config.with_bundle_profile_catalog(cache_root)?,
         None => config,
     };
-    match remote_config {
+    let config = match remote_config {
         Some(path) => config.with_remote_config(path),
+        None => Ok(config),
+    }?;
+    match metrics_listen {
+        Some(address) => config.with_metrics_listen(address),
         None => Ok(config),
     }
 }
@@ -427,6 +442,40 @@ mod tests {
         let error = parse_with_deployment_policy(duplicate).unwrap_err();
         assert!(error.to_string().contains("serve 옵션이 중복되었습니다"));
         assert!(error.to_string().contains("--max-concurrent-connections"));
+    }
+
+    #[test]
+    fn serve_accepts_one_explicit_metrics_listener() {
+        let socket = std::env::temp_dir().join("taskcaged-metrics.sock");
+        let mut arguments = vec![
+            OsString::from("--socket"),
+            socket.into_os_string(),
+            OsString::from("--max-concurrent-tasks"),
+            OsString::from("1"),
+            OsString::from("--max-registry-tasks"),
+            OsString::from("1"),
+            OsString::from("--max-concurrent-connections"),
+            OsString::from("1"),
+            OsString::from("--cleanup-timeout-ms"),
+            OsString::from("1"),
+            OsString::from("--fail-stop-timeout-ms"),
+            OsString::from("1"),
+            OsString::from("--metrics-listen"),
+            OsString::from("127.0.0.1:9098"),
+        ];
+        let config = parse_with_deployment_policy(arguments.clone()).unwrap();
+        assert!(format!("{config:?}").contains("metrics_listen: Some(127.0.0.1:9098)"));
+
+        arguments.extend([
+            OsString::from("--metrics-listen"),
+            OsString::from("127.0.0.1:9099"),
+        ]);
+        let error = parse_with_deployment_policy(arguments).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("serve 옵션이 중복되었습니다: --metrics-listen")
+        );
     }
 
     #[test]
