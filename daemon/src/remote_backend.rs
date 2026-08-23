@@ -5,8 +5,6 @@ use std::fs::{File, OpenOptions};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
-
 use crate::fail_stop::CleanupFailureReport;
 use crate::handlers::{ProtocolHandlers, RequestHandling};
 use crate::protocol as local;
@@ -14,6 +12,7 @@ use crate::remote_artifact::{ManagedInputSnapshot, RemoteArtifactError, RemoteAr
 use crate::remote_config::PrincipalPolicy;
 use crate::remote_dispatch::{RemoteBoolFuture, RemoteTaskBackend, RemoteTaskFuture};
 use crate::remote_protocol as remote;
+use crate::remote_protocol_mapper as mapper;
 use crate::remote_server::error_response;
 use crate::submit::SubmitCoordinator;
 
@@ -48,12 +47,13 @@ impl RemoteTaskBackend for LocalProfileRemoteBackend {
         artifacts: &'a RemoteArtifactStore,
     ) -> RemoteTaskFuture<'a> {
         Box::pin(async move {
-            let artifact_ids = managed_input_ids(&payload);
+            let artifact_ids = mapper::managed_input_ids(&payload);
             let completed = match artifacts.inspect_completed(&principal.client_id, &artifact_ids) {
                 Ok(completed) => completed,
                 Err(error) => return artifact_error(request_id, error),
             };
-            let prevalidated = match to_local_profile_payload(principal, &payload, &completed) {
+            let prevalidated = match mapper::local_profile_payload(principal, &payload, &completed)
+            {
                 Ok(payload) => payload,
                 Err(error) => return artifact_error(request_id, error),
             };
@@ -66,7 +66,7 @@ impl RemoteTaskBackend for LocalProfileRemoteBackend {
                 };
                 return local_error(request_id, payload);
             }
-            let ownership_token = namespaced_uuid(
+            let ownership_token = mapper::namespaced_uuid(
                 &principal.client_id,
                 &payload.client_request_id,
                 b"remote-input-ownership",
@@ -79,7 +79,8 @@ impl RemoteTaskBackend for LocalProfileRemoteBackend {
                 Ok(snapshots) => snapshots,
                 Err(error) => return artifact_error(request_id, error),
             };
-            let local_payload = match to_local_profile_payload(principal, &payload, &snapshots) {
+            let local_payload = match mapper::local_profile_payload(principal, &payload, &snapshots)
+            {
                 Ok(payload) => payload,
                 Err(error) => {
                     if artifacts.restore_task_inputs(&ownership_token).is_err() {
@@ -143,10 +144,10 @@ impl RemoteTaskBackend for LocalProfileRemoteBackend {
                         .expect("remote input owner state poisoned")
                         .insert(payload.task_id.clone(), ownership_token);
                     self.spawn_completion_monitor(principal.clone(), task_id, artifacts.clone());
-                    accepted(request_id, payload)
+                    mapper::accepted(request_id, payload)
                 }
                 local::Response::ProfileResult { payload, .. } => {
-                    let task_id = local_profile_task_id(&payload).to_owned();
+                    let task_id = mapper::local_profile_task_id(&payload).to_owned();
                     self.handlers
                         .register_remote_task(task_id.clone(), principal.client_id.clone());
                     self.input_owners
@@ -315,7 +316,7 @@ impl RemoteTaskBackend for LocalProfileRemoteBackend {
             if !self.handlers.remote_task_owned_by(task_id, principal) {
                 return false;
             }
-            let request_id = namespaced_uuid(principal, task_id, b"remote-retention-check");
+            let request_id = mapper::namespaced_uuid(principal, task_id, b"remote-retention-check");
             let response = self
                 .handlers
                 .handle_get_profile_result(local::Request::GetProfileResult {
@@ -349,8 +350,11 @@ impl LocalProfileRemoteBackend {
     ) {
         let backend = self.clone();
         tokio::spawn(async move {
-            let request_id =
-                namespaced_uuid(&principal.client_id, &task_id, b"remote-completion-monitor");
+            let request_id = mapper::namespaced_uuid(
+                &principal.client_id,
+                &task_id,
+                b"remote-completion-monitor",
+            );
             loop {
                 let response = backend
                     .handlers
@@ -405,7 +409,7 @@ impl LocalProfileRemoteBackend {
                 request_id,
                 payload: remote::ProfileTaskPayload::Running {
                     task_id,
-                    profile: profile_identity(profile),
+                    profile: mapper::profile_identity(profile),
                     submitted_at,
                     started_at,
                 },
@@ -504,37 +508,15 @@ impl LocalProfileRemoteBackend {
                 }
                 let remote_payload = remote::ProfileTaskPayload::Finished {
                     task_id: task_id.clone(),
-                    profile: profile_identity(profile),
-                    profile_outcome: match profile_outcome {
-                        local::ProfileOutcome::Succeeded => remote::ProfileOutcome::Succeeded,
-                        local::ProfileOutcome::Failed => remote::ProfileOutcome::Failed,
-                    },
-                    termination_reason: termination_reason.into(),
-                    process: remote::ProcessResult {
-                        exit_code: process.exit_code,
-                        signal: process.signal,
-                    },
-                    timing: remote::TaskTiming {
-                        submitted_at: timing.submitted_at,
-                        started_at: timing.started_at,
-                        finished_at: timing.finished_at,
-                        wall_time_ms: timing.wall_time_ms,
-                    },
-                    usage: remote::TaskUsage {
-                        cpu_time_micros: usage.cpu_time_micros,
-                        memory_peak_bytes: usage.memory_peak_bytes,
-                    },
-                    output: remote::TaskOutput {
-                        stdout_tail: output.stdout_tail,
-                        stderr_tail: output.stderr_tail,
-                        stdout_truncated: output.stdout_truncated,
-                        stderr_truncated: output.stderr_truncated,
-                    },
+                    profile: mapper::profile_identity(profile),
+                    profile_outcome: mapper::profile_outcome(profile_outcome),
+                    termination_reason: mapper::termination_reason(termination_reason),
+                    process: mapper::process_result(process),
+                    timing: mapper::task_timing(timing),
+                    usage: mapper::task_usage(usage),
+                    output: mapper::task_output(output),
                     artifacts: managed,
-                    failure: failure.map(|failure| remote::ProfileFailurePayload {
-                        code: failure.code,
-                        message: failure.message,
-                    }),
+                    failure: failure.map(mapper::profile_failure),
                 };
                 finished_cache.insert(task_id, remote_payload.clone());
                 remote::RemoteResponse::ProfileResult {
@@ -595,69 +577,6 @@ impl LocalProfileRemoteBackend {
     }
 }
 
-fn managed_input_ids(payload: &remote::RemoteProfileRequestPayload) -> Vec<String> {
-    payload
-        .inputs
-        .values()
-        .filter_map(|input| match input {
-            remote::RemoteProfileInputValue::ManagedInput { artifact_id } => {
-                Some(artifact_id.clone())
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-fn to_local_profile_payload(
-    principal: &PrincipalPolicy,
-    payload: &remote::RemoteProfileRequestPayload,
-    snapshots: &[ManagedInputSnapshot],
-) -> Result<local::ProfileRequestPayload, RemoteArtifactError> {
-    let snapshots = snapshots
-        .iter()
-        .map(|snapshot| (snapshot.artifact_id.as_str(), snapshot))
-        .collect::<HashMap<_, _>>();
-    let mut inputs = BTreeMap::new();
-    for (slot, input) in &payload.inputs {
-        let value = match input {
-            remote::RemoteProfileInputValue::String { value } => local::ProfileInputValue::String {
-                value: value.clone(),
-            },
-            remote::RemoteProfileInputValue::Int64 { value } => {
-                local::ProfileInputValue::Int64 { value: *value }
-            }
-            remote::RemoteProfileInputValue::Boolean { value } => {
-                local::ProfileInputValue::Boolean { value: *value }
-            }
-            remote::RemoteProfileInputValue::ManagedInput { artifact_id } => {
-                let Some(snapshot) = snapshots.get(artifact_id.as_str()) else {
-                    return Err(RemoteArtifactError::NotFound);
-                };
-                local::ProfileInputValue::LocalInput {
-                    // 공개 Local path parser를 통과시키기 위한 내부 표식이다. 실제 file은 descriptor로 전달한다.
-                    path: "remote-managed-input".to_owned(),
-                    digest: snapshot.digest.clone(),
-                    size_bytes: snapshot.size_bytes,
-                }
-            }
-        };
-        inputs.insert(slot.clone(), value);
-    }
-    Ok(local::ProfileRequestPayload {
-        client_request_id: namespaced_uuid(
-            &principal.client_id,
-            &payload.client_request_id,
-            b"remote-submit",
-        ),
-        profile: local::ProfileIdentity {
-            name: payload.profile.name.clone(),
-            version: payload.profile.version.clone(),
-        },
-        inputs,
-        resource_overrides: payload.resource_overrides.as_ref().map(to_local_overrides),
-    })
-}
-
 fn open_managed_input(snapshot: &ManagedInputSnapshot) -> Result<File, RemoteArtifactError> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -673,48 +592,6 @@ fn open_managed_input(snapshot: &ManagedInputSnapshot) -> Result<File, RemoteArt
             path: snapshot.path.clone(),
             source,
         })
-}
-
-fn to_local_overrides(
-    overrides: &remote::ProfileResourceOverrides,
-) -> local::ProfileResourceOverrides {
-    local::ProfileResourceOverrides {
-        limits: overrides
-            .limits
-            .as_ref()
-            .map(|limits| local::PartialResourceLimits {
-                cpu_max: limits.cpu_max.as_ref().map(|cpu| local::CpuMax {
-                    quota_micros: cpu.quota_micros,
-                    period_micros: cpu.period_micros,
-                }),
-                memory_max_bytes: limits.memory_max_bytes,
-                pids_max: limits.pids_max,
-                wall_time_limit_ms: limits.wall_time_limit_ms,
-            }),
-        output: overrides
-            .output
-            .as_ref()
-            .map(|output| local::PartialOutputLimits {
-                stdout_tail_max_bytes: output.stdout_tail_max_bytes,
-                stderr_tail_max_bytes: output.stderr_tail_max_bytes,
-            }),
-    }
-}
-
-fn accepted(request_id: String, payload: local::ProfileAcceptedPayload) -> remote::RemoteResponse {
-    remote::RemoteResponse::ProfileAccepted {
-        remote_protocol_version: remote::REMOTE_PROTOCOL_VERSION,
-        request_id,
-        payload: remote::ProfileAcceptedPayload {
-            task_id: payload.task_id,
-            state: remote::TaskState::Running,
-            profile: profile_identity(payload.profile),
-            effective_resources: remote::ProfileEffectiveResources {
-                limits: resource_limits(payload.effective_resources.limits),
-                output: output_limits(payload.effective_resources.output),
-            },
-        },
-    }
 }
 
 fn local_error(request_id: String, payload: local::ErrorPayload) -> remote::RemoteResponse {
@@ -988,84 +865,4 @@ fn task_not_found(request_id: String) -> remote::RemoteResponse {
         "task was not found",
         false,
     )
-}
-
-fn profile_identity(profile: local::ProfileIdentity) -> remote::ProfileIdentity {
-    remote::ProfileIdentity {
-        name: profile.name,
-        version: profile.version,
-    }
-}
-
-fn resource_limits(limits: local::ResourceLimits) -> remote::ResourceLimits {
-    remote::ResourceLimits {
-        cpu_max: remote::CpuMax {
-            quota_micros: limits.cpu_max.quota_micros,
-            period_micros: limits.cpu_max.period_micros,
-        },
-        memory_max_bytes: limits.memory_max_bytes,
-        pids_max: limits.pids_max,
-        wall_time_limit_ms: limits.wall_time_limit_ms,
-    }
-}
-
-fn output_limits(output: local::OutputLimits) -> remote::OutputLimits {
-    remote::OutputLimits {
-        stdout_tail_max_bytes: output.stdout_tail_max_bytes,
-        stderr_tail_max_bytes: output.stderr_tail_max_bytes,
-    }
-}
-
-fn local_profile_task_id(payload: &local::ProfileTaskPayload) -> &str {
-    match payload {
-        local::ProfileTaskPayload::Running { task_id, .. }
-        | local::ProfileTaskPayload::Finished { task_id, .. } => task_id,
-    }
-}
-
-fn namespaced_uuid(principal: &str, source: &str, domain: &[u8]) -> String {
-    let mut digest = Sha256::new();
-    digest.update(domain);
-    digest.update([0]);
-    digest.update(principal.as_bytes());
-    digest.update([0]);
-    digest.update(source.as_bytes());
-    let mut bytes: [u8; 16] = digest.finalize()[..16]
-        .try_into()
-        .expect("SHA-256 prefix length");
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    )
-}
-
-impl From<local::TerminationReason> for remote::TerminationReason {
-    fn from(value: local::TerminationReason) -> Self {
-        match value {
-            local::TerminationReason::Exited => Self::Exited,
-            local::TerminationReason::ExecutionFailed => Self::ExecutionFailed,
-            local::TerminationReason::Cancelled => Self::Cancelled,
-            local::TerminationReason::TimedOut => Self::TimedOut,
-            local::TerminationReason::MemoryLimitExceeded => Self::MemoryLimitExceeded,
-            local::TerminationReason::ProcessLimitExceeded => Self::ProcessLimitExceeded,
-            local::TerminationReason::DaemonError => Self::DaemonError,
-        }
-    }
 }

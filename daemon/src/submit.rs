@@ -37,7 +37,9 @@ use crate::fail_stop::{
 #[cfg(target_os = "linux")]
 use crate::preflight::VerifiedEnvironment;
 #[cfg(any(target_os = "linux", test))]
-use crate::protocol::{ErrorCode, TaskPayload};
+use taskcage_core::task::TaskSnapshot as TaskPayload;
+
+use crate::protocol::ErrorCode;
 use crate::protocol::{PROTOCOL_VERSION, ProfileRequestPayload, Request, SubmitTaskPayload};
 #[cfg(any(target_os = "linux", test))]
 use crate::resource_budget::VerifiedEffectiveLimits;
@@ -882,7 +884,7 @@ fn complete_finished_execution(
     active.complete();
     finish_capacity(capacity_permit, fail_stop);
     let finished = publication.publish_completion();
-    crate::audit::log_task_finished(&finished);
+    crate::audit::log_task_finished(&crate::protocol_mapper::task_snapshot(finished.clone()));
     finished
 }
 
@@ -1128,6 +1130,9 @@ mod tests {
     use std::sync::Barrier as ThreadBarrier;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use taskcage_core::task::{
+        ProcessResult, TaskOutput, TaskTiming, TaskUsage, TerminationReason,
+    };
     use tokio::sync::{Barrier, Notify};
     use tokio::time::{Duration as TokioDuration, timeout};
 
@@ -1135,10 +1140,7 @@ mod tests {
     use crate::cleanup_fault::{CleanupFaultMode, CleanupFaultPoint, CleanupFaults};
     #[cfg(target_os = "linux")]
     use crate::preflight::{CapabilityProbe, SystemProbe};
-    use crate::protocol::{
-        CommandSpec, CpuMax, OutputLimits, ProcessResult, ResourceLimits, TaskOutput, TaskTiming,
-        TaskUsage, TerminationReason,
-    };
+    use crate::protocol::{CommandSpec, CpuMax, OutputLimits, ResourceLimits};
 
     use super::*;
 

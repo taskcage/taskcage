@@ -7,7 +7,10 @@ use thiserror::Error;
 
 use crate::cgroup::{JobStats, KernelEvents};
 use crate::output::CapturedOutput;
-use crate::protocol::{ProcessResult, TaskPayload, TaskTiming, TaskUsage, TerminationReason};
+use taskcage_core::task::{
+    ProcessResult, TaskResult, TaskSnapshot as TaskPayload, TaskTiming, TaskUsage,
+    TerminationReason,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProcessEvidence {
@@ -259,7 +262,7 @@ impl SingleTaskLifecycle {
         let wall_time_ms =
             u64::try_from(wall_time.as_millis()).map_err(|_| LifecycleError::WallTimeOverflow)?;
 
-        let payload = TaskPayload::Finished {
+        let payload = TaskPayload::from_result(TaskResult {
             task_id: running.task_id.clone(),
             termination_reason,
             process,
@@ -274,7 +277,7 @@ impl SingleTaskLifecycle {
                 memory_peak_bytes: completion.stats.memory_peak_bytes,
             },
             output: crate::output::into_task_output(completion.output),
-        };
+        });
 
         self.state = LifecycleState::Finished(payload);
         match &self.state {
@@ -769,7 +772,9 @@ mod tests {
             )
             .unwrap();
 
-        let value = serde_json::to_value(lifecycle.snapshot()).unwrap();
+        let value =
+            serde_json::to_value(crate::protocol_mapper::task_snapshot(lifecycle.snapshot()))
+                .unwrap();
         let fields = value.as_object().unwrap();
         let mut names: Vec<_> = fields.keys().map(String::as_str).collect();
         names.sort_unstable();

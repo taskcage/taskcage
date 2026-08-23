@@ -18,8 +18,10 @@ pub use crate::bundle::{
     BundleResourcePolicy as CapsuleResourcePolicy,
 };
 use crate::digest::Sha256Digest;
-use crate::protocol::ProfileIdentity;
 pub use taskcage_core::CapsuleIdentity;
+use taskcage_core::capsule::ProfileIdentity as DomainProfileIdentity;
+
+use crate::protocol::ProfileIdentity;
 
 #[derive(Debug, Error)]
 pub enum CapsuleError {
@@ -122,6 +124,10 @@ impl CompiledCapsule {
                 package_digest: runtime.digest,
             },
             profile: CompiledCapsuleProfile {
+                domain_identity: DomainProfileIdentity::new(
+                    profile_name.clone(),
+                    profile_version.clone(),
+                ),
                 identity: ProfileIdentity {
                     name: profile_name,
                     version: profile_version,
@@ -203,6 +209,7 @@ impl CapsuleRuntimeReference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledCapsuleProfile {
     identity: ProfileIdentity,
+    domain_identity: DomainProfileIdentity,
     digest: Sha256Digest,
     inputs: Vec<CapsuleInput>,
     arguments: Vec<CapsuleArgument>,
@@ -214,6 +221,10 @@ pub struct CompiledCapsuleProfile {
 impl CompiledCapsuleProfile {
     pub fn identity(&self) -> &ProfileIdentity {
         &self.identity
+    }
+
+    pub(crate) fn domain_identity(&self) -> &DomainProfileIdentity {
+        &self.domain_identity
     }
 
     pub fn digest(&self) -> Sha256Digest {

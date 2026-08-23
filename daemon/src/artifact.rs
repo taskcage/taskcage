@@ -3,7 +3,6 @@
 //! 실제 root-relative open, snapshot과 publish는 Profile 실행 경로가 추가될 때 이 값만 소비한다.
 //! Raw Command Protocol v1은 이 모듈을 사용하지 않는다.
 
-use std::fmt;
 use std::io::{self, Read};
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
@@ -13,7 +12,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::digest::Sha256Digest;
+use taskcage_core::artifact::Sha256Digest;
+pub use taskcage_core::artifact::{
+    ArtifactPath, ArtifactPathError, DeclaredOutputArtifact, DeclaredOutputError,
+    LocalInputArtifact, MAX_ARTIFACT_PATH_BYTES, PublishedArtifact,
+};
 
 #[cfg(target_os = "linux")]
 use std::cell::Cell;
@@ -25,81 +28,6 @@ use std::fs::{self, File};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 #[cfg(target_os = "linux")]
 use std::path::{Component, Path, PathBuf};
-
-/// Artifact root 기준 상대 path의 최대 UTF-8 byte 길이다.
-pub const MAX_ARTIFACT_PATH_BYTES: usize = 4_096;
-
-/// Artifact root 밖을 가리키지 않는 wire path다.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ArtifactPath(String);
-
-impl ArtifactPath {
-    /// Local Artifact path 문법을 side effect 없이 검증한다.
-    pub fn parse(value: impl Into<String>) -> Result<Self, ArtifactPathError> {
-        let value = value.into();
-        if value.is_empty() || value.len() > MAX_ARTIFACT_PATH_BYTES {
-            return Err(ArtifactPathError::Length);
-        }
-
-        for segment in value.split('/') {
-            if segment.is_empty() || matches!(segment, "." | "..") {
-                return Err(ArtifactPathError::Segment);
-            }
-            if segment
-                .bytes()
-                .any(|byte| byte == b'\0' || byte == b'\\' || byte.is_ascii_control())
-            {
-                return Err(ArtifactPathError::UnsafeCharacter);
-            }
-        }
-
-        if value.split('/').next() == Some(".taskcage") {
-            return Err(ArtifactPathError::ReservedPath);
-        }
-
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ArtifactPath {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-/// Input Artifact가 선언하는 immutable snapshot identity다.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalInputArtifact {
-    path: ArtifactPath,
-    digest: Sha256Digest,
-    size_bytes: u64,
-}
-
-impl LocalInputArtifact {
-    pub fn new(path: ArtifactPath, digest: Sha256Digest, size_bytes: u64) -> Self {
-        Self {
-            path,
-            digest,
-            size_bytes,
-        }
-    }
-
-    pub fn path(&self) -> &ArtifactPath {
-        &self.path
-    }
-
-    pub fn digest(&self) -> Sha256Digest {
-        self.digest
-    }
-
-    pub fn size_bytes(&self) -> u64 {
-        self.size_bytes
-    }
-}
 
 /// Source bytes가 descriptor와 배포 상한에 맞는지 target 시작 전에 검증한다.
 pub fn verify_input<R>(
@@ -153,19 +81,6 @@ where
     Ok(())
 }
 
-/// Artifact path가 Local Product Alpha 경계를 벗어났다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum ArtifactPathError {
-    #[error("artifact path는 1~4096 UTF-8 bytes여야 합니다")]
-    Length,
-    #[error("artifact path에 빈, . 또는 .. segment를 넣을 수 없습니다")]
-    Segment,
-    #[error("artifact path에 NUL, backslash 또는 ASCII control 문자를 넣을 수 없습니다")]
-    UnsafeCharacter,
-    #[error(".taskcage staging subtree는 caller Artifact path로 사용할 수 없습니다")]
-    ReservedPath,
-}
-
 /// Input snapshot 검증이 target 시작 전에 실패했다.
 #[derive(Debug, Error)]
 pub enum ArtifactVerificationError {
@@ -179,105 +94,6 @@ pub enum ArtifactVerificationError {
     DigestMismatch,
     #[error("artifact source를 읽지 못했습니다: {0}")]
     Read(#[source] io::Error),
-}
-
-/// Profile이 선언한 하나의 immutable output file 계약이다.
-///
-/// v0.2 Product Alpha는 여러 output을 하나의 transaction으로 publish하지 않는다.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeclaredOutputArtifact {
-    file_name: String,
-    media_type: String,
-    maximum_bytes: u64,
-}
-
-impl DeclaredOutputArtifact {
-    pub fn new(
-        file_name: impl Into<String>,
-        media_type: impl Into<String>,
-        maximum_bytes: u64,
-    ) -> Result<Self, DeclaredOutputError> {
-        let file_name = file_name.into();
-        if file_name.is_empty()
-            || file_name.contains('/')
-            || file_name.contains('\\')
-            || file_name == "."
-            || file_name == ".."
-            || file_name
-                .bytes()
-                .any(|byte| byte == b'\0' || byte.is_ascii_control())
-        {
-            return Err(DeclaredOutputError::FileName);
-        }
-        let media_type = media_type.into();
-        if media_type.is_empty()
-            || media_type.len() > 255
-            || media_type
-                .bytes()
-                .any(|byte| byte.is_ascii_control() || byte == b'\0')
-        {
-            return Err(DeclaredOutputError::MediaType);
-        }
-        if maximum_bytes == 0 {
-            return Err(DeclaredOutputError::MaximumBytes);
-        }
-
-        Ok(Self {
-            file_name,
-            media_type,
-            maximum_bytes,
-        })
-    }
-
-    pub fn file_name(&self) -> &str {
-        &self.file_name
-    }
-
-    pub fn media_type(&self) -> &str {
-        &self.media_type
-    }
-
-    pub fn maximum_bytes(&self) -> u64 {
-        self.maximum_bytes
-    }
-}
-
-/// 고정 output file 선언이 Product Alpha 경계를 벗어났다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum DeclaredOutputError {
-    #[error("output file name은 단일 안전 file name이어야 합니다")]
-    FileName,
-    #[error("output media type은 비어 있지 않은 control-character 없는 문자열이어야 합니다")]
-    MediaType,
-    #[error("output maximum bytes는 0보다 커야 합니다")]
-    MaximumBytes,
-}
-
-/// 성공한 Profile Task가 Artifact root에 공개한 immutable file의 metadata다.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublishedArtifact {
-    path: ArtifactPath,
-    digest: Sha256Digest,
-    size_bytes: u64,
-    media_type: String,
-}
-
-impl PublishedArtifact {
-    pub fn path(&self) -> &ArtifactPath {
-        &self.path
-    }
-
-    pub fn digest(&self) -> Sha256Digest {
-        self.digest
-    }
-
-    pub fn size_bytes(&self) -> u64 {
-        self.size_bytes
-    }
-
-    pub fn media_type(&self) -> &str {
-        &self.media_type
-    }
 }
 
 /// Linux descriptor-relative Artifact lifecycle store다.
@@ -544,12 +360,12 @@ impl StagedArtifactTask {
             self.output.file_name()
         ))
         .expect("Task id와 output file name은 이미 검증됐습니다");
-        Ok(PublishedArtifact {
-            path: relative,
+        Ok(PublishedArtifact::new(
+            relative,
             digest,
             size_bytes,
-            media_type: self.output.media_type().to_owned(),
-        })
+            self.output.media_type(),
+        ))
     }
 
     /// timeout, cancellation, non-zero exit 또는 publish failure 뒤 staging을 확인하며 제거한다.

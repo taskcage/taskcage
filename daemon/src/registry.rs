@@ -11,7 +11,9 @@ use tokio::sync::Notify;
 #[cfg(test)]
 use crate::cancellation::cancellation_channel;
 use crate::cancellation::{CancellationWaiter, RunningCancellation};
-use crate::protocol::{ErrorCode, TaskPayload};
+use taskcage_core::task::TaskSnapshot as TaskPayload;
+
+use crate::protocol::ErrorCode;
 use crate::resource_budget::VerifiedEffectiveLimits;
 use crate::submit::{SubmissionIdentity, ValidatedSubmit};
 
@@ -798,13 +800,15 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
+    use taskcage_core::task::{
+        ProcessResult, TaskOutput, TaskTiming, TaskUsage, TerminationReason,
+    };
     use tokio::sync::Barrier;
     use tokio::time::{Duration as TokioDuration, timeout};
 
     use super::*;
     use crate::protocol::{
-        CommandSpec, CpuMax, OutputLimits, ProcessResult, Request, ResourceLimits,
-        SubmitTaskPayload, TaskOutput, TaskTiming, TaskUsage, TerminationReason,
+        CommandSpec, CpuMax, OutputLimits, Request, ResourceLimits, SubmitTaskPayload,
     };
 
     const TASK_ID: &str = "33333333-3333-3333-3333-333333333333";

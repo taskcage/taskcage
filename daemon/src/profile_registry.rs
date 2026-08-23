@@ -23,15 +23,13 @@ use crate::capsule::{CapsuleCatalog, CapsuleError, CompiledCapsule};
 use crate::digest::Sha256Digest;
 use crate::execution_plan::ResolvedExecutionPlan;
 use crate::profile_invocation::{
-    CpuMaxOverride, InputValueRejection, InvocationError, ProfileCall,
-    ProfileIdentity as InvocationProfileIdentity,
-    ProfileResourceOverrides as InvocationResourceOverrides,
-    ProfileValue as InvocationProfileValue, VerifiedArgument, verify_profile_call,
+    InputValueRejection, InvocationError, VerifiedArgument, verify_profile_call,
 };
 use crate::protocol::{
     CommandSpec, ErrorCode, OutputLimits, ProfileIdentity, ProfileInputValue,
     ProfileRequestPayload, ProfileResourceOverrides, ResourceLimits,
 };
+use crate::protocol_mapper;
 use crate::resource_budget::{ResourceBudget, ResourceBudgetError};
 use crate::runtime_package::{ResolvedRuntimePackage, RuntimePackageCache, RuntimePackageError};
 
@@ -228,7 +226,7 @@ impl ProfileRegistry {
         capsule: CompiledCapsule,
         bundles: &BundleProfileRegistration,
     ) -> Result<ResolvedProfile, ProfileError> {
-        let invocation = verify_profile_call(&capsule, profile_call_from_protocol(request))
+        let invocation = verify_profile_call(&capsule, protocol_mapper::profile_call(request))
             .map_err(profile_invocation_error)?;
         let source = invocation
             .input_artifacts()
@@ -539,69 +537,6 @@ fn parse_local_input(
     }
 }
 
-fn profile_call_from_protocol(request: &ProfileRequestPayload) -> ProfileCall {
-    let mut call = ProfileCall::new(
-        InvocationProfileIdentity::new(
-            request.profile.name.clone(),
-            request.profile.version.clone(),
-        ),
-        request
-            .inputs
-            .iter()
-            .map(|(name, value)| (name.clone(), invocation_value_from_protocol(value))),
-    );
-    if let Some(overrides) = request.resource_overrides.as_ref() {
-        call = call.with_resource_overrides(invocation_overrides_from_protocol(overrides));
-    }
-    call
-}
-
-fn invocation_value_from_protocol(value: &ProfileInputValue) -> InvocationProfileValue {
-    match value {
-        ProfileInputValue::String { value } => InvocationProfileValue::String(value.clone()),
-        ProfileInputValue::Int64 { value } => InvocationProfileValue::Int64(*value),
-        ProfileInputValue::Boolean { value } => InvocationProfileValue::Boolean(*value),
-        ProfileInputValue::LocalInput {
-            path,
-            digest,
-            size_bytes,
-        } => InvocationProfileValue::LocalInput {
-            path: path.clone(),
-            digest: digest.clone(),
-            size_bytes: *size_bytes,
-        },
-    }
-}
-
-fn invocation_overrides_from_protocol(
-    overrides: &ProfileResourceOverrides,
-) -> InvocationResourceOverrides {
-    let mut domain = InvocationResourceOverrides::new();
-    if let Some(limits) = overrides.limits.as_ref() {
-        if let Some(cpu) = limits.cpu_max.as_ref() {
-            domain = domain.with_cpu_max(CpuMaxOverride::new(cpu.quota_micros, cpu.period_micros));
-        }
-        if let Some(value) = limits.memory_max_bytes {
-            domain = domain.with_memory_max_bytes(value);
-        }
-        if let Some(value) = limits.pids_max {
-            domain = domain.with_pids_max(value);
-        }
-        if let Some(value) = limits.wall_time_limit_ms {
-            domain = domain.with_wall_time_limit_ms(value);
-        }
-    }
-    if let Some(output) = overrides.output.as_ref() {
-        if let Some(value) = output.stdout_tail_max_bytes {
-            domain = domain.with_stdout_tail_max_bytes(value);
-        }
-        if let Some(value) = output.stderr_tail_max_bytes {
-            domain = domain.with_stderr_tail_max_bytes(value);
-        }
-    }
-    domain
-}
-
 fn profile_invocation_error(error: InvocationError) -> ProfileError {
     let code = match &error {
         InvocationError::CapsuleProfileNotFound { .. } => ErrorCode::ProfileNotFound,
@@ -828,6 +763,10 @@ mod tests {
 
     use serde_json::json;
     use sha2::{Digest, Sha256};
+    use taskcage_core::capsule::{
+        ProfileCall, ProfileIdentity as InvocationProfileIdentity,
+        ProfileValue as InvocationProfileValue,
+    };
 
     use crate::bundle::test_support::{
         catalog_with_runtime_package, profile_bytes, signed_bundle_archive,
@@ -1099,7 +1038,7 @@ mod tests {
         request: &ProfileRequestPayload,
     ) -> Result<crate::profile_invocation::VerifiedInvocation, ProfileError> {
         let capsule = compile_bundle_profile(profile);
-        verify_profile_call(&capsule, profile_call_from_protocol(request))
+        verify_profile_call(&capsule, protocol_mapper::profile_call(request))
             .map_err(profile_invocation_error)
     }
 
@@ -1938,7 +1877,7 @@ mod tests {
         let profile = ffmpeg_bundle_profile();
         let capsule = compile_bundle_profile(&profile);
         let wire = request();
-        let adapted = verify_profile_call(&capsule, profile_call_from_protocol(&wire)).unwrap();
+        let adapted = verify_profile_call(&capsule, protocol_mapper::profile_call(&wire)).unwrap();
         let direct = verify_profile_call(
             &capsule,
             ProfileCall::new(
@@ -1987,7 +1926,7 @@ mod tests {
             },
         );
 
-        let error = verify_profile_call(&capsule, profile_call_from_protocol(&wire))
+        let error = verify_profile_call(&capsule, protocol_mapper::profile_call(&wire))
             .map_err(profile_invocation_error)
             .unwrap_err();
         assert_eq!(error.code(), ErrorCode::InvalidArtifactPath);

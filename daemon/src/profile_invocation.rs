@@ -7,6 +7,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
+pub use taskcage_core::capsule::{
+    CpuMaxOverride, ProfileCall, ProfileIdentity, ProfileResourceOverrides, ProfileValue,
+    VerifiedArgument,
+};
 use thiserror::Error;
 
 use crate::artifact::{ArtifactPath, LocalInputArtifact};
@@ -16,224 +20,7 @@ use crate::capsule::{
     CapsuleOutput, CapsuleRuntimeReference, CompiledCapsule, CompiledCapsuleProfile,
 };
 use crate::digest::Sha256Digest;
-use crate::protocol::CpuMax;
 use crate::resource_budget::ResourceBudget;
-
-/// Exact Profile identity supplied by an application or embedded runtime.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProfileIdentity {
-    name: String,
-    version: String,
-}
-
-impl ProfileIdentity {
-    pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            version: version.into(),
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn version(&self) -> &str {
-        &self.version
-    }
-}
-
-/// Protocol-independent request to invoke one exact Profile.
-///
-/// Input pairs intentionally retain their original multiplicity so duplicate names can be
-/// rejected by the verifier instead of being silently overwritten by a map constructor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProfileCall {
-    identity: ProfileIdentity,
-    inputs: Vec<(String, ProfileValue)>,
-    resource_overrides: Option<ProfileResourceOverrides>,
-}
-
-impl ProfileCall {
-    pub fn new<I, N>(identity: ProfileIdentity, inputs: I) -> Self
-    where
-        I: IntoIterator<Item = (N, ProfileValue)>,
-        N: Into<String>,
-    {
-        Self {
-            identity,
-            inputs: inputs
-                .into_iter()
-                .map(|(name, value)| (name.into(), value))
-                .collect(),
-            resource_overrides: None,
-        }
-    }
-
-    pub fn with_resource_overrides(mut self, overrides: ProfileResourceOverrides) -> Self {
-        self.resource_overrides = Some(overrides);
-        self
-    }
-
-    pub fn identity(&self) -> &ProfileIdentity {
-        &self.identity
-    }
-
-    pub fn inputs(&self) -> impl ExactSizeIterator<Item = (&str, &ProfileValue)> {
-        self.inputs
-            .iter()
-            .map(|(name, value)| (name.as_str(), value))
-    }
-
-    pub fn resource_overrides(&self) -> Option<&ProfileResourceOverrides> {
-        self.resource_overrides.as_ref()
-    }
-}
-
-/// Typed value accepted at the domain boundary before Capsule validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProfileValue {
-    String(String),
-    Int64(i64),
-    Boolean(bool),
-    LocalInput {
-        path: String,
-        digest: String,
-        size_bytes: u64,
-    },
-}
-
-impl ProfileValue {
-    pub fn kind_name(&self) -> &'static str {
-        match self {
-            Self::String(_) => "STRING",
-            Self::Int64(_) => "INT64",
-            Self::Boolean(_) => "BOOLEAN",
-            Self::LocalInput { .. } => "LOCAL_INPUT",
-        }
-    }
-}
-
-/// Domain representation of a CPU override. Values remain unverified until invocation validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CpuMaxOverride {
-    quota_micros: u64,
-    period_micros: u64,
-}
-
-impl CpuMaxOverride {
-    pub const fn new(quota_micros: u64, period_micros: u64) -> Self {
-        Self {
-            quota_micros,
-            period_micros,
-        }
-    }
-
-    pub const fn quota_micros(self) -> u64 {
-        self.quota_micros
-    }
-
-    pub const fn period_micros(self) -> u64 {
-        self.period_micros
-    }
-}
-
-/// Optional resource fields requested by a ProfileCall.
-///
-/// The flat representation is a domain model rather than a mirror of any transport DTO.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProfileResourceOverrides {
-    cpu_max: Option<CpuMaxOverride>,
-    memory_max_bytes: Option<u64>,
-    pids_max: Option<u64>,
-    wall_time_limit_ms: Option<u64>,
-    stdout_tail_max_bytes: Option<u32>,
-    stderr_tail_max_bytes: Option<u32>,
-}
-
-impl ProfileResourceOverrides {
-    pub const fn new() -> Self {
-        Self {
-            cpu_max: None,
-            memory_max_bytes: None,
-            pids_max: None,
-            wall_time_limit_ms: None,
-            stdout_tail_max_bytes: None,
-            stderr_tail_max_bytes: None,
-        }
-    }
-
-    pub fn with_cpu_max(mut self, value: CpuMaxOverride) -> Self {
-        self.cpu_max = Some(value);
-        self
-    }
-
-    pub fn with_memory_max_bytes(mut self, value: u64) -> Self {
-        self.memory_max_bytes = Some(value);
-        self
-    }
-
-    pub fn with_pids_max(mut self, value: u64) -> Self {
-        self.pids_max = Some(value);
-        self
-    }
-
-    pub fn with_wall_time_limit_ms(mut self, value: u64) -> Self {
-        self.wall_time_limit_ms = Some(value);
-        self
-    }
-
-    pub fn with_stdout_tail_max_bytes(mut self, value: u32) -> Self {
-        self.stdout_tail_max_bytes = Some(value);
-        self
-    }
-
-    pub fn with_stderr_tail_max_bytes(mut self, value: u32) -> Self {
-        self.stderr_tail_max_bytes = Some(value);
-        self
-    }
-
-    pub const fn cpu_max(&self) -> Option<CpuMaxOverride> {
-        self.cpu_max
-    }
-
-    pub const fn memory_max_bytes(&self) -> Option<u64> {
-        self.memory_max_bytes
-    }
-
-    pub const fn pids_max(&self) -> Option<u64> {
-        self.pids_max
-    }
-
-    pub const fn wall_time_limit_ms(&self) -> Option<u64> {
-        self.wall_time_limit_ms
-    }
-
-    pub const fn stdout_tail_max_bytes(&self) -> Option<u32> {
-        self.stdout_tail_max_bytes
-    }
-
-    pub const fn stderr_tail_max_bytes(&self) -> Option<u32> {
-        self.stderr_tail_max_bytes
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        self.cpu_max.is_none()
-            && self.memory_max_bytes.is_none()
-            && self.pids_max.is_none()
-            && self.wall_time_limit_ms.is_none()
-            && self.stdout_tail_max_bytes.is_none()
-            && self.stderr_tail_max_bytes.is_none()
-    }
-}
-
-/// Shell-free argv element after scalar binding but before runtime artifact paths exist.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VerifiedArgument {
-    Literal(String),
-    InputArtifactPath { slot: String },
-    OutputArtifactPath { slot: String },
-}
 
 /// Side-effect-free result that can only be constructed by `verify_profile_call`.
 ///
@@ -344,22 +131,18 @@ pub fn verify_profile_call(
     validate_compiled_structure(capsule)?;
 
     let profile = capsule.profile();
-    if call.identity.name != capsule.identity().name()
-        || call.identity.version != capsule.identity().version()
-        || call.identity.name != profile.identity().name
-        || call.identity.version != profile.identity().version
+    if call.identity().name() != capsule.identity().name()
+        || call.identity().version() != capsule.identity().version()
+        || call.identity().name() != profile.domain_identity().name()
+        || call.identity().version() != profile.domain_identity().version()
     {
         return Err(InvocationError::CapsuleProfileNotFound {
-            name: call.identity.name,
-            version: call.identity.version,
+            name: call.identity().name().to_owned(),
+            version: call.identity().version().to_owned(),
         });
     }
 
-    let ProfileCall {
-        identity,
-        inputs,
-        resource_overrides,
-    } = call;
+    let (identity, inputs, resource_overrides) = call.into_parts();
     let values = collect_inputs(inputs)?;
     validate_exact_input_set(profile.inputs(), &values)?;
     let input_artifacts = validate_input_values(profile.inputs(), &values)?;
@@ -392,8 +175,8 @@ fn validate_requested_identity(identity: &ProfileIdentity) -> InvocationResult<(
 
 fn validate_compiled_structure(capsule: &CompiledCapsule) -> InvocationResult<()> {
     let profile = capsule.profile();
-    if capsule.identity().name() != profile.identity().name
-        || capsule.identity().version() != profile.identity().version
+    if capsule.identity().name() != profile.domain_identity().name()
+        || capsule.identity().version() != profile.domain_identity().version()
     {
         return Err(invalid_contract(
             "Capsule and Profile identities do not match",
@@ -631,9 +414,16 @@ fn resolve_resources(
     overrides: Option<&ProfileResourceOverrides>,
 ) -> InvocationResult<ResourceBudget> {
     let policy = profile.resource_policy();
-    let maximum =
-        ResourceBudget::try_from_protocol(policy.limits.clone(), policy.output.clone())
-            .map_err(|error| invalid_contract(format!("resource policy is invalid: {error}")))?;
+    let maximum = ResourceBudget::try_new(
+        policy.limits.cpu_max.quota_micros,
+        policy.limits.cpu_max.period_micros,
+        policy.limits.memory_max_bytes,
+        policy.limits.pids_max,
+        policy.limits.wall_time_limit_ms,
+        policy.output.stdout_tail_max_bytes,
+        policy.output.stderr_tail_max_bytes,
+    )
+    .map_err(|error| invalid_contract(format!("resource policy is invalid: {error}")))?;
     let Some(overrides) = overrides else {
         return Ok(maximum);
     };
@@ -643,34 +433,30 @@ fn resolve_resources(
         });
     }
 
-    let mut limits = policy.limits.clone();
-    let mut output = policy.output.clone();
-    if let Some(value) = overrides.cpu_max() {
-        limits.cpu_max = CpuMax {
-            quota_micros: value.quota_micros(),
-            period_micros: value.period_micros(),
-        };
-    }
-    if let Some(value) = overrides.memory_max_bytes() {
-        limits.memory_max_bytes = value;
-    }
-    if let Some(value) = overrides.pids_max() {
-        limits.pids_max = value;
-    }
-    if let Some(value) = overrides.wall_time_limit_ms() {
-        limits.wall_time_limit_ms = value;
-    }
-    if let Some(value) = overrides.stdout_tail_max_bytes() {
-        output.stdout_tail_max_bytes = value;
-    }
-    if let Some(value) = overrides.stderr_tail_max_bytes() {
-        output.stderr_tail_max_bytes = value;
-    }
-
-    let requested = ResourceBudget::try_from_protocol(limits, output).map_err(|error| {
-        InvocationError::InvalidResourceOverride {
-            reason: error.to_string(),
-        }
+    let cpu = overrides.cpu_max();
+    let requested = ResourceBudget::try_new(
+        cpu.map_or(policy.limits.cpu_max.quota_micros, |value| {
+            value.quota_micros()
+        }),
+        cpu.map_or(policy.limits.cpu_max.period_micros, |value| {
+            value.period_micros()
+        }),
+        overrides
+            .memory_max_bytes()
+            .unwrap_or(policy.limits.memory_max_bytes),
+        overrides.pids_max().unwrap_or(policy.limits.pids_max),
+        overrides
+            .wall_time_limit_ms()
+            .unwrap_or(policy.limits.wall_time_limit_ms),
+        overrides
+            .stdout_tail_max_bytes()
+            .unwrap_or(policy.output.stdout_tail_max_bytes),
+        overrides
+            .stderr_tail_max_bytes()
+            .unwrap_or(policy.output.stderr_tail_max_bytes),
+    )
+    .map_err(|error| InvocationError::InvalidResourceOverride {
+        reason: error.to_string(),
     })?;
     validate_override_allowlist(profile.allowed_overrides(), overrides)?;
     requested

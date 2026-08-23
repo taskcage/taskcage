@@ -37,7 +37,7 @@ mod lifecycle;
 pub mod output {
     pub use taskcage_core::output::{CaptureLimits, CapturedOutput, CapturedStream};
 
-    use crate::protocol::TaskOutput;
+    use taskcage_core::task::TaskOutput;
 
     pub(crate) fn into_task_output(captured: CapturedOutput) -> TaskOutput {
         let CapturedOutput { stdout, stderr } = captured;
@@ -59,6 +59,7 @@ pub mod profile_mapper;
 #[cfg(target_os = "linux")]
 mod profile_registry;
 pub mod protocol;
+mod protocol_mapper;
 pub mod remote_artifact;
 pub mod remote_auth;
 #[cfg(target_os = "linux")]
@@ -66,6 +67,8 @@ mod remote_backend;
 pub mod remote_config;
 pub mod remote_dispatch;
 pub mod remote_protocol;
+#[cfg(target_os = "linux")]
+mod remote_protocol_mapper;
 pub mod remote_server;
 pub mod resource_budget;
 #[cfg(target_os = "linux")]
@@ -246,7 +249,7 @@ pub async fn run_once(config: RunOnceConfig) -> Result<RunOnceReport> {
             cleanup_errors: Vec::new(),
         });
     }
-    let output = output::into_task_output(diagnostic.output);
+    let output = protocol_mapper::task_output(output::into_task_output(diagnostic.output));
     Ok(RunOnceReport {
         job_id: diagnostic.job_id,
         pid: diagnostic.pid,

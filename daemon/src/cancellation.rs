@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::Notify;
 
 use crate::lifecycle::{ControlTrigger, ControlTriggers, TerminalTriggerLatch};
-use crate::protocol::TaskPayload;
+use taskcage_core::task::TaskSnapshot as TaskPayload;
 
 #[derive(Debug)]
 struct CancellationState {
@@ -122,7 +122,9 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::protocol::{ProcessResult, TaskOutput, TaskTiming, TaskUsage, TerminationReason};
+    use taskcage_core::task::{
+        ProcessResult, TaskOutput, TaskTiming, TaskUsage, TerminationReason,
+    };
 
     fn finished(reason: TerminationReason) -> TaskPayload {
         TaskPayload::Finished {
