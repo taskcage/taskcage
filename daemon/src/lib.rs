@@ -58,8 +58,6 @@ mod profile;
 pub mod profile_invocation;
 #[cfg(target_os = "linux")]
 pub mod profile_mapper;
-#[cfg(target_os = "linux")]
-mod profile_registry;
 pub mod protocol;
 mod protocol_mapper;
 pub mod remote_artifact;

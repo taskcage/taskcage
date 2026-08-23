@@ -8,9 +8,9 @@ use crate::digest::Sha256Digest;
 
 use super::{RuntimePackageError, RuntimePackageResult};
 
-pub(super) const MANIFEST_NAME: &str = "runtime-package.json";
-pub(super) const ROOTFS_NAME: &str = "rootfs";
-pub(super) const MAX_MANIFEST_BYTES: usize = 1_048_576;
+pub(crate) const MANIFEST_NAME: &str = "runtime-package.json";
+pub(crate) const ROOTFS_NAME: &str = "rootfs";
+pub(crate) const MAX_MANIFEST_BYTES: usize = 1_048_576;
 const MAX_ID_BYTES: usize = 255;
 const MAX_PATH_BYTES: usize = 4_096;
 const MAX_PACKAGE_FILES: usize = 4_096;
@@ -59,7 +59,7 @@ pub struct PackageFile {
 }
 
 impl PackageFile {
-    pub(super) fn mode_bits(&self) -> u32 {
+    pub(crate) fn mode_bits(&self) -> u32 {
         match self.mode.as_str() {
             "0444" => 0o444,
             "0555" => 0o555,
@@ -83,13 +83,13 @@ pub struct PackageSbom {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ValidatedManifest {
-    pub(super) manifest: RuntimePackageManifest,
-    pub(super) digest: Sha256Digest,
-    pub(super) canonical_json: Vec<u8>,
+pub(crate) struct ValidatedManifest {
+    pub(crate) manifest: RuntimePackageManifest,
+    pub(crate) digest: Sha256Digest,
+    pub(crate) canonical_json: Vec<u8>,
 }
 
-pub(super) fn parse_manifest(source: &[u8]) -> RuntimePackageResult<ValidatedManifest> {
+pub(crate) fn parse_manifest(source: &[u8]) -> RuntimePackageResult<ValidatedManifest> {
     if source.is_empty() {
         return Err(RuntimePackageError::InvalidManifest(
             "manifest JSON은 비어 있을 수 없습니다".to_owned(),
@@ -310,7 +310,7 @@ fn validate_identity(value: &str) -> RuntimePackageResult<()> {
     Ok(())
 }
 
-pub(super) fn validate_relative_path(field: &'static str, value: &str) -> RuntimePackageResult<()> {
+pub(crate) fn validate_relative_path(field: &'static str, value: &str) -> RuntimePackageResult<()> {
     if value.is_empty()
         || value.len() > MAX_PATH_BYTES
         || value.starts_with('/')

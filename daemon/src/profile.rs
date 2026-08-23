@@ -12,12 +12,12 @@ use taskcage_core::task::{TaskSnapshot as TaskPayload, TerminationReason};
 use thiserror::Error;
 use tokio::sync::Notify;
 
+use crate::application::capsule::{ProfileRegistry, ResolvedProfile, StagedProfile};
 use crate::artifact::{
     ArtifactPath, ArtifactStoreError, ArtifactVerificationError, LocalArtifactStore,
     PublishedArtifact, StagedArtifactTask,
 };
 use crate::digest::Sha256Digest;
-use crate::profile_registry::{ProfileRegistry, ResolvedProfile, StagedProfile};
 use crate::protocol::{
     ErrorCode, ProfileFailurePayload, ProfileIdentity, ProfileOutcome, ProfileRequestPayload,
     ProfileTaskPayload, PublishedArtifactKind, PublishedArtifactPayload,
@@ -26,11 +26,11 @@ use crate::protocol_mapper;
 use crate::resource_budget::ResourceBudget;
 
 #[cfg(test)]
-pub(crate) use crate::profile_registry::{
+pub(crate) use crate::application::capsule::{
     FFMPEG_PACKAGE_ENTRYPOINT, FFMPEG_PACKAGE_ID, FFMPEG_PROFILE_NAME, FFMPEG_PROFILE_VERSION,
     FILE_COPY_PROFILE_NAME, FILE_COPY_PROFILE_VERSION,
 };
-pub(crate) use crate::profile_registry::{ProfileError, ProfileStartupError};
+pub(crate) use crate::application::capsule::{ProfileError, ProfileStartupError};
 
 #[derive(Debug)]
 pub(crate) struct LocalProfileRuntime {

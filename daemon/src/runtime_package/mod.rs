@@ -4,10 +4,7 @@
 //! no-overwrite rename으로 활성화한다. Task 실행 경로는 digest로 다시 검증한 file descriptor만 받는다.
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-mod manifest;
-
-#[cfg(target_os = "linux")]
-mod linux_cache;
+pub(crate) mod manifest;
 
 use std::fs::File;
 use std::io;
@@ -23,7 +20,7 @@ pub use manifest::{
 };
 
 #[cfg(target_os = "linux")]
-pub use linux_cache::RuntimePackageCache;
+pub use crate::adapters::outbound::runtime_package_cache::RuntimePackageCache;
 
 pub type RuntimePackageResult<T> = std::result::Result<T, RuntimePackageError>;
 
@@ -76,6 +73,20 @@ pub struct ResolvedRuntimePackage {
 }
 
 impl ResolvedRuntimePackage {
+    pub(crate) fn new(
+        digest: Sha256Digest,
+        manifest: RuntimePackageManifest,
+        rootfs: File,
+        entrypoint: File,
+    ) -> Self {
+        Self {
+            digest,
+            manifest,
+            rootfs,
+            entrypoint,
+        }
+    }
+
     pub fn digest(&self) -> Sha256Digest {
         self.digest
     }

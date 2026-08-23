@@ -1,4 +1,4 @@
-//! daemon-installed Profile identity와 검증된 실행 계약을 해석한다.
+//! Capsule resolver chain과 검증된 실행 계약을 조립한다.
 //!
 //! exact Bundle identity를 먼저 조회하고, Bundle이 설치되지 않은 경우에만 daemon built-in
 //! Profile로 fallback한다. Runtime Package 기반 계약은 각 task resolve에서 다시 검증하고
@@ -6,83 +6,68 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs::{self, File};
+#[cfg(test)]
+use std::fs;
+use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use thiserror::Error;
 
 use crate::artifact::{
-    ArtifactPath, ArtifactStoreError, DeclaredOutputArtifact, LocalInputArtifact,
-    StagedArtifactTask,
+    ArtifactStoreError, DeclaredOutputArtifact, LocalInputArtifact, StagedArtifactTask,
 };
 #[cfg(test)]
 use crate::bundle::BundleProfile;
-use crate::bundle::{BundleCatalog, BundleError, valid_capsule_name};
-use crate::capsule::{CapsuleCatalog, CapsuleError, CompiledCapsule};
+use crate::bundle::{BundleError, valid_capsule_name};
 use crate::digest::Sha256Digest;
 use crate::execution_plan::ResolvedExecutionPlan;
-use crate::profile_invocation::{
-    InputValueRejection, InvocationError, VerifiedArgument, verify_profile_call,
-};
-use crate::protocol::{
-    CommandSpec, ErrorCode, OutputLimits, ProfileIdentity, ProfileInputValue,
-    ProfileRequestPayload, ProfileResourceOverrides, ResourceLimits,
-};
-use crate::protocol_mapper;
-use crate::resource_budget::{ResourceBudget, ResourceBudgetError};
-use crate::runtime_package::{ResolvedRuntimePackage, RuntimePackageCache, RuntimePackageError};
+use crate::profile_invocation::VerifiedArgument;
+#[cfg(test)]
+use crate::protocol::ProfileInputValue;
+use crate::protocol::{CommandSpec, ErrorCode, ProfileIdentity, ProfileRequestPayload};
+use crate::resource_budget::ResourceBudget;
+use crate::runtime_package::RuntimePackageError;
 
-pub(crate) const FILE_COPY_PROFILE_NAME: &str = "file-copy";
-pub(crate) const FILE_COPY_PROFILE_VERSION: &str = "1.0.0";
-pub(crate) const FFMPEG_PROFILE_NAME: &str = "ffmpeg-audio-to-wav";
-pub(crate) const FFMPEG_PROFILE_VERSION: &str = "1.0.0";
-const FILE_COPY_PROGRAM: &str = "/usr/bin/cp";
-const FILE_COPY_OUTPUT_SLOT: &str = "result";
-const FILE_COPY_OUTPUT_FILE: &str = "result.txt";
-const FILE_COPY_OUTPUT_MEDIA_TYPE: &str = "text/plain";
-pub(crate) const FFMPEG_PACKAGE_ID: &str = "org.taskcage.ffmpeg";
-pub(crate) const FFMPEG_PACKAGE_ENTRYPOINT: &str = "bin/ffmpeg";
-const FFMPEG_OUTPUT_SLOT: &str = "audio";
-const FFMPEG_OUTPUT_FILE: &str = "result.wav";
-const FFMPEG_OUTPUT_MEDIA_TYPE: &str = "audio/wav";
-const FFMPEG_SAMPLE_RATES: &[i64] = &[8_000, 16_000, 22_050, 44_100, 48_000];
-const FFMPEG_CHANNELS: &[i64] = &[1, 2];
+use super::installed::InstalledCapsuleResolver;
+#[cfg(test)]
+use super::installed::profile_invocation_error;
+#[cfg(test)]
+use super::legacy::ffmpeg::{
+    FFMPEG_CHANNELS, FFMPEG_OUTPUT_FILE, FFMPEG_OUTPUT_MEDIA_TYPE, FFMPEG_OUTPUT_SLOT,
+    FFMPEG_PACKAGE_ENTRYPOINT, FFMPEG_PACKAGE_ID, FFMPEG_PROFILE_NAME, FFMPEG_PROFILE_VERSION,
+    FFMPEG_SAMPLE_RATES, validate_ffmpeg_inputs,
+};
+use super::legacy::file_copy::FILE_COPY_PROGRAM;
+#[cfg(test)]
+use super::legacy::file_copy::{FILE_COPY_PROFILE_NAME, FILE_COPY_PROFILE_VERSION};
+use super::legacy::{FfmpegResolver, FileCopyResolver, ffmpeg_arguments};
+use super::resolver::{CapsuleResolution, CapsuleResolver};
+#[cfg(test)]
+use crate::capsule::{CapsuleCatalog, CompiledCapsule};
+#[cfg(test)]
+use crate::profile_invocation::verify_profile_call;
+#[cfg(test)]
+use crate::protocol_mapper;
 
 #[derive(Debug)]
 pub(crate) struct ProfileRegistry {
-    maximum_artifact_bytes: u64,
-    default_budget: ResourceBudget,
-    ffmpeg: Option<FfmpegProfileRegistration>,
-    bundles: Option<BundleProfileRegistration>,
-}
-
-#[derive(Debug)]
-struct FfmpegProfileRegistration {
-    cache: RuntimePackageCache,
-    digest: Sha256Digest,
-}
-
-#[derive(Debug)]
-struct BundleProfileRegistration {
-    catalog: BundleCatalog,
-    packages: RuntimePackageCache,
+    resolvers: Vec<Box<dyn CapsuleResolver>>,
 }
 
 /// 설치 상태와 request 계약을 모두 검증한 task-local Profile 해석 결과다.
 #[derive(Debug)]
 pub(crate) struct ResolvedProfile {
-    request: ProfileRequestPayload,
-    source: LocalInputArtifact,
-    output: DeclaredOutputArtifact,
-    budget: ResourceBudget,
-    execution: VerifiedProfileExecution,
-    output_slot: String,
+    pub(super) request: ProfileRequestPayload,
+    pub(super) source: LocalInputArtifact,
+    pub(super) output: DeclaredOutputArtifact,
+    pub(super) budget: ResourceBudget,
+    pub(super) execution: VerifiedProfileExecution,
+    pub(super) output_slot: String,
 }
 
 /// Registry가 허용한 실행 형태만 표현한다. caller가 Raw Command fallback을 주입할 수 없다.
 #[derive(Debug)]
-enum VerifiedProfileExecution {
+pub(super) enum VerifiedProfileExecution {
     BuiltInFileCopy,
     LegacyFfmpeg {
         entrypoint: File,
@@ -143,38 +128,29 @@ impl ProfileRegistry {
         ffmpeg_registration: Option<(&Path, Sha256Digest)>,
         bundle_cache_root: Option<&Path>,
     ) -> Result<Self, ProfileStartupError> {
-        let program = Path::new(FILE_COPY_PROGRAM);
-        let metadata = fs::metadata(program).map_err(|source| ArtifactStoreError::Io {
-            operation: "file-copy profile program 확인",
-            path: program.to_path_buf(),
-            source,
-        })?;
-        if !metadata.is_file() {
-            return Err(ArtifactStoreError::NotRegularFile(program.to_path_buf()).into());
-        }
+        let file_copy = FileCopyResolver::open(maximum_artifact_bytes, default_budget.clone())?;
         let ffmpeg = ffmpeg_registration
             .map(|(cache_root, digest)| {
-                let cache = RuntimePackageCache::open(cache_root)?;
-                let package = cache.resolve(digest)?;
-                validate_ffmpeg_package_contract(&package)?;
-                Ok::<_, ProfileStartupError>(FfmpegProfileRegistration { cache, digest })
+                FfmpegResolver::open(
+                    cache_root,
+                    digest,
+                    maximum_artifact_bytes,
+                    default_budget.clone(),
+                )
             })
             .transpose()?;
         let bundles = bundle_cache_root
-            .map(|cache_root| {
-                Ok::<_, ProfileStartupError>(BundleProfileRegistration {
-                    catalog: BundleCatalog::open(cache_root)
-                        .map_err(ProfileStartupError::Bundle)?,
-                    packages: RuntimePackageCache::open(cache_root)?,
-                })
-            })
+            .map(|cache_root| InstalledCapsuleResolver::open(cache_root, maximum_artifact_bytes))
             .transpose()?;
-        Ok(Self {
-            maximum_artifact_bytes,
-            default_budget,
-            ffmpeg,
-            bundles,
-        })
+        let mut resolvers: Vec<Box<dyn CapsuleResolver>> = Vec::with_capacity(3);
+        if let Some(bundles) = bundles {
+            resolvers.push(Box::new(bundles));
+        }
+        resolvers.push(Box::new(file_copy));
+        if let Some(ffmpeg) = ffmpeg {
+            resolvers.push(Box::new(ffmpeg));
+        }
+        Ok(Self { resolvers })
     }
 
     pub(crate) fn resolve(
@@ -187,208 +163,19 @@ impl ProfileRegistry {
             validate_slot_name(slot)?;
         }
 
-        if let Some(bundles) = &self.bundles {
-            match CapsuleCatalog::new(&bundles.catalog)
-                .compile(&request.profile.name, &request.profile.version)
-            {
-                Ok(capsule) => return self.resolve_capsule(request, capsule, bundles),
-                Err(CapsuleError::LegacyBundle(BundleError::NotFound { .. })) => {}
-                Err(error) => {
-                    return Err(ProfileError::new(
-                        ErrorCode::EnvironmentUnavailable,
-                        format!("installed Capsule catalog is unavailable: {error}"),
-                    ));
-                }
+        for resolver in &self.resolvers {
+            match resolver.resolve(request)? {
+                CapsuleResolution::Resolved(profile) => return Ok(*profile),
+                CapsuleResolution::NotFound => {}
             }
         }
-
-        match (
-            request.profile.name.as_str(),
-            request.profile.version.as_str(),
-        ) {
-            (FILE_COPY_PROFILE_NAME, FILE_COPY_PROFILE_VERSION) => self.resolve_file_copy(request),
-            (FFMPEG_PROFILE_NAME, FFMPEG_PROFILE_VERSION) if self.ffmpeg.is_some() => {
-                self.resolve_ffmpeg(request)
-            }
-            _ => Err(ProfileError::new(
-                ErrorCode::ProfileNotFound,
-                format!(
-                    "profile {}@{} is not installed",
-                    request.profile.name, request.profile.version
-                ),
-            )),
-        }
-    }
-
-    fn resolve_capsule(
-        &self,
-        request: &ProfileRequestPayload,
-        capsule: CompiledCapsule,
-        bundles: &BundleProfileRegistration,
-    ) -> Result<ResolvedProfile, ProfileError> {
-        let invocation = verify_profile_call(&capsule, protocol_mapper::profile_call(request))
-            .map_err(profile_invocation_error)?;
-        let source = invocation
-            .input_artifacts()
-            .values()
-            .next()
-            .expect("VerifiedInvocation must contain exactly one LOCAL_INPUT")
-            .clone();
-        let budget = invocation.effective_resources().clone();
-        let arguments = invocation.arguments().to_vec();
-        let package = bundles
-            .packages
-            .resolve(invocation.runtime().package_digest())
-            .map_err(|error| {
-                ProfileError::new(
-                    ErrorCode::EnvironmentUnavailable,
-                    format!("Capsule Runtime Package is unavailable: {error}"),
-                )
-            })?;
-        let entrypoint = package.entrypoint().try_clone().map_err(|error| {
-            ProfileError::new(
-                ErrorCode::EnvironmentUnavailable,
-                format!("verified Capsule entrypoint descriptor could not be pinned: {error}"),
-            )
-        })?;
-        let output_contract = invocation.declared_output();
-        let maximum_bytes = output_contract
-            .maximum_bytes
-            .min(self.maximum_artifact_bytes);
-        let output = DeclaredOutputArtifact::new(
-            &output_contract.file_name,
-            &output_contract.media_type,
-            maximum_bytes,
-        )
-        .map_err(|error| ProfileError::new(ErrorCode::InvalidProfileInput, error.to_string()))?;
-        Ok(ResolvedProfile {
-            request: request.clone(),
-            source,
-            output,
-            budget,
-            execution: VerifiedProfileExecution::Bundle {
-                entrypoint,
-                arguments,
-            },
-            output_slot: output_contract.name.clone(),
-        })
-    }
-
-    fn resolve_file_copy(
-        &self,
-        request: &ProfileRequestPayload,
-    ) -> Result<ResolvedProfile, ProfileError> {
-        if request.inputs.len() != 4 {
-            return Err(ProfileError::new(
-                ErrorCode::InvalidProfileInput,
-                "file-copy requires exactly source, label, retain_metadata, and priority inputs",
-            ));
-        }
-        let source = parse_source(request)?;
-        match request.inputs.get("label") {
-            Some(ProfileInputValue::String { value })
-                if !value.is_empty() && value.len() <= 128 => {}
-            Some(ProfileInputValue::String { .. }) => {
-                return Err(ProfileError::new(
-                    ErrorCode::InvalidProfileInput,
-                    "inputs.label must contain 1 to 128 bytes",
-                ));
-            }
-            _ => {
-                return Err(ProfileError::new(
-                    ErrorCode::InvalidProfileInput,
-                    "inputs.label must be STRING",
-                ));
-            }
-        }
-        if !matches!(
-            request.inputs.get("retain_metadata"),
-            Some(ProfileInputValue::Boolean { .. })
-        ) {
-            return Err(ProfileError::new(
-                ErrorCode::InvalidProfileInput,
-                "inputs.retain_metadata must be BOOLEAN",
-            ));
-        }
-        match request.inputs.get("priority") {
-            Some(ProfileInputValue::Int64 { value }) if (0..=100).contains(value) => {}
-            Some(ProfileInputValue::Int64 { .. }) => {
-                return Err(ProfileError::new(
-                    ErrorCode::InvalidProfileInput,
-                    "inputs.priority must be INT64 between 0 and 100",
-                ));
-            }
-            _ => {
-                return Err(ProfileError::new(
-                    ErrorCode::InvalidProfileInput,
-                    "inputs.priority must be INT64",
-                ));
-            }
-        }
-
-        let budget = resolve_budget(&self.default_budget, request.resource_overrides.as_ref())?;
-        let output = DeclaredOutputArtifact::new(
-            FILE_COPY_OUTPUT_FILE,
-            FILE_COPY_OUTPUT_MEDIA_TYPE,
-            self.maximum_artifact_bytes,
-        )
-        .expect("static file-copy output contract must be valid");
-        Ok(ResolvedProfile {
-            request: request.clone(),
-            source,
-            output,
-            budget,
-            execution: VerifiedProfileExecution::BuiltInFileCopy,
-            output_slot: FILE_COPY_OUTPUT_SLOT.to_owned(),
-        })
-    }
-
-    fn resolve_ffmpeg(
-        &self,
-        request: &ProfileRequestPayload,
-    ) -> Result<ResolvedProfile, ProfileError> {
-        let (source, sample_rate_hz, channels) = validate_ffmpeg_inputs(request)?;
-        let budget = resolve_budget(&self.default_budget, request.resource_overrides.as_ref())?;
-        let registration = self
-            .ffmpeg
-            .as_ref()
-            .expect("FFmpeg dispatch requires an installed registration");
-        let package = registration
-            .cache
-            .resolve(registration.digest)
-            .map_err(|error| {
-                ProfileError::new(
-                    ErrorCode::EnvironmentUnavailable,
-                    format!("registered FFmpeg Runtime Package is unavailable: {error}"),
-                )
-            })?;
-        validate_ffmpeg_package_contract(&package).map_err(|error| {
-            ProfileError::new(ErrorCode::EnvironmentUnavailable, error.to_string())
-        })?;
-        let entrypoint = package.entrypoint().try_clone().map_err(|error| {
-            ProfileError::new(
-                ErrorCode::EnvironmentUnavailable,
-                format!("verified FFmpeg entrypoint descriptor could not be pinned: {error}"),
-            )
-        })?;
-        let output = DeclaredOutputArtifact::new(
-            FFMPEG_OUTPUT_FILE,
-            FFMPEG_OUTPUT_MEDIA_TYPE,
-            self.maximum_artifact_bytes,
-        )
-        .expect("static FFmpeg output contract must be valid");
-        Ok(ResolvedProfile {
-            request: request.clone(),
-            source,
-            output,
-            budget,
-            execution: VerifiedProfileExecution::LegacyFfmpeg {
-                entrypoint,
-                sample_rate_hz,
-                channels,
-            },
-            output_slot: FFMPEG_OUTPUT_SLOT.to_owned(),
-        })
+        Err(ProfileError::new(
+            ErrorCode::ProfileNotFound,
+            format!(
+                "profile {}@{} is not installed",
+                request.profile.name, request.profile.version
+            ),
+        ))
     }
 }
 
@@ -502,195 +289,6 @@ impl VerifiedProfileExecution {
             ),
         }
     }
-}
-
-fn parse_source(request: &ProfileRequestPayload) -> Result<LocalInputArtifact, ProfileError> {
-    parse_local_input(request, "source")
-}
-
-fn parse_local_input(
-    request: &ProfileRequestPayload,
-    slot: &str,
-) -> Result<LocalInputArtifact, ProfileError> {
-    match request.inputs.get(slot) {
-        Some(ProfileInputValue::LocalInput {
-            path,
-            digest,
-            size_bytes,
-        }) => {
-            let path = ArtifactPath::parse(path.clone()).map_err(|error| {
-                ProfileError::new(ErrorCode::InvalidArtifactPath, error.to_string())
-            })?;
-            let digest = Sha256Digest::from_str(digest).map_err(|error| {
-                ProfileError::new(ErrorCode::InvalidProfileInput, error.to_string())
-            })?;
-            Ok(LocalInputArtifact::new(path, digest, *size_bytes))
-        }
-        Some(_) => Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
-            format!("inputs.{slot} must be LOCAL_INPUT"),
-        )),
-        None => Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
-            format!("inputs.{slot} is required"),
-        )),
-    }
-}
-
-fn profile_invocation_error(error: InvocationError) -> ProfileError {
-    let code = match &error {
-        InvocationError::CapsuleProfileNotFound { .. } => ErrorCode::ProfileNotFound,
-        InvocationError::PolicyRejected { .. } => ErrorCode::LimitExceedsPolicy,
-        InvocationError::InvalidCompiledContract { .. } => ErrorCode::EnvironmentUnavailable,
-        InvocationError::InputValueRejected {
-            rejection: InputValueRejection::ArtifactPath,
-            ..
-        } => ErrorCode::InvalidArtifactPath,
-        InvocationError::InvalidProfileIdentity { .. }
-        | InvocationError::DuplicateInput { .. }
-        | InvocationError::InputSetMismatch { .. }
-        | InvocationError::InputTypeMismatch { .. }
-        | InvocationError::InputValueRejected { .. }
-        | InvocationError::InvalidResourceOverride { .. } => ErrorCode::InvalidProfileInput,
-    };
-    ProfileError::new(code, error.to_string())
-}
-
-fn validate_ffmpeg_inputs(
-    request: &ProfileRequestPayload,
-) -> Result<(LocalInputArtifact, i64, i64), ProfileError> {
-    if request.inputs.len() != 3 {
-        return Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
-            "ffmpeg-audio-to-wav requires exactly source, sample_rate_hz, and channels inputs",
-        ));
-    }
-    let source = parse_source(request)?;
-    let sample_rate_hz = allowed_int64(
-        request,
-        "sample_rate_hz",
-        FFMPEG_SAMPLE_RATES,
-        "8000, 16000, 22050, 44100, or 48000",
-    )?;
-    let channels = allowed_int64(request, "channels", FFMPEG_CHANNELS, "1 or 2")?;
-    Ok((source, sample_rate_hz, channels))
-}
-
-fn allowed_int64(
-    request: &ProfileRequestPayload,
-    slot: &'static str,
-    allowed: &[i64],
-    allowed_description: &'static str,
-) -> Result<i64, ProfileError> {
-    match request.inputs.get(slot) {
-        Some(ProfileInputValue::Int64 { value }) if allowed.contains(value) => Ok(*value),
-        Some(ProfileInputValue::Int64 { .. }) => Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
-            format!("inputs.{slot} must be {allowed_description}"),
-        )),
-        _ => Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
-            format!("inputs.{slot} must be INT64"),
-        )),
-    }
-}
-
-fn validate_ffmpeg_package_contract(
-    package: &ResolvedRuntimePackage,
-) -> Result<(), ProfileStartupError> {
-    let manifest = package.manifest();
-    if manifest.id != FFMPEG_PACKAGE_ID {
-        return Err(ProfileStartupError::FfmpegPackageContract(format!(
-            "id must be {FFMPEG_PACKAGE_ID}, actual={}",
-            manifest.id
-        )));
-    }
-    if manifest.entrypoint != FFMPEG_PACKAGE_ENTRYPOINT {
-        return Err(ProfileStartupError::FfmpegPackageContract(format!(
-            "entrypoint must be {FFMPEG_PACKAGE_ENTRYPOINT}, actual={}",
-            manifest.entrypoint
-        )));
-    }
-    Ok(())
-}
-
-fn ffmpeg_arguments(
-    input: &Path,
-    sample_rate_hz: i64,
-    channels: i64,
-    output: &Path,
-) -> Vec<OsString> {
-    [
-        OsString::from("-hide_banner"),
-        OsString::from("-loglevel"),
-        OsString::from("error"),
-        OsString::from("-nostdin"),
-        OsString::from("-i"),
-        input.as_os_str().to_owned(),
-        OsString::from("-map"),
-        OsString::from("0:a:0"),
-        OsString::from("-vn"),
-        OsString::from("-c:a"),
-        OsString::from("pcm_s16le"),
-        OsString::from("-ar"),
-        OsString::from(sample_rate_hz.to_string()),
-        OsString::from("-ac"),
-        OsString::from(channels.to_string()),
-        output.as_os_str().to_owned(),
-    ]
-    .into_iter()
-    .collect()
-}
-
-fn resolve_budget(
-    default: &ResourceBudget,
-    overrides: Option<&ProfileResourceOverrides>,
-) -> Result<ResourceBudget, ProfileError> {
-    let Some(overrides) = overrides else {
-        return Ok(default.clone());
-    };
-    let mut limits: ResourceLimits = default.protocol_limits();
-    let mut output: OutputLimits = default.protocol_output();
-    let mut has_value = false;
-    if let Some(partial) = &overrides.limits {
-        if let Some(cpu_max) = &partial.cpu_max {
-            limits.cpu_max = cpu_max.clone();
-            has_value = true;
-        }
-        if let Some(value) = partial.memory_max_bytes {
-            limits.memory_max_bytes = value;
-            has_value = true;
-        }
-        if let Some(value) = partial.pids_max {
-            limits.pids_max = value;
-            has_value = true;
-        }
-        if let Some(value) = partial.wall_time_limit_ms {
-            limits.wall_time_limit_ms = value;
-            has_value = true;
-        }
-    }
-    if let Some(partial) = &overrides.output {
-        if let Some(value) = partial.stdout_tail_max_bytes {
-            output.stdout_tail_max_bytes = value;
-            has_value = true;
-        }
-        if let Some(value) = partial.stderr_tail_max_bytes {
-            output.stderr_tail_max_bytes = value;
-            has_value = true;
-        }
-    }
-    if !has_value {
-        return Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
-            "resourceOverrides must contain at least one nested field",
-        ));
-    }
-    ResourceBudget::try_from_protocol(limits, output).map_err(profile_input_budget_error)
-}
-
-fn profile_input_budget_error(error: ResourceBudgetError) -> ProfileError {
-    ProfileError::new(ErrorCode::InvalidProfileInput, error.to_string())
 }
 
 fn validate_profile_identity(profile: &ProfileIdentity) -> Result<(), ProfileError> {

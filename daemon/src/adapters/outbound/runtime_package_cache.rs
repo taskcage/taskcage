@@ -1,3 +1,5 @@
+//! Immutable Runtime Package cache의 outbound Linux filesystem adapter다.
+
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs::{self, File, OpenOptions};
@@ -11,11 +13,12 @@ use sha2::{Digest, Sha256};
 
 use crate::digest::Sha256Digest;
 
-use super::manifest::{
+use crate::runtime_package::manifest::{
     MANIFEST_NAME, MAX_MANIFEST_BYTES, ROOTFS_NAME, ValidatedManifest, parse_manifest,
 };
-use super::{
-    ImportOutcome, ImportReport, ResolvedRuntimePackage, RuntimePackageError, RuntimePackageResult,
+use crate::runtime_package::{
+    ImportOutcome, ImportReport, PackageFile, ResolvedRuntimePackage, RuntimePackageError,
+    RuntimePackageResult,
 };
 
 const PACKAGES_DIRECTORY: &str = "packages";
@@ -157,12 +160,12 @@ impl RuntimePackageCache {
             &validated.manifest.entrypoint,
         )?;
 
-        Ok(ResolvedRuntimePackage {
+        Ok(ResolvedRuntimePackage::new(
             digest,
-            manifest: validated.manifest,
+            validated.manifest,
             rootfs,
             entrypoint,
-        })
+        ))
     }
 
     fn populate_staging(&self, source: &SourcePackage, staging: &Path) -> RuntimePackageResult<()> {
@@ -623,7 +626,7 @@ fn validate_source_manifest(metadata: &fs::Metadata, device: u64) -> RuntimePack
 fn validate_source_file(
     metadata: &fs::Metadata,
     device: u64,
-    declared: &super::PackageFile,
+    declared: &PackageFile,
 ) -> RuntimePackageResult<()> {
     if !metadata.is_file() || metadata.dev() != device || metadata.nlink() != 1 {
         return Err(RuntimePackageError::Integrity(format!(
@@ -1209,7 +1212,9 @@ mod tests {
     fn import_is_independent_of_a_restrictive_process_umask() {
         let status = Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
-            .arg("runtime_package::linux_cache::tests::restrictive_umask_import_helper")
+            .arg(
+                "adapters::outbound::runtime_package_cache::tests::restrictive_umask_import_helper",
+            )
             .arg("--nocapture")
             .env(RESTRICTIVE_UMASK_HELPER_ENV, "1")
             .status()
