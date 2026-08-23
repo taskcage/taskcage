@@ -10,12 +10,15 @@ services:
     privileged: true
     cgroup: private
     pid: host
-    network_mode: none
+    ports:
+      - "127.0.0.1:19098:9098"
     stop_grace_period: 15s
     command:
       - serve
       - --socket
       - /run/taskcage/taskcaged.sock
+      - --metrics-listen
+      - 0.0.0.0:9098
       - --max-concurrent-tasks
       - ${BENCHMARK_MAX_CONCURRENT_TASKS:-4}
       - --max-registry-tasks
