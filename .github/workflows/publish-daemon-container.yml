@@ -1,0 +1,120 @@
+name: Publish taskcaged container
+
+on:
+  push:
+    tags:
+      - "taskcaged-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing signed daemon release tag, for example taskcaged-v0.6.1.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: taskcaged-container-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate daemon container tag
+    runs-on: ubuntu-24.04
+    outputs:
+      release_tag: ${{ steps.context.outputs.release_tag }}
+      release_version: ${{ steps.version.outputs.release_version }}
+      revision: ${{ steps.version.outputs.revision }}
+    steps:
+      - id: context
+        name: Resolve release context
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_TAG: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            echo "release_tag=${PUSH_TAG}" >>"${GITHUB_OUTPUT}"
+          else
+            echo "release_tag=${INPUT_TAG}" >>"${GITHUB_OUTPUT}"
+          fi
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ steps.context.outputs.release_tag }}
+          fetch-depth: 0
+      - id: version
+        name: Match the tag, daemon version, and main history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.context.outputs.release_tag }}
+        run: |
+          [[ "${RELEASE_TAG}" =~ ^taskcaged-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          release_version="${RELEASE_TAG#taskcaged-v}"
+          bash scripts/release/verify-version.sh taskcaged "${release_version}" "${RELEASE_TAG}"
+          git tag --points-at HEAD --list "${RELEASE_TAG}" | grep -Fx "${RELEASE_TAG}"
+          tag_object_sha="$(git rev-parse "${RELEASE_TAG}^{tag}")"
+          [[ "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_sha}" --jq '.verification.verified')" == "true" ]]
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main
+          echo "release_version=${release_version}" >>"${GITHUB_OUTPUT}"
+          echo "revision=$(git rev-parse HEAD)" >>"${GITHUB_OUTPUT}"
+
+  build:
+    name: Build container (${{ matrix.platform }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            suffix: amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            suffix: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.release_tag }}
+      - name: Log in to GitHub Container Registry
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: echo "${REGISTRY_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+      - name: Build and publish the platform image
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/taskcaged
+          VERSION: ${{ needs.validate.outputs.release_version }}
+          REVISION: ${{ needs.validate.outputs.revision }}
+          PLATFORM: ${{ matrix.platform }}
+          SUFFIX: ${{ matrix.suffix }}
+        run: |
+          docker buildx build \
+            --platform "${PLATFORM}" \
+            --file daemon/deploy/container/Dockerfile \
+            --build-arg "VERSION=${VERSION}" \
+            --build-arg "REVISION=${REVISION}" \
+            --tag "${IMAGE}:${VERSION}-${SUFFIX}" \
+            --push \
+            .
+
+  manifest:
+    name: Publish multi-platform manifest
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Log in to GitHub Container Registry
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: echo "${REGISTRY_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+      - name: Publish the version manifest
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/taskcaged
+          VERSION: ${{ needs.validate.outputs.release_version }}
+        run: |
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${VERSION}" \
+            "${IMAGE}:${VERSION}-amd64" \
+            "${IMAGE}:${VERSION}-arm64"

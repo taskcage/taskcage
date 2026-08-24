@@ -54,6 +54,14 @@ docker run --rm \
 
 The Runtime Package and Capsule must be compatible with the container's Linux CPU architecture.
 
+## Publishing
+
+The repository workflow `Publish taskcaged container` builds native Linux AMD64 and ARM64 images for
+a signed `taskcaged-vX.Y.Z` tag, then publishes one multi-platform manifest at
+`ghcr.io/taskcage/taskcaged:X.Y.Z`. Before its first run, allow GitHub Actions to write packages for
+this repository. Make the resulting GitHub Container Registry package public if users should pull it
+without credentials.
+
 ## Local image check
 
 Build the production image from this repository:

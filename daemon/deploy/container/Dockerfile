@@ -12,12 +12,21 @@ RUN cargo build --package taskcaged --release --locked
 
 FROM ubuntu:24.04
 
+ARG VERSION=dev
+ARG REVISION=unknown
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /workspace/target/release/taskcaged /usr/local/bin/taskcaged
 COPY --chmod=0755 daemon/deploy/container/entrypoint.sh /usr/local/bin/taskcaged-container-entrypoint
+
+LABEL org.opencontainers.image.title="TaskCage daemon" \
+    org.opencontainers.image.description="Linux cgroup v2 runtime for trusted external CLI tasks" \
+    org.opencontainers.image.source="https://github.com/taskcage/taskcage" \
+    org.opencontainers.image.version="${VERSION}" \
+    org.opencontainers.image.revision="${REVISION}"
 
 ENV RUST_LOG=taskcaged=info \
     TASKCAGE_LOG_FORMAT=json
