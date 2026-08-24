@@ -15,13 +15,14 @@ use tokio::time::{Instant, timeout};
 use tokio_rustls::server::TlsStream;
 use zeroize::Zeroizing;
 
-use crate::codec::{FrameError, decode_json, read_frame, write_json_frame};
-use crate::remote_auth::{AuthenticatedPrincipal, CredentialStore};
 use crate::remote_config::{PrincipalPolicy, REMOTE_ALPN, RemoteDaemonConfig};
 use crate::remote_protocol::{
     ArtifactMode, CapabilitiesPayload, ErrorPayload, REMOTE_MAX_FRAME_BYTES,
     REMOTE_PROTOCOL_VERSION, RemoteErrorCode, RemoteRequest, RemoteResponse,
 };
+
+use super::auth::{AuthenticatedPrincipal, CredentialStore};
+use super::codec::{FrameError, decode_json, read_frame, write_json_frame};
 
 const MAX_CONCURRENT_AUTHENTICATIONS: usize = 4;
 

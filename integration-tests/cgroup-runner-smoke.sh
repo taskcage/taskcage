@@ -274,7 +274,7 @@ unit_sequence=$((unit_sequence + 1))
   --property=Delegate=yes \
   --setenv=TASKCAGE_RUN_LINUX_UDS_INTEGRATION=1 \
   "${submit_test}" \
-  'server::tests::actual_uds_server_runs_disconnect_poll_and_cancel_through_cgroups' \
+  'adapters::inbound::local_uds::server::tests::actual_uds_server_runs_disconnect_poll_and_cancel_through_cgroups' \
   --exact \
   --nocapture
 

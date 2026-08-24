@@ -21,7 +21,11 @@ mod capacity;
 #[cfg(target_os = "linux")]
 pub mod capsule;
 pub use taskcage_linux_runtime::cgroup;
-pub mod codec;
+pub mod codec {
+    //! Local Protocol frame codec의 기존 공개 경로다.
+
+    pub use crate::adapters::inbound::local_uds::codec::*;
+}
 pub(crate) use taskcage_linux_runtime::deadline;
 mod deployment_policy;
 pub mod digest;
@@ -60,21 +64,31 @@ pub mod profile_invocation;
 #[cfg(target_os = "linux")]
 pub mod profile_mapper;
 pub mod protocol;
-mod protocol_mapper;
+pub(crate) use adapters::inbound::local_uds::mapper as protocol_mapper;
 pub mod remote_artifact;
-pub mod remote_auth;
+pub mod remote_auth {
+    //! Remote TLS 인증 타입의 기존 공개 경로다.
+
+    pub use crate::adapters::inbound::remote_tls::auth::*;
+}
 #[cfg(target_os = "linux")]
-mod remote_backend;
+use adapters::inbound::remote_tls::task_backend as remote_backend;
 pub mod remote_config;
-pub mod remote_dispatch;
+pub mod remote_dispatch {
+    //! Remote TLS dispatcher port의 기존 공개 경로다.
+
+    pub use crate::adapters::inbound::remote_tls::dispatcher::*;
+}
 pub mod remote_protocol;
-#[cfg(target_os = "linux")]
-mod remote_protocol_mapper;
-pub mod remote_server;
+pub mod remote_server {
+    //! Remote TLS server 타입의 기존 공개 경로다.
+
+    pub use crate::adapters::inbound::remote_tls::server::*;
+}
 pub mod resource_budget;
 pub mod runtime_package;
 #[cfg(target_os = "linux")]
-mod server;
+pub(crate) use adapters::inbound::local_uds::server;
 #[cfg(target_os = "linux")]
 mod startup;
 #[cfg(target_os = "linux")]

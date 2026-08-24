@@ -1,4 +1,4 @@
-//! Remote Profile 요청을 기존 cgroup/Profile core에 연결한다.
+//! Remote Profile 요청을 Task/Profile application boundary에 연결한다.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
@@ -11,10 +11,11 @@ use crate::handlers::{ProtocolHandlers, RequestHandling};
 use crate::protocol as local;
 use crate::remote_artifact::{ManagedInputSnapshot, RemoteArtifactError, RemoteArtifactStore};
 use crate::remote_config::PrincipalPolicy;
-use crate::remote_dispatch::{RemoteBoolFuture, RemoteTaskBackend, RemoteTaskFuture};
 use crate::remote_protocol as remote;
-use crate::remote_protocol_mapper as mapper;
-use crate::remote_server::error_response;
+
+use super::dispatcher::{RemoteBoolFuture, RemoteTaskBackend, RemoteTaskFuture};
+use super::mapper;
+use super::server::error_response;
 
 #[derive(Clone)]
 pub(crate) struct LocalProfileRemoteBackend {
@@ -129,7 +130,11 @@ impl RemoteTaskBackend for LocalProfileRemoteBackend {
                         request_id: request_id.clone(),
                         payload: local_payload,
                     },
-                    || crate::server::submit_context(self.cleanup_timeout),
+                    || {
+                        crate::adapters::inbound::local_uds::server::submit_context(
+                            self.cleanup_timeout,
+                        )
+                    },
                     source,
                     principal.client_id.clone(),
                 )

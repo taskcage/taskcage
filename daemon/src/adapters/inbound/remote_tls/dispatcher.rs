@@ -1,4 +1,4 @@
-//! 인증 뒤 Remote operation을 Artifact store와 principal-scoped Task backend에 연결한다.
+//! 인증 뒤 Remote operation을 Artifact transfer와 principal-scoped Task backend에 연결한다.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -8,13 +8,14 @@ use std::time::Instant;
 
 use tokio::sync::Mutex;
 
-use crate::remote_artifact::{RemoteArtifactError, RemoteArtifactStore};
+use crate::remote_artifact::RemoteArtifactStore;
 use crate::remote_config::PrincipalPolicy;
 use crate::remote_protocol::{
-    ArtifactIdPayload, REMOTE_PROTOCOL_VERSION, RemoteErrorCode, RemoteProfileRequestPayload,
-    RemoteRequest, RemoteResponse, TaskIdPayload,
+    RemoteErrorCode, RemoteProfileRequestPayload, RemoteRequest, RemoteResponse, TaskIdPayload,
 };
-use crate::remote_server::{RemoteOperationHandler, RemoteResponseFuture, error_response};
+
+use super::artifact_transfer::{self, ArtifactTransferOperation};
+use super::server::{RemoteOperationHandler, RemoteResponseFuture, error_response};
 
 pub type RemoteTaskFuture<'a> = Pin<Box<dyn Future<Output = RemoteResponse> + Send + 'a>>;
 
@@ -99,73 +100,36 @@ impl<B: RemoteTaskBackend> RemoteDispatcher<B> {
     ) -> RemoteResponse {
         let request_id = request.request_id().to_owned();
         match request {
-            RemoteRequest::BeginArtifactUpload { payload, .. } => {
-                match self.artifacts.begin_upload(principal, payload) {
-                    Ok(payload) => RemoteResponse::ArtifactUploadStarted {
-                        remote_protocol_version: REMOTE_PROTOCOL_VERSION,
-                        request_id,
-                        payload,
-                    },
-                    Err(error) => artifact_error(request_id, error),
-                }
-            }
-            RemoteRequest::UploadArtifactChunk { payload, .. } => {
-                match self.artifacts.upload_chunk(&principal.client_id, payload) {
-                    Ok(payload) => RemoteResponse::ArtifactChunkAccepted {
-                        remote_protocol_version: REMOTE_PROTOCOL_VERSION,
-                        request_id,
-                        payload,
-                    },
-                    Err(error) => artifact_error(request_id, error),
-                }
-            }
-            RemoteRequest::CompleteArtifactUpload {
-                payload: ArtifactIdPayload { artifact_id },
-                ..
-            } => {
-                match self
-                    .artifacts
-                    .complete_upload(&principal.client_id, &artifact_id)
-                {
-                    Ok(payload) => RemoteResponse::ArtifactUploaded {
-                        remote_protocol_version: REMOTE_PROTOCOL_VERSION,
-                        request_id,
-                        payload,
-                    },
-                    Err(error) => artifact_error(request_id, error),
-                }
-            }
-            RemoteRequest::AbortArtifactUpload {
-                payload: ArtifactIdPayload { artifact_id },
-                ..
-            } => {
-                match self
-                    .artifacts
-                    .abort_upload(&principal.client_id, &artifact_id)
-                {
-                    Ok(()) => RemoteResponse::ArtifactUploadAborted {
-                        remote_protocol_version: REMOTE_PROTOCOL_VERSION,
-                        request_id,
-                        payload: ArtifactIdPayload { artifact_id },
-                    },
-                    Err(error) => artifact_error(request_id, error),
-                }
-            }
-            RemoteRequest::ReadArtifactChunk { payload, .. } => {
-                match self.artifacts.read_output_chunk(
-                    &principal.client_id,
-                    &payload.artifact_id,
-                    payload.offset,
-                    payload.max_bytes,
-                ) {
-                    Ok(payload) => RemoteResponse::ArtifactChunk {
-                        remote_protocol_version: REMOTE_PROTOCOL_VERSION,
-                        request_id,
-                        payload,
-                    },
-                    Err(error) => artifact_error(request_id, error),
-                }
-            }
+            RemoteRequest::BeginArtifactUpload { payload, .. } => artifact_transfer::dispatch(
+                &self.artifacts,
+                principal,
+                request_id,
+                ArtifactTransferOperation::Begin(payload),
+            ),
+            RemoteRequest::UploadArtifactChunk { payload, .. } => artifact_transfer::dispatch(
+                &self.artifacts,
+                principal,
+                request_id,
+                ArtifactTransferOperation::Upload(payload),
+            ),
+            RemoteRequest::CompleteArtifactUpload { payload, .. } => artifact_transfer::dispatch(
+                &self.artifacts,
+                principal,
+                request_id,
+                ArtifactTransferOperation::Complete(payload),
+            ),
+            RemoteRequest::AbortArtifactUpload { payload, .. } => artifact_transfer::dispatch(
+                &self.artifacts,
+                principal,
+                request_id,
+                ArtifactTransferOperation::Abort(payload),
+            ),
+            RemoteRequest::ReadArtifactChunk { payload, .. } => artifact_transfer::dispatch(
+                &self.artifacts,
+                principal,
+                request_id,
+                ArtifactTransferOperation::Read(payload),
+            ),
             RemoteRequest::SubmitProfile { payload, .. } => {
                 self.submit(principal, request_id, payload).await
             }
@@ -282,15 +246,6 @@ fn response_task_id(response: &RemoteResponse) -> Option<&str> {
         },
         _ => None,
     }
-}
-
-fn artifact_error(request_id: String, error: RemoteArtifactError) -> RemoteResponse {
-    let (code, retryable) = error.wire_code();
-    let message = match code {
-        RemoteErrorCode::InternalError => "internal Artifact store error".to_owned(),
-        _ => error.to_string(),
-    };
-    error_response(request_id, code, message, retryable)
 }
 
 fn with_request_id(response: RemoteResponse, request_id: String) -> RemoteResponse {
