@@ -5,6 +5,15 @@ TaskCage는 daemon과 SDK의 버전을 독립적으로 관리한다. 이 문서�
 
 ## Unreleased
 
+## taskcaged 0.6.1
+
+- GitHub Container Registry에 배포할 수 있는 최소 Ubuntu 24.04 daemon 이미지를 제공한다. Runtime Package와 Capsule은
+  image에 포함하지 않고 operator가 persistent data volume으로 import한다.
+- signed daemon tag에서 Linux x86-64와 ARM64 이미지를 build하고 versioned multi-platform manifest를 게시하는
+  GitHub Actions workflow를 추가한다.
+- Runtime Package가 선언한 `libraryPaths`를 child process의 `LD_LIBRARY_PATH`로 전달하고, FFmpeg development
+  Package에 필요한 non-glibc shared library를 포함한다.
+
 ## taskcaged 0.6.0
 
 - Capsule 실행의 공개 동작을 유지하면서 application, Linux runtime, protocol adapter와 bootstrap 경계를 분리한다.
