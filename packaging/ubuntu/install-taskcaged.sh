@@ -8,6 +8,7 @@ readonly config_directory="/etc/taskcage"
 readonly config_target="${config_directory}/taskcaged.env"
 readonly trusted_capsules_directory="${config_directory}/trusted-capsules.d"
 readonly capsule_cache_directory="/var/lib/taskcage/runtime-package-cache"
+readonly capsule_artifact_directory="/var/lib/taskcage/artifacts"
 readonly unit_target="/etc/systemd/system/taskcaged.service"
 readonly script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly config_source="${script_directory}/taskcaged.env"
@@ -101,6 +102,7 @@ fi
 install -d -o root -g "${service_group}" -m 0750 "${config_directory}"
 install -d -o root -g "${service_group}" -m 0750 "${trusted_capsules_directory}"
 install -d -o "${service_user}" -g "${service_group}" -m 0700 "${capsule_cache_directory}"
+install -d -o "${service_user}" -g "${service_group}" -m 0700 "${capsule_artifact_directory}"
 
 if [[ -L "${config_target}" || (-e "${config_target}" && ! -f "${config_target}") ]]; then
   fail "environment path is not a regular file: ${config_target}"
