@@ -24,6 +24,7 @@ class RemoteConnectionOptionsTest {
         assertEquals("taskcage+tls://taskcage.internal:7443", options.endpoint().toString());
         assertEquals(Duration.ofSeconds(2), options.connectTimeout());
         assertEquals(Duration.ofSeconds(10), options.requestTimeout());
+        assertEquals(TlsVerificationMode.PREFERRED, options.tlsVerification());
         assertFalse(options.credentials().toString().contains("fixture-secret"));
     }
 
@@ -55,5 +56,15 @@ class RemoteConnectionOptionsTest {
                         URI.create("taskcage+tls://taskcage.internal:7443"), CREDENTIALS)
                 .connectTimeout(Duration.ZERO)
                 .build());
+    }
+
+    @Test
+    void permitsTheNoCaPreferredModeForTrustedNetworkEndpoints() {
+        RemoteConnectionOptions options = RemoteConnectionOptions.builder(
+                        URI.create("taskcage+tls://taskcage.internal:7443"), CREDENTIALS)
+                .tlsVerification(TlsVerificationMode.PREFERRED)
+                .build();
+
+        assertEquals(TlsVerificationMode.PREFERRED, options.tlsVerification());
     }
 }

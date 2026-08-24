@@ -55,9 +55,10 @@ Package를 backend가 검증하며, 현재 External adapter는 그 요청을 설
 않도록 한다. SDK는 Capsule 이름·버전에서 Profile identity를 유도하고, daemon adapter 경계에서만 low-level
 `ProfileRequest`로 변환한다. 직접 Profile API는 기존 호환·고급 경로로 유지된다.
 
-Capsule-first MVP의 권장 시작점은 Docker Compose에서 기동한 TLS daemon에 ExternalRunner로 연결하는
-경로다. Java application은 endpoint와 명시적으로 신뢰한 개발 CA만 설정하고, Capsule identity와 typed
-input을 전달한다. TLS hostname 검증을 끄거나 모든 인증서를 신뢰하는 편의 API는 제공하지 않는다.
+Capsule-first MVP의 권장 시작점은 TLS daemon에 `RemoteCapsuleRunner`로 연결하는 경로다. daemon은 일반적인
+Docker service처럼 `-p 7443:7443`으로 publish할 수 있고, Java application은 Capsule identity와 typed input만
+전달한다. 기본 연결은 MySQL의 `PREFERRED`처럼 TLS를 사용하되 CA를 강제하지 않으며, 공유·운영 환경은 명시적으로
+CA 또는 hostname 검증 모드를 선택할 수 있다.
 
 Embedded backend는 `taskcage-exec` private helper를 SDK가 관리하고, helper가 공통 Rust execution core를
 호출하는 선택적 확장이다. Embedded backend는 `taskcaged serve` child daemon을 시작하지 않는다.
@@ -91,10 +92,34 @@ try (RemoteTaskCageClient client = RemoteTaskCageClient.connect(
 }
 ```
 
+`localhost:7443`에서 실행 중인 daemon에는 endpoint를 반복할 필요 없이 다음처럼 연결한다. 기본 정책은
+TLS 암호화를 유지하면서 인증서 검증을 선택 사항으로 두는 `PREFERRED`다.
+
+```java
+try (RemoteTaskCageClient client = RemoteTaskCageClient.localDefault(
+        ServiceCredentials.of("document-worker", Secret.fromEnvironment("TASKCAGE_CLIENT_SECRET")))) {
+    RemoteCapsuleRunner runner = RemoteCapsuleRunner.external(client);
+    // RemoteCapsuleFileRequest는 input Path를 TLS로 upload하고 output Path로 download한다.
+}
+```
+
 `RemoteCapsuleFileRequest`는 같은 TLS 연결에서 input `Path`를 upload하고, daemon-issued Artifact reference로
 Capsule을 실행한 뒤 성공한 output Artifact를 지정한 local `Path`로 download한다. Local file paths 자체는
 daemon으로 전송되지 않는다. 저수준 `upload`, `RemoteCapsuleRequest`, `download` API도 재시도나 고급 흐름을
 위해 그대로 제공한다.
+
+### TLS verification modes
+
+TaskCage keeps TLS encryption mandatory for every Remote connection, but offers MySQL-like verification choices.
+
+| Mode | Java API | Intended use |
+| --- | --- | --- |
+| `PREFERRED` | default `connect(...)`, `localDefault(...)` | TLS required, but CA and hostname verification are optional |
+| `VERIFY_IDENTITY` | `.tlsVerification(TlsVerificationMode.VERIFY_IDENTITY)` | CA and endpoint hostname verification; production recommendation |
+| `VERIFY_CA` | `.tlsVerification(TlsVerificationMode.VERIFY_CA)` | CA verification when a stable hostname is unavailable |
+
+`PREFERRED` does not enable plaintext fallback: Remote TaskCage always uses TLS. It is appropriate only when the
+network path is already trusted. CA verification uses the JVM trust store or a caller-provided `SSLContext`.
 
 복구 가능한 파일 실행은 다음 단계 경계를 지킨다.
 
@@ -299,9 +324,9 @@ Central 배포 bundle의 재현과 서명 요구사항은 [릴리스 운영](../
 
 `TaskCageClient`는 `AutoCloseable`이다. 소켓 연결은 첫 요청에서 열리며, `close()`는 SDK의 연결만 닫고 이미 제출된 데몬 작업을 취소하지 않는다.
 
-일반적인 Linux host 설치에서는 표준 daemon socket에 가장 짧게 연결한다. `localDefault()`는 daemon을
+기존 Linux host 설치에서는 표준 daemon socket에 가장 짧게 연결할 수 있다. `localDefault()`는 daemon을
 설치하거나 기동하지 않으며, `/run/taskcage/taskcaged.sock`에 이미 실행 중인 daemon으로 lazy connection을
-만든다.
+만든다. 새 컨테이너 integration의 권장 경로는 위의 TLS `RemoteTaskCageClient`다.
 
 ```java
 try (TaskCageClient client = TaskCageClient.localDefault()) {

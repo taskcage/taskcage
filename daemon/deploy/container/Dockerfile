@@ -16,7 +16,7 @@ ARG VERSION=dev
 ARG REVISION=unknown
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates openssl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /workspace/target/release/taskcaged /usr/local/bin/taskcaged
@@ -29,7 +29,12 @@ LABEL org.opencontainers.image.title="TaskCage daemon" \
     org.opencontainers.image.revision="${REVISION}"
 
 ENV RUST_LOG=taskcaged=info \
-    TASKCAGE_LOG_FORMAT=json
+    TASKCAGE_LOG_FORMAT=json \
+    TASKCAGE_REMOTE_BOOTSTRAP_DIR=/bootstrap
+
+# The public container is a TLS service. Docker does not publish this port unless the
+# operator explicitly supplies `-p <host-port>:7443`.
+EXPOSE 7443
 
 ENTRYPOINT ["/usr/local/bin/taskcaged-container-entrypoint"]
 CMD ["taskcaged", "serve", \

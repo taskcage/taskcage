@@ -1,21 +1,28 @@
 package org.taskcage.sdk;
 
 import java.net.URI;
+import java.security.GeneralSecurityException;
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Objects;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+import java.security.cert.X509Certificate;
 
 /** Immutable TLS connection configuration for the authenticated Remote Runtime. */
 public record RemoteConnectionOptions(
         URI endpoint,
         ServiceCredentials credentials,
         SSLContext sslContext,
+        TlsVerificationMode tlsVerification,
         Duration connectTimeout,
         Duration requestTimeout) {
     public RemoteConnectionOptions {
         endpoint = validateEndpoint(endpoint);
         credentials = Objects.requireNonNull(credentials, "credentials");
         sslContext = Objects.requireNonNull(sslContext, "sslContext");
+        tlsVerification = Objects.requireNonNull(tlsVerification, "tlsVerification");
         connectTimeout = requirePositive(connectTimeout, "connectTimeout");
         requestTimeout = requirePositive(requestTimeout, "requestTimeout");
     }
@@ -57,6 +64,8 @@ public record RemoteConnectionOptions(
         private final URI endpoint;
         private final ServiceCredentials credentials;
         private SSLContext sslContext;
+        private TlsVerificationMode tlsVerification = TlsVerificationMode.PREFERRED;
+        private boolean customSslContext;
         private Duration connectTimeout = Duration.ofSeconds(3);
         private Duration requestTimeout = Duration.ofSeconds(30);
 
@@ -72,6 +81,13 @@ public record RemoteConnectionOptions(
 
         public Builder sslContext(SSLContext sslContext) {
             this.sslContext = sslContext;
+            this.customSslContext = true;
+            return this;
+        }
+
+        /** Selects how the daemon certificate is verified. The default is {@link TlsVerificationMode#PREFERRED}. */
+        public Builder tlsVerification(TlsVerificationMode tlsVerification) {
+            this.tlsVerification = tlsVerification;
             return this;
         }
 
@@ -86,7 +102,36 @@ public record RemoteConnectionOptions(
         }
 
         public RemoteConnectionOptions build() {
-            return new RemoteConnectionOptions(endpoint, credentials, sslContext, connectTimeout, requestTimeout);
+            if (tlsVerification == TlsVerificationMode.PREFERRED && !customSslContext) {
+                sslContext = preferredSslContext();
+            }
+            return new RemoteConnectionOptions(
+                    endpoint, credentials, sslContext, tlsVerification, connectTimeout, requestTimeout);
+        }
+
+        private static SSLContext preferredSslContext() {
+            try {
+                SSLContext context = SSLContext.getInstance("TLS");
+                context.init(null, new TrustManager[] {LoopbackTrustManager.INSTANCE}, new SecureRandom());
+                return context;
+            } catch (GeneralSecurityException exception) {
+                throw new IllegalStateException("could not configure preferred TLS", exception);
+            }
+        }
+    }
+
+    private enum LoopbackTrustManager implements X509TrustManager {
+        INSTANCE;
+
+        @Override
+        public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+
+        @Override
+        public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+
+        @Override
+        public X509Certificate[] getAcceptedIssuers() {
+            return new X509Certificate[0];
         }
     }
 }
