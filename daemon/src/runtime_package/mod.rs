@@ -6,6 +6,8 @@
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) mod manifest;
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -70,6 +72,7 @@ pub struct ResolvedRuntimePackage {
     manifest: RuntimePackageManifest,
     rootfs: File,
     entrypoint: File,
+    library_paths: Vec<PathBuf>,
 }
 
 impl ResolvedRuntimePackage {
@@ -78,12 +81,14 @@ impl ResolvedRuntimePackage {
         manifest: RuntimePackageManifest,
         rootfs: File,
         entrypoint: File,
+        library_paths: Vec<PathBuf>,
     ) -> Self {
         Self {
             digest,
             manifest,
             rootfs,
             entrypoint,
+            library_paths,
         }
     }
 
@@ -101,6 +106,21 @@ impl ResolvedRuntimePackage {
 
     pub fn entrypoint(&self) -> &File {
         &self.entrypoint
+    }
+
+    /// Runtime Package가 선언한 라이브러리 디렉터리만 target process에 전달한다.
+    pub fn dynamic_library_environment(
+        &self,
+    ) -> RuntimePackageResult<BTreeMap<OsString, OsString>> {
+        if self.library_paths.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let value = std::env::join_paths(&self.library_paths).map_err(|error| {
+            RuntimePackageError::Integrity(format!(
+                "Runtime Package libraryPaths를 LD_LIBRARY_PATH로 구성할 수 없습니다: {error}"
+            ))
+        })?;
+        Ok(BTreeMap::from([(OsString::from("LD_LIBRARY_PATH"), value)]))
     }
 }
 

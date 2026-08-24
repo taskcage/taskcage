@@ -133,6 +133,7 @@ impl RuntimePackageCache {
         }
         check_host_compatibility(&validated)?;
 
+        let rootfs_path = self.entry_path(digest).join(ROOTFS_NAME);
         let rootfs = open_beneath(
             entry.as_raw_fd(),
             ROOTFS_NAME,
@@ -159,12 +160,19 @@ impl RuntimePackageCache {
             0o555,
             &validated.manifest.entrypoint,
         )?;
+        let library_paths = validated
+            .manifest
+            .library_paths
+            .iter()
+            .map(|path| rootfs_path.join(path))
+            .collect();
 
         Ok(ResolvedRuntimePackage::new(
             digest,
             validated.manifest,
             rootfs,
             entrypoint,
+            library_paths,
         ))
     }
 
@@ -1155,6 +1163,33 @@ mod tests {
         cache
     }
 
+    fn add_declared_library(source: &Path) {
+        let library_directory = source.join(ROOTFS_NAME).join("lib");
+        fs::create_dir(&library_directory).unwrap();
+        let library = library_directory.join("libtool.so");
+        let bytes = b"library";
+        fs::write(&library, bytes).unwrap();
+        fs::set_permissions(&library, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let manifest_path = source.join(MANIFEST_NAME);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["libraryPaths"] = serde_json::json!(["lib"]);
+        let files = manifest["files"].as_array_mut().unwrap();
+        files.push(serde_json::json!({
+            "path": "lib/libtool.so",
+            "digest": sha256(bytes),
+            "sizeBytes": bytes.len(),
+            "mode": "0444"
+        }));
+        files.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn imports_and_reopens_a_verified_package_by_digest() {
         let fixture = TestDirectory::new("roundtrip");
@@ -1178,6 +1213,35 @@ mod tests {
         pinned.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"executable");
         fs::rename(moved_entry, original_entry).unwrap();
+    }
+
+    #[test]
+    fn resolves_declared_library_paths_into_process_environment() {
+        let fixture = TestDirectory::new("library-path");
+        let source = create_source(fixture.path(), b"executable");
+        add_declared_library(&source);
+        let cache_root = create_cache(fixture.path());
+        let cache = RuntimePackageCache::open(&cache_root).unwrap();
+
+        let report = cache.import(&source).unwrap();
+        let resolved = cache.resolve(report.digest).unwrap();
+        let environment = resolved.dynamic_library_environment().unwrap();
+        let library_paths: Vec<_> = std::env::split_paths(
+            environment
+                .get(&std::ffi::OsString::from("LD_LIBRARY_PATH"))
+                .unwrap(),
+        )
+        .collect();
+
+        assert_eq!(
+            library_paths,
+            vec![
+                cache
+                    .entry_path(report.digest)
+                    .join(ROOTFS_NAME)
+                    .join("lib")
+            ]
+        );
     }
 
     #[test]
