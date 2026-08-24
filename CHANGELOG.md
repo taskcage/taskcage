@@ -5,6 +5,12 @@ TaskCage는 daemon과 SDK의 버전을 독립적으로 관리한다. 이 문서�
 
 ## Unreleased
 
+## taskcaged 0.7.0
+
+- signed Capsule과 Runtime Package를 함께 담은 `.tccapsule.tar.gz` Capsule Pack을 한 명령으로 검증·설치한다.
+- daemon 배포는 기본 trust store와 immutable Capsule cache를 준비하며, Ubuntu systemd service와 container가 같은 catalog를 사용한다.
+- Pack 설치는 archive path와 기본 daemon 저장소만 요구한다. 별도 cache root·trust store 지정은 고급 운영 환경에만 필요하다.
+
 ## taskcaged 0.6.1
 
 - GitHub Container Registry에 배포할 수 있는 최소 Ubuntu 24.04 daemon 이미지를 제공한다. Runtime Package와 Capsule은
