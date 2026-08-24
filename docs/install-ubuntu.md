@@ -10,6 +10,9 @@ binary를 전달할 수 있다.
 |---|---|
 | binary | `/usr/local/bin/taskcaged` (`root:root`, `0755`) |
 | 설정 | `/etc/taskcage/taskcaged.env` (`root:taskcage`, `0640`) |
+| Capsule trust store | `/etc/taskcage/trusted-capsules.d/` (`root:taskcage`, `0750`) |
+| Capsule cache | `/var/lib/taskcage/runtime-package-cache/` (`taskcage:taskcage`, `0700`) |
+| Capsule artifact root | `/var/lib/taskcage/artifacts/` (`taskcage:taskcage`, `0700`) |
 | unit | `/etc/systemd/system/taskcaged.service` |
 | service account | `taskcage:taskcage`, home과 login shell 없음 |
 | runtime directory | `/run/taskcage` (`taskcage:taskcage`, `0700`, systemd가 관리) |
@@ -139,6 +142,9 @@ installer를 `--start`로 다시 실행하면 실행 중인 service를 restart�
 | `TASKCAGE_MAX_TASK_TIMEOUT_MS` | `900000` | Task 하나의 벽시계 시간 최대값 (15분) |
 | `TASKCAGE_MAX_TASK_STDOUT_TAIL_BYTES` | `65536` | stdout tail 최대값 |
 | `TASKCAGE_MAX_TASK_STDERR_TAIL_BYTES` | `65536` | stderr tail 최대값 |
+| `TASKCAGE_PROFILE_ARTIFACT_ROOT` | `/var/lib/taskcage/artifacts` | Capsule 결과 artifact 저장 위치 |
+| `TASKCAGE_PROFILE_ARTIFACT_MAX_BYTES` | `104857600` | Capsule 결과 artifact 최대 크기 |
+| `TASKCAGE_BUNDLE_CACHE_ROOT` | `/var/lib/taskcage/runtime-package-cache` | 설치된 Capsule과 Runtime Package catalog |
 | `TASKCAGE_LOG_FORMAT` | `json` | `json` 또는 개발용 `compact` log 형식 |
 | `RUST_LOG` | `taskcaged=info` | daemon log filter |
 | `TASKCAGE_METRICS_ARGS` | 빈 값 | 선택적 Prometheus endpoint 인자. 예: `--metrics-listen 127.0.0.1:9098` |

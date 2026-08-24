@@ -1,8 +1,9 @@
 #!/bin/sh
 set -eu
 
-mkdir -p /run/taskcage /taskcage-work /taskcage-work/artifacts /etc/taskcage/tls
+mkdir -p /run/taskcage /taskcage-work /taskcage-work/artifacts /etc/taskcage/tls /etc/taskcage/trusted-capsules.d
 chmod 0700 /run/taskcage /taskcage-work /taskcage-work/artifacts /etc/taskcage /etc/taskcage/tls
+chmod 0755 /etc/taskcage/trusted-capsules.d
 cp /usr/local/share/taskcage/remote-chain.pem /etc/taskcage/tls/chain.pem
 cp /usr/local/share/taskcage/remote-end.key /etc/taskcage/tls/private-key.pem
 chmod 0600 /etc/taskcage/tls/private-key.pem

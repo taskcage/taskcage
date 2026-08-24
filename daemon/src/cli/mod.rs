@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 
 pub(crate) mod bundle;
+pub(crate) mod capsule;
 pub(crate) mod package;
 pub(crate) mod run_once;
 pub(crate) mod secret;
@@ -20,6 +21,7 @@ pub(crate) enum Command {
     RunOnce(taskcaged::RunOnceConfig),
     ImportPackage(package::Config),
     Bundle(bundle::Command),
+    Capsule(capsule::Command),
     HashRemoteSecret,
 }
 
@@ -52,12 +54,15 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> taskcaged::Resu
         Some(command) if command == OsStr::new("bundle") => {
             bundle::parse(args.collect()).map(Command::Bundle)
         }
+        Some(command) if command == OsStr::new("capsule") => {
+            capsule::parse(args.collect()).map(Command::Capsule)
+        }
         Some(command) if command == OsStr::new("hash-remote-secret") => {
             secret::parse(args.collect())?;
             Ok(Command::HashRemoteSecret)
         }
         Some(other) => Err(Error::InvalidArgument(format!(
-            "알 수 없는 명령입니다: {other:?}; serve, check-environment, status, run-once, import-package, bundle 또는 hash-remote-secret을 사용하세요"
+            "알 수 없는 명령입니다: {other:?}; serve, check-environment, status, run-once, import-package, bundle, capsule 또는 hash-remote-secret을 사용하세요"
         ))),
     }
 }

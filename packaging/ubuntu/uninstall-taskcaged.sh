@@ -4,6 +4,7 @@ set -euo pipefail
 readonly binary_target="/usr/local/bin/taskcaged"
 readonly config_directory="/etc/taskcage"
 readonly config_target="${config_directory}/taskcaged.env"
+readonly trusted_capsules_directory="${config_directory}/trusted-capsules.d"
 readonly unit_target="/etc/systemd/system/taskcaged.service"
 
 purge_config=false
@@ -48,6 +49,7 @@ systemctl reset-failed taskcaged.service >/dev/null 2>&1 || true
 
 if [[ "${purge_config}" == true ]]; then
   rm -f -- "${config_target}"
+  rmdir -- "${trusted_capsules_directory}" 2>/dev/null || true
   rmdir -- "${config_directory}" 2>/dev/null || true
   echo "Removed TaskCage service assets and configuration. The taskcage account was preserved."
 else
