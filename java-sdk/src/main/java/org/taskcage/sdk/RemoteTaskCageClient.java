@@ -10,6 +10,16 @@ import java.util.UUID;
 /** Authenticated TLS client for Profile-only execution on a Remote TaskCage daemon. */
 public interface RemoteTaskCageClient extends AutoCloseable {
     /**
+     * Connects to a local TLS daemon at {@code taskcage+tls://localhost:7443}.
+     *
+     * <p>This is equivalent to {@link #connect(URI, ServiceCredentials)} with the conventional local endpoint.
+     * TLS remains mandatory and its certificate policy is {@link TlsVerificationMode#PREFERRED} by default.
+     */
+    static RemoteTaskCageClient localDefault(ServiceCredentials credentials) {
+        return connect(URI.create("taskcage+tls://localhost:7443"), credentials);
+    }
+
+    /**
      * Connects to a TLS-protected Remote Runtime using the platform's default trust configuration.
      *
      * <p>{@code endpoint} must use the {@code taskcage+tls://host:port} form. Use

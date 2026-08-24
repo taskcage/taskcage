@@ -100,7 +100,7 @@ Docker가 프로그램의 실행 환경을 재현 가능하게 만든다면, Tas
 
 - Linux cgroup v2, x86-64 또는 ARM64
 - Java 17+ SDK
-- Local UDS 및 인증된 opt-in Remote TLS Capsule 실행
+- TLS 및 service-account 인증을 사용하는 Capsule 실행; Local UDS는 기존 host 설치 호환 경로
 - Capsule archive import와 catalog 기반 Profile 실행
 - FFmpeg reference Capsule과 Java E2E
 

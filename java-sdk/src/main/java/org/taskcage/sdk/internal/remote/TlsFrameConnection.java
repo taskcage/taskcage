@@ -12,6 +12,7 @@ import java.time.Duration;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSocket;
 import org.taskcage.sdk.RemoteConnectionOptions;
+import org.taskcage.sdk.TlsVerificationMode;
 
 /** Blocking TLS 1.3 connection for the Remote Protocol's length-prefixed frames. */
 final class TlsFrameConnection implements RemoteFrameConnection {
@@ -36,7 +37,9 @@ final class TlsFrameConnection implements RemoteFrameConnection {
             active = socket;
             SSLParameters parameters = socket.getSSLParameters();
             parameters.setProtocols(new String[] {"TLSv1.3"});
-            parameters.setEndpointIdentificationAlgorithm("HTTPS");
+            if (options.tlsVerification() == TlsVerificationMode.VERIFY_IDENTITY) {
+                parameters.setEndpointIdentificationAlgorithm("HTTPS");
+            }
             parameters.setApplicationProtocols(new String[] {"taskcage/remote/1"});
             socket.setSSLParameters(parameters);
             socket.setSoTimeout(timeoutMillis(remainingDuration(startedAt, timeoutNanos)));
