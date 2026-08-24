@@ -101,30 +101,22 @@ try (RemoteTaskCageClient client = RemoteTaskCageClient.localDefault(credentials
 
 ## Prepare a Capsule
 
-Before starting the daemon, import a verified Runtime Package and Capsule into the same data volume.
-The archive and public key below are supplied by your organization or a future Capsule registry;
-they are intentionally not baked into the daemon image.
+Before starting the daemon, install a verified Capsule Pack into the same data volume. The Pack and
+public key below are supplied by your organization or a future Capsule registry; they are intentionally
+not baked into the daemon image.
 
 ```bash
 docker run --rm \
   -v taskcage-data:/var/lib/taskcage \
   -v "$PWD/import:/import:ro" \
   "${TASKCAGE_IMAGE}:${TASKCAGE_VERSION}" \
-  taskcaged import-package \
-    --source /import/ffmpeg-runtime \
-    --cache-root /var/lib/taskcage/runtime-package-cache
-
-docker run --rm \
-  -v taskcage-data:/var/lib/taskcage \
-  -v "$PWD/import:/import:ro" \
-  "${TASKCAGE_IMAGE}:${TASKCAGE_VERSION}" \
-  taskcaged bundle import \
-    --source /import/ffmpeg-audio-to-wav-1.0.0.tcbundle.tar.gz \
-    --cache-root /var/lib/taskcage/runtime-package-cache \
-    --trusted-key taskcage-release=/import/taskcage-release.pub
+  taskcaged capsule install \
+    /import/ffmpeg-audio-to-wav-1.0.0.tccapsule.tar.gz
 ```
 
-The Runtime Package and Capsule must be compatible with the container's Linux CPU architecture.
+The Pack's Runtime Package must be compatible with the container's Linux CPU architecture. The image looks up the
+Pack signing key from `/etc/taskcage/trusted-capsules.d`; an official image Release will place its official key there.
+For an organization key, mount that directory read-only or pass an explicit `--trust-store` during install.
 
 ## Publishing
 

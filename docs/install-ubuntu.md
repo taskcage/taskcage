@@ -10,6 +10,8 @@ binary를 전달할 수 있다.
 |---|---|
 | binary | `/usr/local/bin/taskcaged` (`root:root`, `0755`) |
 | 설정 | `/etc/taskcage/taskcaged.env` (`root:taskcage`, `0640`) |
+| Capsule trust store | `/etc/taskcage/trusted-capsules.d/` (`root:taskcage`, `0750`) |
+| Capsule cache | `/var/lib/taskcage/runtime-package-cache/` (`taskcage:taskcage`, `0700`) |
 | unit | `/etc/systemd/system/taskcaged.service` |
 | service account | `taskcage:taskcage`, home과 login shell 없음 |
 | runtime directory | `/run/taskcage` (`taskcage:taskcage`, `0700`, systemd가 관리) |

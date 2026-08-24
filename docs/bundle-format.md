@@ -177,6 +177,37 @@ ffmpeg-runtime@sha256:...
 Bundle과 분리된 digest cache entry로 검증·저장한다. 큰 Package는 local import 또는 이후 Registry에서
 별도로 준비할 수 있다.
 
+### Capsule Pack
+
+Hub 없이 Capsule을 공유하는 초기 배포 단위는 `.tccapsule.tar.gz` **Capsule Pack**이다. Pack은 아래 구조의
+regular file과 directory만 포함하며 symlink·hard link·device file·중복 경로를 포함할 수 없다.
+
+```text
+ffmpeg-audio-to-wav-1.0.0.tccapsule.tar.gz
+├── capsule.tcbundle.tar.gz
+└── runtime-package/
+    ├── runtime-package.json
+    └── rootfs/
+        └── ... Runtime Package files ...
+```
+
+Pack 안에는 trust anchor를 넣지 않는다. daemon은 기본적으로 `/etc/taskcage/trusted-capsules.d/`의
+`<key-id>.pub` 공개키를 사용한다. 공식 Release는 공식 키를 이 trust store에 배치하며, 조직 Capsule은
+운영자가 같은 위치에 공개키를 추가한다.
+
+```bash
+taskcaged capsule install ./ffmpeg-audio-to-wav-1.0.0.tccapsule.tar.gz
+```
+
+기본 cache root와 trust store는 daemon 설치 경로를 사용한다. `--cache-root /absolute/path`와
+`--trust-store /absolute/path`는 별도 저장 위치를 쓰는 조직 환경에,
+`--trusted-key <key-id>=<absolute-path>`는 개발·긴급 복구에만 사용한다.
+
+`capsule install`은 Pack을 cache root 아래의 private staging 경로에 안전하게 풀고, 기존 Runtime Package
+검증·digest cache import를 수행한 뒤 기존 Capsule signature/catalog import를 수행한다. 결과는 두 import의
+digest와 outcome을 담은 JSON이다. Capsule import가 실패해도 이미 검증된 Runtime Package cache entry는
+재사용 가능한 상태로 남을 수 있지만, 해당 Capsule identity는 활성화되지 않는다.
+
 ## 언어별 SDK 관계
 
 언어별 SDK는 Capsule의 Profile schema를 공통 input/output API로 노출한다. 프로세스별 전용 artifact는

@@ -25,6 +25,7 @@ async fn dispatch(command: cli::Command) -> taskcaged::Result<()> {
         cli::Command::RunOnce(config) => cli::run_once::execute(config).await,
         cli::Command::ImportPackage(config) => cli::package::execute(config),
         cli::Command::Bundle(command) => cli::bundle::execute(command),
+        cli::Command::Capsule(command) => cli::capsule::execute(command),
         cli::Command::HashRemoteSecret => cli::secret::execute(),
     }
 }
