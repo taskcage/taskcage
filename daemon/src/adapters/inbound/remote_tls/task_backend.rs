@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::application::task::SubmitCoordinator;
+use crate::adapters::task_service::TaskService;
 use crate::fail_stop::CleanupFailureReport;
 use crate::handlers::{ProtocolHandlers, RequestHandling};
 use crate::protocol as local;
@@ -19,7 +19,7 @@ use super::server::error_response;
 
 #[derive(Clone)]
 pub(crate) struct LocalProfileRemoteBackend {
-    handlers: Arc<ProtocolHandlers<SubmitCoordinator>>,
+    handlers: Arc<ProtocolHandlers<TaskService>>,
     cleanup_timeout: Duration,
     input_owners: Arc<Mutex<HashMap<String, String>>>,
     finished: Arc<Mutex<HashMap<String, remote::ProfileTaskPayload>>>,
@@ -27,7 +27,7 @@ pub(crate) struct LocalProfileRemoteBackend {
 
 impl LocalProfileRemoteBackend {
     pub(crate) fn new(
-        handlers: Arc<ProtocolHandlers<SubmitCoordinator>>,
+        handlers: Arc<ProtocolHandlers<TaskService>>,
         cleanup_timeout: Duration,
     ) -> Self {
         Self {
@@ -638,7 +638,7 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
-    use crate::application::task::TaskRegistrySettings;
+    use crate::adapters::task_service::TaskRegistrySettings;
     use crate::capacity::TaskCapacitySettings;
     use crate::deployment_policy::DeploymentResourcePolicy;
     use crate::fail_stop::{FailStopCoordinator, FailStopSettings};

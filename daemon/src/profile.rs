@@ -12,25 +12,27 @@ use taskcage_core::task::{TaskSnapshot as TaskPayload, TerminationReason};
 use thiserror::Error;
 use tokio::sync::Notify;
 
+use crate::adapters::outbound::capsule_resolvers::{ProfileStartupError, open_resolvers};
 use crate::application::capsule::{ProfileRegistry, ResolvedProfile, StagedProfile};
+use crate::application::{ProfileSubmission, UseCaseErrorCode};
 use crate::artifact::{
     ArtifactPath, ArtifactStoreError, ArtifactVerificationError, LocalArtifactStore,
     PublishedArtifact, StagedArtifactTask,
 };
 use crate::digest::Sha256Digest;
 use crate::protocol::{
-    ErrorCode, ProfileFailurePayload, ProfileIdentity, ProfileOutcome, ProfileRequestPayload,
+    ProfileFailurePayload, ProfileIdentity, ProfileOutcome, ProfileRequestPayload,
     ProfileTaskPayload, PublishedArtifactKind, PublishedArtifactPayload,
 };
 use crate::protocol_mapper;
 use crate::resource_budget::ResourceBudget;
 
+pub(crate) use crate::application::capsule::ProfileError;
 #[cfg(test)]
 pub(crate) use crate::application::capsule::{
     FFMPEG_PACKAGE_ENTRYPOINT, FFMPEG_PACKAGE_ID, FFMPEG_PROFILE_NAME, FFMPEG_PROFILE_VERSION,
     FILE_COPY_PROFILE_NAME, FILE_COPY_PROFILE_VERSION,
 };
-pub(crate) use crate::application::capsule::{ProfileError, ProfileStartupError};
 
 #[derive(Debug)]
 pub(crate) struct LocalProfileRuntime {
@@ -94,12 +96,12 @@ impl LocalProfileRuntime {
         ffmpeg_registration: Option<(&Path, Sha256Digest)>,
         bundle_cache_root: Option<&Path>,
     ) -> Result<Self, ProfileStartupError> {
-        let registry = ProfileRegistry::open(
+        let registry = ProfileRegistry::new(open_resolvers(
             maximum_artifact_bytes,
             default_budget,
             ffmpeg_registration,
             bundle_cache_root,
-        )?;
+        )?);
         Ok(Self {
             artifacts: Arc::new(LocalArtifactStore::open(root, maximum_artifact_bytes)?),
             registry,
@@ -117,7 +119,7 @@ impl LocalProfileRuntime {
             let ready = {
                 let mut requests = self.requests.lock().map_err(|_| {
                     ProfileError::new(
-                        ErrorCode::InternalError,
+                        UseCaseErrorCode::InternalError,
                         "profile request state is unavailable",
                     )
                 })?;
@@ -128,7 +130,7 @@ impl LocalProfileRuntime {
                     }) => {
                         if *existing != request {
                             return Err(ProfileError::new(
-                                ErrorCode::IdempotencyConflict,
+                                UseCaseErrorCode::IdempotencyConflict,
                                 "clientRequestId was already used for a different request",
                             ));
                         }
@@ -140,7 +142,7 @@ impl LocalProfileRuntime {
                     }) => {
                         if *existing != request {
                             return Err(ProfileError::new(
-                                ErrorCode::IdempotencyConflict,
+                                UseCaseErrorCode::IdempotencyConflict,
                                 "clientRequestId was already used for a different request",
                             ));
                         }
@@ -189,7 +191,7 @@ impl LocalProfileRuntime {
 
     pub(crate) fn validate(
         &self,
-        request: &ProfileRequestPayload,
+        request: &ProfileSubmission,
     ) -> Result<ResolvedProfile, ProfileError> {
         self.registry.resolve(request)
     }
@@ -220,8 +222,9 @@ impl LocalProfileRuntime {
     }
 
     pub(crate) fn open_published_artifact(&self, path: &str) -> Result<File, ProfileError> {
-        let path = ArtifactPath::parse(path.to_owned())
-            .map_err(|error| ProfileError::new(ErrorCode::InternalError, error.to_string()))?;
+        let path = ArtifactPath::parse(path.to_owned()).map_err(|error| {
+            ProfileError::new(UseCaseErrorCode::InternalError, error.to_string())
+        })?;
         self.artifacts
             .open_published_artifact(&path)
             .map_err(profile_stage_error)
@@ -230,13 +233,13 @@ impl LocalProfileRuntime {
     pub(crate) fn new_task(
         &self,
         task_id: &str,
-        request: &ProfileRequestPayload,
+        profile: &ProfileIdentity,
         budget: ResourceBudget,
         output_slot: String,
     ) -> Arc<ProfileTaskRecord> {
         Arc::new(ProfileTaskRecord {
             task_id: task_id.to_owned(),
-            profile: request.profile.clone(),
+            profile: profile.clone(),
             budget,
             output_slot,
             terminal: Mutex::new(None),
@@ -256,13 +259,13 @@ impl LocalProfileRuntime {
         } = reservation
         else {
             return Err(ProfileError::new(
-                ErrorCode::InternalError,
+                UseCaseErrorCode::InternalError,
                 "only a profile request owner may accept a task",
             ));
         };
         let mut requests = self.requests.lock().map_err(|_| {
             ProfileError::new(
-                ErrorCode::InternalError,
+                UseCaseErrorCode::InternalError,
                 "profile request state is unavailable",
             )
         })?;
@@ -278,7 +281,7 @@ impl LocalProfileRuntime {
             .lock()
             .map_err(|_| {
                 ProfileError::new(
-                    ErrorCode::InternalError,
+                    UseCaseErrorCode::InternalError,
                     "profile task state is unavailable",
                 )
             })?
@@ -296,7 +299,7 @@ impl LocalProfileRuntime {
             .lock()
             .map_err(|_| {
                 ProfileError::new(
-                    ErrorCode::InternalError,
+                    UseCaseErrorCode::InternalError,
                     "profile task state is unavailable",
                 )
             })?
@@ -315,7 +318,7 @@ impl LocalProfileRuntime {
             .lock()
             .map_err(|_| {
                 ProfileError::new(
-                    ErrorCode::InternalError,
+                    UseCaseErrorCode::InternalError,
                     "profile task state is unavailable",
                 )
             })?
@@ -324,7 +327,7 @@ impl LocalProfileRuntime {
             .collect::<Vec<_>>();
         for task_id in task_ids {
             if !raw_task_exists(&task_id)
-                .map_err(|message| ProfileError::new(ErrorCode::InternalError, message))?
+                .map_err(|message| ProfileError::new(UseCaseErrorCode::InternalError, message))?
             {
                 self.discard_task(&task_id)?;
             }
@@ -338,7 +341,7 @@ impl LocalProfileRuntime {
             .lock()
             .map_err(|_| {
                 ProfileError::new(
-                    ErrorCode::InternalError,
+                    UseCaseErrorCode::InternalError,
                     "profile task state is unavailable",
                 )
             })?
@@ -347,7 +350,7 @@ impl LocalProfileRuntime {
             .lock()
             .map_err(|_| {
                 ProfileError::new(
-                    ErrorCode::InternalError,
+                    UseCaseErrorCode::InternalError,
                     "profile request state is unavailable",
                 )
             })?
@@ -511,11 +514,11 @@ fn profile_stage_error(error: ArtifactStoreError) -> ProfileError {
         ArtifactStoreError::Verification(
             ArtifactVerificationError::DigestMismatch
             | ArtifactVerificationError::SizeMismatch { .. },
-        ) => ErrorCode::ArtifactDigestMismatch,
+        ) => UseCaseErrorCode::ArtifactDigestMismatch,
         ArtifactStoreError::Verification(_) | ArtifactStoreError::InvalidTaskId(_) => {
-            ErrorCode::InvalidProfileInput
+            UseCaseErrorCode::InvalidProfileInput
         }
-        _ => ErrorCode::InvalidArtifactPath,
+        _ => UseCaseErrorCode::InvalidArtifactPath,
     };
     ProfileError::new(code, error.to_string())
 }

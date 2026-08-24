@@ -8,11 +8,15 @@ use crate::metrics::RuntimeMetrics;
 
 use super::ports::CompletionPublicationPort;
 
-pub(crate) fn require_finished(snapshot: TaskSnapshot) -> Result<TaskSnapshot, crate::Error> {
+#[derive(Debug, thiserror::Error)]
+#[error("작업 lifecycle 결과를 만들지 못했습니다: {0}")]
+pub(crate) struct CompletionError(String);
+
+pub(crate) fn require_finished(snapshot: TaskSnapshot) -> Result<TaskSnapshot, CompletionError> {
     if matches!(snapshot, TaskSnapshot::Finished { .. }) {
         Ok(snapshot)
     } else {
-        Err(crate::Error::TaskLifecycle(
+        Err(CompletionError(
             "정리가 끝난 실행 결과가 FINISHED가 아닙니다".to_owned(),
         ))
     }

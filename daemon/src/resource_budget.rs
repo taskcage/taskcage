@@ -72,6 +72,7 @@ impl ResourceBudget {
         self.0.capture_limits()
     }
 
+    #[cfg(test)]
     pub(crate) fn protocol_limits(&self) -> crate::protocol::ResourceLimits {
         crate::protocol_mapper::resource_limits(self)
     }

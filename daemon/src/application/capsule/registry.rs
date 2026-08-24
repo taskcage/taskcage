@@ -4,50 +4,52 @@
 //! Profile로 fallback한다. Runtime Package 기반 계약은 각 task resolve에서 다시 검증하고
 //! entrypoint descriptor를 실행 plan이 만들어질 때까지 고정한다.
 
-use std::collections::BTreeMap;
-use std::ffi::OsString;
 #[cfg(test)]
 use std::fs;
-use std::fs::File;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
 
 use thiserror::Error;
 
-use crate::artifact::{
-    ArtifactStoreError, DeclaredOutputArtifact, LocalInputArtifact, StagedArtifactTask,
-};
 #[cfg(test)]
-use crate::bundle::BundleProfile;
-use crate::bundle::{BundleError, valid_capsule_name};
-use crate::digest::Sha256Digest;
-use crate::execution_plan::ResolvedExecutionPlan;
-use crate::profile_invocation::VerifiedArgument;
+use super::resolver::ProfileExecutionKind;
+use super::resolver::{CapsuleResolution, CapsuleResolver, ProfileExecution};
 #[cfg(test)]
-use crate::protocol::ProfileInputValue;
-use crate::protocol::{CommandSpec, ErrorCode, ProfileIdentity, ProfileRequestPayload};
-use crate::resource_budget::ResourceBudget;
-use crate::runtime_package::RuntimePackageError;
-
-use super::installed::InstalledCapsuleResolver;
+use crate::adapters::outbound::capsule_resolvers::installed::profile_invocation_error;
 #[cfg(test)]
-use super::installed::profile_invocation_error;
-#[cfg(test)]
-use super::legacy::ffmpeg::{
+use crate::adapters::outbound::capsule_resolvers::legacy::ffmpeg::{
     FFMPEG_CHANNELS, FFMPEG_OUTPUT_FILE, FFMPEG_OUTPUT_MEDIA_TYPE, FFMPEG_OUTPUT_SLOT,
     FFMPEG_PACKAGE_ENTRYPOINT, FFMPEG_PACKAGE_ID, FFMPEG_PROFILE_NAME, FFMPEG_PROFILE_VERSION,
     FFMPEG_SAMPLE_RATES, validate_ffmpeg_inputs,
 };
-use super::legacy::file_copy::FILE_COPY_PROGRAM;
 #[cfg(test)]
-use super::legacy::file_copy::{FILE_COPY_PROFILE_NAME, FILE_COPY_PROFILE_VERSION};
-use super::legacy::{FfmpegResolver, FileCopyResolver, ffmpeg_arguments};
-use super::resolver::{CapsuleResolution, CapsuleResolver};
+use crate::adapters::outbound::capsule_resolvers::legacy::ffmpeg_arguments;
+#[cfg(test)]
+use crate::adapters::outbound::capsule_resolvers::legacy::file_copy::{
+    FILE_COPY_PROFILE_NAME, FILE_COPY_PROFILE_VERSION, FILE_COPY_PROGRAM,
+};
+#[cfg(test)]
+use crate::adapters::outbound::capsule_resolvers::{ProfileStartupError, open_resolvers};
+use crate::application::{ProfileSubmission, UseCaseErrorCode};
+use crate::artifact::{DeclaredOutputArtifact, LocalInputArtifact, StagedArtifactTask};
+#[cfg(test)]
+use crate::bundle::BundleProfile;
+use crate::bundle::valid_capsule_name;
 #[cfg(test)]
 use crate::capsule::{CapsuleCatalog, CompiledCapsule};
 #[cfg(test)]
+use crate::digest::Sha256Digest;
+use crate::execution_plan::ResolvedExecutionPlan;
+#[cfg(test)]
+use crate::profile_invocation::VerifiedArgument;
+#[cfg(test)]
 use crate::profile_invocation::verify_profile_call;
 #[cfg(test)]
+use crate::protocol::{ProfileInputValue, ProfileRequestPayload};
+#[cfg(test)]
 use crate::protocol_mapper;
+use crate::resource_budget::ResourceBudget;
+use taskcage_core::capsule::ProfileIdentity as DomainProfileIdentity;
 
 #[derive(Debug)]
 pub(crate) struct ProfileRegistry {
@@ -57,129 +59,128 @@ pub(crate) struct ProfileRegistry {
 /// 설치 상태와 request 계약을 모두 검증한 task-local Profile 해석 결과다.
 #[derive(Debug)]
 pub(crate) struct ResolvedProfile {
-    pub(super) request: ProfileRequestPayload,
+    pub(super) submission: ProfileSubmission,
     pub(super) source: LocalInputArtifact,
     pub(super) output: DeclaredOutputArtifact,
     pub(super) budget: ResourceBudget,
-    pub(super) execution: VerifiedProfileExecution,
+    pub(super) execution: Box<dyn ProfileExecution>,
     pub(super) output_slot: String,
-}
-
-/// Registry가 허용한 실행 형태만 표현한다. caller가 Raw Command fallback을 주입할 수 없다.
-#[derive(Debug)]
-pub(super) enum VerifiedProfileExecution {
-    BuiltInFileCopy,
-    LegacyFfmpeg {
-        entrypoint: File,
-        sample_rate_hz: i64,
-        channels: i64,
-    },
-    Bundle {
-        entrypoint: File,
-        arguments: Vec<VerifiedArgument>,
-    },
 }
 
 #[derive(Debug)]
 pub(crate) struct StagedProfile {
-    request: ProfileRequestPayload,
+    submission: ProfileSubmission,
     budget: ResourceBudget,
     staged: StagedArtifactTask,
-    execution: VerifiedProfileExecution,
+    execution: Box<dyn ProfileExecution>,
     output_slot: String,
-}
-
-#[derive(Debug, Error)]
-pub(crate) enum ProfileStartupError {
-    #[error(transparent)]
-    Artifact(#[from] ArtifactStoreError),
-    #[error(transparent)]
-    RuntimePackage(#[from] RuntimePackageError),
-    #[error(transparent)]
-    Bundle(#[from] BundleError),
-    #[error("FFmpeg Runtime Package 계약이 잘못되었습니다: {0}")]
-    FfmpegPackageContract(String),
 }
 
 #[derive(Debug, Error)]
 #[error("{message}")]
 pub(crate) struct ProfileError {
-    code: ErrorCode,
+    code: UseCaseErrorCode,
     message: String,
 }
 
 impl ProfileError {
-    pub(crate) fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: UseCaseErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
         }
     }
 
-    pub(crate) fn code(&self) -> ErrorCode {
+    pub(crate) fn code(&self) -> UseCaseErrorCode {
         self.code
     }
 }
 
 impl ProfileRegistry {
+    pub(crate) fn new(resolvers: Vec<Box<dyn CapsuleResolver>>) -> Self {
+        Self { resolvers }
+    }
+
+    #[cfg(test)]
     pub(crate) fn open(
         maximum_artifact_bytes: u64,
         default_budget: ResourceBudget,
         ffmpeg_registration: Option<(&Path, Sha256Digest)>,
         bundle_cache_root: Option<&Path>,
     ) -> Result<Self, ProfileStartupError> {
-        let file_copy = FileCopyResolver::open(maximum_artifact_bytes, default_budget.clone())?;
-        let ffmpeg = ffmpeg_registration
-            .map(|(cache_root, digest)| {
-                FfmpegResolver::open(
-                    cache_root,
-                    digest,
-                    maximum_artifact_bytes,
-                    default_budget.clone(),
-                )
-            })
-            .transpose()?;
-        let bundles = bundle_cache_root
-            .map(|cache_root| InstalledCapsuleResolver::open(cache_root, maximum_artifact_bytes))
-            .transpose()?;
-        let mut resolvers: Vec<Box<dyn CapsuleResolver>> = Vec::with_capacity(3);
-        if let Some(bundles) = bundles {
-            resolvers.push(Box::new(bundles));
-        }
-        resolvers.push(Box::new(file_copy));
-        if let Some(ffmpeg) = ffmpeg {
-            resolvers.push(Box::new(ffmpeg));
-        }
-        Ok(Self { resolvers })
+        open_resolvers(
+            maximum_artifact_bytes,
+            default_budget,
+            ffmpeg_registration,
+            bundle_cache_root,
+        )
+        .map(Self::new)
     }
 
-    pub(crate) fn resolve(
-        &self,
-        request: &ProfileRequestPayload,
-    ) -> Result<ResolvedProfile, ProfileError> {
-        validate_uuid("clientRequestId", &request.client_request_id)?;
-        validate_profile_identity(&request.profile)?;
-        for slot in request.inputs.keys() {
+    pub(crate) fn resolve<S>(&self, source: &S) -> Result<ResolvedProfile, ProfileError>
+    where
+        S: ProfileSubmissionSource,
+    {
+        let submission = source.to_profile_submission();
+        validate_uuid("clientRequestId", submission.client_request_id())?;
+        validate_profile_identity(submission.call().identity())?;
+        for (slot, _) in submission.call().inputs() {
             validate_slot_name(slot)?;
         }
 
         for resolver in &self.resolvers {
-            match resolver.resolve(request)? {
+            match resolver.resolve(&submission)? {
                 CapsuleResolution::Resolved(profile) => return Ok(*profile),
                 CapsuleResolution::NotFound => {}
             }
         }
         Err(ProfileError::new(
-            ErrorCode::ProfileNotFound,
+            UseCaseErrorCode::ProfileNotFound,
             format!(
                 "profile {}@{} is not installed",
-                request.profile.name, request.profile.version
+                submission.call().identity().name(),
+                submission.call().identity().version()
             ),
         ))
     }
 }
 
+pub(crate) trait ProfileSubmissionSource {
+    fn to_profile_submission(&self) -> ProfileSubmission;
+}
+
+impl ProfileSubmissionSource for ProfileSubmission {
+    fn to_profile_submission(&self) -> ProfileSubmission {
+        self.clone()
+    }
+}
+
+#[cfg(test)]
+impl ProfileSubmissionSource for ProfileRequestPayload {
+    fn to_profile_submission(&self) -> ProfileSubmission {
+        crate::protocol_mapper::profile_submission(self)
+    }
+}
+
 impl ResolvedProfile {
+    pub(crate) fn new(
+        submission: ProfileSubmission,
+        source: LocalInputArtifact,
+        output: DeclaredOutputArtifact,
+        budget: ResourceBudget,
+        execution: Box<dyn ProfileExecution>,
+        output_slot: String,
+    ) -> Self {
+        Self {
+            submission,
+            source,
+            output,
+            budget,
+            execution,
+            output_slot,
+        }
+    }
+
     pub(crate) fn budget(&self) -> &ResourceBudget {
         &self.budget
     }
@@ -194,7 +195,7 @@ impl ResolvedProfile {
 
     pub(crate) fn into_staged(self, staged: StagedArtifactTask) -> StagedProfile {
         StagedProfile {
-            request: self.request,
+            submission: self.submission,
             budget: self.budget,
             staged,
             execution: self.execution,
@@ -207,7 +208,7 @@ impl StagedProfile {
     pub(crate) fn into_plan(
         self,
     ) -> (
-        ProfileRequestPayload,
+        ProfileSubmission,
         ResourceBudget,
         StagedArtifactTask,
         ResolvedExecutionPlan,
@@ -217,14 +218,14 @@ impl StagedProfile {
         let output = self.staged.output_path();
         let working_directory = self.staged.working_directory();
         let plan = self.execution.into_plan(
-            &self.request.profile.name,
+            self.submission.call().identity().name(),
             input,
             output,
             working_directory,
             self.budget.clone(),
         );
         (
-            self.request,
+            self.submission,
             self.budget,
             self.staged,
             plan,
@@ -233,76 +234,18 @@ impl StagedProfile {
     }
 }
 
-impl VerifiedProfileExecution {
-    fn into_plan(
-        self,
-        profile_name: &str,
-        input: PathBuf,
-        output: PathBuf,
-        working_directory: PathBuf,
-        budget: ResourceBudget,
-    ) -> ResolvedExecutionPlan {
-        match self {
-            Self::BuiltInFileCopy => {
-                let command = CommandSpec {
-                    program: FILE_COPY_PROGRAM.to_owned(),
-                    args: vec![
-                        input.to_string_lossy().into_owned(),
-                        output.to_string_lossy().into_owned(),
-                    ],
-                    working_directory: working_directory.to_string_lossy().into_owned(),
-                    environment: BTreeMap::new(),
-                };
-                ResolvedExecutionPlan::from_validated_raw(&command, budget)
-            }
-            Self::LegacyFfmpeg {
-                entrypoint,
-                sample_rate_hz,
-                channels,
-            } => ResolvedExecutionPlan::from_pinned_entrypoint(
-                entrypoint,
-                OsString::from("ffmpeg"),
-                ffmpeg_arguments(&input, sample_rate_hz, channels, &output),
-                working_directory,
-                BTreeMap::new(),
-                budget,
-            ),
-            Self::Bundle {
-                entrypoint,
-                arguments,
-            } => ResolvedExecutionPlan::from_pinned_entrypoint(
-                entrypoint,
-                OsString::from(profile_name),
-                arguments
-                    .into_iter()
-                    .map(|argument| match argument {
-                        VerifiedArgument::Literal(value) => OsString::from(value),
-                        VerifiedArgument::InputArtifactPath { .. } => input.as_os_str().to_owned(),
-                        VerifiedArgument::OutputArtifactPath { .. } => {
-                            output.as_os_str().to_owned()
-                        }
-                    })
-                    .collect(),
-                working_directory,
-                BTreeMap::new(),
-                budget,
-            ),
-        }
-    }
-}
-
-fn validate_profile_identity(profile: &ProfileIdentity) -> Result<(), ProfileError> {
-    if !valid_capsule_name(&profile.name) {
+fn validate_profile_identity(profile: &DomainProfileIdentity) -> Result<(), ProfileError> {
+    if !valid_capsule_name(profile.name()) {
         return Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
+            UseCaseErrorCode::InvalidProfileInput,
             "profile.name must use dot-separated [a-z][a-z0-9-]* segments (maximum 63 bytes)",
         ));
     }
-    if !profile.version.split('.').all(valid_version_component)
-        || profile.version.split('.').count() != 3
+    if !profile.version().split('.').all(valid_version_component)
+        || profile.version().split('.').count() != 3
     {
         return Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
+            UseCaseErrorCode::InvalidProfileInput,
             "profile.version must be strict MAJOR.MINOR.PATCH",
         ));
     }
@@ -325,7 +268,7 @@ fn validate_slot_name(value: &str) -> Result<(), ProfileError> {
         })
     {
         return Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
+            UseCaseErrorCode::InvalidProfileInput,
             "profile input slot names must match [a-z][a-z0-9_-]{0,63}",
         ));
     }
@@ -346,7 +289,7 @@ fn validate_uuid(field: &'static str, value: &str) -> Result<(), ProfileError> {
         Ok(())
     } else {
         Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
+            UseCaseErrorCode::InvalidProfileInput,
             format!("{field} must be a UUID"),
         ))
     }
@@ -355,6 +298,8 @@ fn validate_uuid(field: &'static str, value: &str) -> Result<(), ProfileError> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -372,8 +317,8 @@ mod tests {
     use crate::deployment_policy::DeploymentResourcePolicy;
     use crate::execution_plan::ResolvedExecutable;
     use crate::protocol::{
-        CpuMax, OutputLimits, PartialOutputLimits, PartialResourceLimits, ProfileResourceOverrides,
-        ResourceLimits,
+        CpuMax, OutputLimits, PartialOutputLimits, PartialResourceLimits, ProfileIdentity,
+        ProfileResourceOverrides, ResourceLimits,
     };
     use crate::runtime_package::import_for_service_uid;
 
@@ -819,14 +764,18 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(
-            registry.resolve(&file_copy_request()).unwrap().execution,
-            VerifiedProfileExecution::Bundle { .. }
-        ));
-        assert!(matches!(
-            registry.resolve(&request()).unwrap().execution,
-            VerifiedProfileExecution::Bundle { .. }
-        ));
+        assert_eq!(
+            registry
+                .resolve(&file_copy_request())
+                .unwrap()
+                .execution
+                .kind(),
+            ProfileExecutionKind::Bundle
+        );
+        assert_eq!(
+            registry.resolve(&request()).unwrap().execution.kind(),
+            ProfileExecutionKind::Bundle
+        );
     }
 
     #[test]
@@ -847,10 +796,10 @@ mod tests {
         let mut request = request();
         request.profile.name = "media.extract-audio".to_owned();
 
-        assert!(matches!(
-            registry.resolve(&request).unwrap().execution,
-            VerifiedProfileExecution::Bundle { .. }
-        ));
+        assert_eq!(
+            registry.resolve(&request).unwrap().execution.kind(),
+            ProfileExecutionKind::Bundle
+        );
     }
 
     #[test]
@@ -871,14 +820,18 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(
-            registry.resolve(&file_copy_request()).unwrap().execution,
-            VerifiedProfileExecution::BuiltInFileCopy
-        ));
-        assert!(matches!(
-            registry.resolve(&request()).unwrap().execution,
-            VerifiedProfileExecution::LegacyFfmpeg { .. }
-        ));
+        assert_eq!(
+            registry
+                .resolve(&file_copy_request())
+                .unwrap()
+                .execution
+                .kind(),
+            ProfileExecutionKind::FileCopy
+        );
+        assert_eq!(
+            registry.resolve(&request()).unwrap().execution.kind(),
+            ProfileExecutionKind::LegacyFfmpeg
+        );
     }
 
     #[test]
@@ -895,7 +848,7 @@ mod tests {
 
         assert_eq!(
             registry.resolve(&file_copy_request()).unwrap_err().code(),
-            ErrorCode::EnvironmentUnavailable
+            UseCaseErrorCode::EnvironmentUnavailable
         );
 
         fs::set_permissions(&mapping, fs::Permissions::from_mode(0o600)).unwrap();
@@ -905,7 +858,7 @@ mod tests {
         symlink(&target, &mapping).unwrap();
         assert_eq!(
             registry.resolve(&file_copy_request()).unwrap_err().code(),
-            ErrorCode::EnvironmentUnavailable
+            UseCaseErrorCode::EnvironmentUnavailable
         );
     }
 
@@ -917,7 +870,7 @@ mod tests {
 
         assert_eq!(
             registry.resolve(&unknown).unwrap_err().code(),
-            ErrorCode::ProfileNotFound
+            UseCaseErrorCode::ProfileNotFound
         );
     }
 
@@ -940,7 +893,7 @@ mod tests {
 
         assert_eq!(
             registry.resolve(&request()).unwrap_err().code(),
-            ErrorCode::EnvironmentUnavailable
+            UseCaseErrorCode::EnvironmentUnavailable
         );
     }
 
@@ -1060,7 +1013,7 @@ mod tests {
             let error = resolve_bundle_budget(&profile, Some(&value.request())).unwrap_err();
             assert_eq!(
                 error.code(),
-                ErrorCode::LimitExceedsPolicy,
+                UseCaseErrorCode::LimitExceedsPolicy,
                 "{}",
                 value.field()
             );
@@ -1128,7 +1081,7 @@ mod tests {
             let error = resolve_bundle_budget(&profile, Some(&value.request())).unwrap_err();
             assert_eq!(
                 error.code(),
-                ErrorCode::LimitExceedsPolicy,
+                UseCaseErrorCode::LimitExceedsPolicy,
                 "{}",
                 value.field()
             );
@@ -1154,7 +1107,7 @@ mod tests {
             resolve_bundle_budget(&profile, Some(&above_ratio))
                 .unwrap_err()
                 .code(),
-            ErrorCode::LimitExceedsPolicy
+            UseCaseErrorCode::LimitExceedsPolicy
         );
     }
 
@@ -1169,7 +1122,7 @@ mod tests {
             resolve_bundle_budget(&profile, Some(&empty))
                 .unwrap_err()
                 .code(),
-            ErrorCode::InvalidProfileInput
+            UseCaseErrorCode::InvalidProfileInput
         );
 
         let zero = TestResourceOverride::Memory(0).request();
@@ -1177,7 +1130,7 @@ mod tests {
             resolve_bundle_budget(&profile, Some(&zero))
                 .unwrap_err()
                 .code(),
-            ErrorCode::InvalidProfileInput
+            UseCaseErrorCode::InvalidProfileInput
         );
     }
 
@@ -1226,7 +1179,10 @@ mod tests {
             target_starts.set(target_starts.get() + 1);
         });
 
-        assert_eq!(result.unwrap_err().code(), ErrorCode::LimitExceedsPolicy);
+        assert_eq!(
+            result.unwrap_err().code(),
+            UseCaseErrorCode::LimitExceedsPolicy
+        );
         assert_eq!(artifact_staging.get(), 0);
         assert_eq!(task_records.get(), 0);
         assert_eq!(cgroup_creations.get(), 0);
@@ -1243,10 +1199,7 @@ mod tests {
 
     #[test]
     fn profile_names_use_the_capsule_namespaced_contract() {
-        let profile = |name: &str| ProfileIdentity {
-            name: name.to_owned(),
-            version: "1.0.0".to_owned(),
-        };
+        let profile = |name: &str| DomainProfileIdentity::new(name, "1.0.0");
 
         assert!(validate_profile_identity(&profile("ffmpeg-audio-to-wav")).is_ok());
         assert!(validate_profile_identity(&profile("media.extract-audio")).is_ok());
@@ -1280,13 +1233,13 @@ mod tests {
         set_int64_input(&mut unsupported, "sample_rate_hz", 12_345);
         assert_eq!(
             validate_ffmpeg_inputs(&unsupported).unwrap_err().code(),
-            ErrorCode::InvalidProfileInput
+            UseCaseErrorCode::InvalidProfileInput
         );
         assert_eq!(
             validate_ffmpeg_bundle_inputs(&unsupported)
                 .unwrap_err()
                 .code(),
-            ErrorCode::InvalidProfileInput
+            UseCaseErrorCode::InvalidProfileInput
         );
     }
 
@@ -1309,13 +1262,13 @@ mod tests {
         set_int64_input(&mut unsupported, "channels", 3);
         assert_eq!(
             validate_ffmpeg_inputs(&unsupported).unwrap_err().code(),
-            ErrorCode::InvalidProfileInput
+            UseCaseErrorCode::InvalidProfileInput
         );
         assert_eq!(
             validate_ffmpeg_bundle_inputs(&unsupported)
                 .unwrap_err()
                 .code(),
-            ErrorCode::InvalidProfileInput
+            UseCaseErrorCode::InvalidProfileInput
         );
     }
 
@@ -1340,8 +1293,8 @@ mod tests {
                 "sample_rate_hz={sample_rate_hz}, channels={channels}"
             );
             if let (Err(static_error), Err(bundle_error)) = (static_result, bundle_result) {
-                assert_eq!(static_error.code(), ErrorCode::InvalidProfileInput);
-                assert_eq!(bundle_error.code(), ErrorCode::InvalidProfileInput);
+                assert_eq!(static_error.code(), UseCaseErrorCode::InvalidProfileInput);
+                assert_eq!(bundle_error.code(), UseCaseErrorCode::InvalidProfileInput);
             }
         }
     }
@@ -1357,7 +1310,7 @@ mod tests {
             validate_ffmpeg_inputs(&unsupported_rate)
                 .unwrap_err()
                 .code(),
-            ErrorCode::InvalidProfileInput
+            UseCaseErrorCode::InvalidProfileInput
         );
 
         let mut unsupported_channels = request();
@@ -1368,14 +1321,14 @@ mod tests {
             validate_ffmpeg_inputs(&unsupported_channels)
                 .unwrap_err()
                 .code(),
-            ErrorCode::InvalidProfileInput
+            UseCaseErrorCode::InvalidProfileInput
         );
 
         let mut missing = request();
         missing.inputs.remove("source");
         assert_eq!(
             validate_ffmpeg_inputs(&missing).unwrap_err().code(),
-            ErrorCode::InvalidProfileInput
+            UseCaseErrorCode::InvalidProfileInput
         );
 
         let mut unexpected = request();
@@ -1387,7 +1340,7 @@ mod tests {
         );
         assert_eq!(
             validate_ffmpeg_inputs(&unexpected).unwrap_err().code(),
-            ErrorCode::InvalidProfileInput
+            UseCaseErrorCode::InvalidProfileInput
         );
     }
 
@@ -1527,7 +1480,7 @@ mod tests {
         let error = verify_profile_call(&capsule, protocol_mapper::profile_call(&wire))
             .map_err(profile_invocation_error)
             .unwrap_err();
-        assert_eq!(error.code(), ErrorCode::InvalidArtifactPath);
+        assert_eq!(error.code(), UseCaseErrorCode::InvalidArtifactPath);
     }
 
     #[test]
@@ -1618,6 +1571,6 @@ mod tests {
         fs::write(&cached_entrypoint, b"corrupted-package").unwrap();
         fs::set_permissions(&cached_entrypoint, fs::Permissions::from_mode(0o555)).unwrap();
         let error = registry.resolve(&request()).unwrap_err();
-        assert_eq!(error.code(), ErrorCode::EnvironmentUnavailable);
+        assert_eq!(error.code(), UseCaseErrorCode::EnvironmentUnavailable);
     }
 }

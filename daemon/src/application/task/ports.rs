@@ -7,11 +7,9 @@ use std::time::{Duration, Instant};
 use taskcage_core::task::TaskSnapshot;
 use tokio::sync::oneshot;
 
-use crate::Error;
-use crate::cancellation::CancellationRuntime;
-use crate::cancellation::RunningCancellation;
+use super::cancellation::{CancellationRuntime, RunningCancellation};
+use crate::application::UseCaseErrorCode;
 use crate::execution_plan::ResolvedExecutionPlan;
-use crate::protocol::ErrorCode;
 use crate::resource_budget::VerifiedEffectiveLimits;
 
 use super::completion;
@@ -45,14 +43,14 @@ pub(crate) enum RegistryError {
 }
 
 impl RegistryError {
-    pub(crate) fn error_code(&self) -> Option<ErrorCode> {
+    pub(crate) fn error_code(&self) -> Option<UseCaseErrorCode> {
         match self {
-            Self::IdempotencyConflict(_) => Some(ErrorCode::IdempotencyConflict),
-            Self::TaskNotFound(_) => Some(ErrorCode::TaskNotFound),
-            Self::TaskAlreadyFinished(_) => Some(ErrorCode::TaskAlreadyFinished),
-            Self::StateUnavailable => Some(ErrorCode::InternalError),
-            Self::VerifiedEffectiveLimitsRequired(_) => Some(ErrorCode::InternalError),
-            Self::CapacityExhausted => Some(ErrorCode::CapacityExhausted),
+            Self::IdempotencyConflict(_) => Some(UseCaseErrorCode::IdempotencyConflict),
+            Self::TaskNotFound(_) => Some(UseCaseErrorCode::TaskNotFound),
+            Self::TaskAlreadyFinished(_) => Some(UseCaseErrorCode::TaskAlreadyFinished),
+            Self::StateUnavailable => Some(UseCaseErrorCode::InternalError),
+            Self::VerifiedEffectiveLimitsRequired(_) => Some(UseCaseErrorCode::InternalError),
+            Self::CapacityExhausted => Some(UseCaseErrorCode::CapacityExhausted),
             _ => None,
         }
     }
@@ -60,12 +58,12 @@ impl RegistryError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SubmitFailure {
-    pub(crate) code: ErrorCode,
+    pub(crate) code: UseCaseErrorCode,
     pub(crate) message: String,
 }
 
 impl SubmitFailure {
-    pub(crate) fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: UseCaseErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -84,7 +82,7 @@ pub(crate) enum SubmitObservation {
 pub(crate) struct RunnerPermit(());
 
 impl RunnerPermit {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(())
     }
 }
@@ -170,7 +168,7 @@ pub(crate) struct CompletedTask {
 }
 
 impl CompletedTask {
-    pub(crate) fn new(payload: TaskSnapshot) -> Result<Self, Error> {
+    pub(crate) fn new(payload: TaskSnapshot) -> Result<Self, completion::CompletionError> {
         completion::require_finished(payload).map(|payload| Self { payload })
     }
 
@@ -188,7 +186,7 @@ pub(crate) enum TaskRunFailureKind {
 
 #[derive(Debug)]
 pub(crate) struct TaskRunFailure {
-    error: Error,
+    message: String,
     kind: TaskRunFailureKind,
     capacity_reusable: bool,
     cleanup_complete: bool,
@@ -196,20 +194,20 @@ pub(crate) struct TaskRunFailure {
 
 impl TaskRunFailure {
     pub(crate) fn new(
-        error: Error,
+        error: impl std::fmt::Display,
         kind: TaskRunFailureKind,
         capacity_reusable: bool,
         cleanup_complete: bool,
     ) -> Self {
         Self {
-            error,
+            message: error.to_string(),
             kind,
             capacity_reusable,
             cleanup_complete,
         }
     }
 
-    pub(crate) fn with_reusable_capacity(error: Error) -> Self {
+    pub(crate) fn with_reusable_capacity(error: impl std::fmt::Display) -> Self {
         Self::new(error, TaskRunFailureKind::Other, true, true)
     }
 
@@ -217,8 +215,8 @@ impl TaskRunFailure {
         self.capacity_reusable
     }
 
-    pub(crate) fn into_error(self) -> Error {
-        self.error
+    pub(crate) fn into_message(self) -> String {
+        self.message
     }
 
     pub(crate) fn kind(&self) -> TaskRunFailureKind {

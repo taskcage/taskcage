@@ -9,10 +9,11 @@ use thiserror::Error;
 use tokio::sync::Notify;
 
 #[cfg(test)]
-use crate::cancellation::cancellation_channel;
-use crate::cancellation::{CancellationWaiter, RunningCancellation};
+use crate::application::task::cancellation::cancellation_channel;
+use crate::application::task::cancellation::{CancellationWaiter, RunningCancellation};
 use taskcage_core::task::TaskSnapshot as TaskPayload;
 
+use crate::application::UseCaseErrorCode;
 #[cfg(test)]
 use crate::application::task::ports::REGISTRY_CAPACITY_EXHAUSTED_MESSAGE;
 use crate::application::task::ports::{
@@ -21,7 +22,6 @@ use crate::application::task::ports::{
     TaskQueryPort, TaskSubmissionPort,
 };
 use crate::application::task::submit::{SubmissionIdentity, ValidatedSubmit};
-use crate::protocol::ErrorCode;
 use crate::resource_budget::VerifiedEffectiveLimits;
 
 pub(crate) const MIN_FINISHED_RETENTION: Duration = Duration::from_secs(10 * 60);
@@ -780,7 +780,7 @@ where
             }
             Err(error) => {
                 self.fail_inner(SubmitFailure::new(
-                    ErrorCode::InternalError,
+                    UseCaseErrorCode::InternalError,
                     error.to_string(),
                 ));
                 Err(error)
@@ -808,7 +808,7 @@ where
                 let error = RegistryError::StateUnavailable;
                 self.signal
                     .publish(SubmitObservation::Failed(SubmitFailure::new(
-                        ErrorCode::InternalError,
+                        UseCaseErrorCode::InternalError,
                         error.to_string(),
                     )));
                 self.resolved = true;
@@ -817,7 +817,7 @@ where
             Err(error) => {
                 self.signal
                     .publish(SubmitObservation::Failed(SubmitFailure::new(
-                        ErrorCode::InternalError,
+                        UseCaseErrorCode::InternalError,
                         error.to_string(),
                     )));
                 self.resolved = true;
@@ -848,7 +848,7 @@ where
             return;
         }
         self.fail_inner(SubmitFailure::new(
-            ErrorCode::InternalError,
+            UseCaseErrorCode::InternalError,
             "실행 소유자가 결과를 공개하기 전에 종료됐습니다",
         ));
     }
@@ -1061,15 +1061,21 @@ mod tests {
         ));
         assert_eq!(
             RegistryError::CapacityExhausted.error_code(),
-            Some(ErrorCode::CapacityExhausted)
+            Some(UseCaseErrorCode::CapacityExhausted)
         );
         assert_eq!(
             RegistryError::CapacityExhausted.to_string(),
             REGISTRY_CAPACITY_EXHAUSTED_MESSAGE
         );
 
-        reserved.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
-        running_owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        reserved.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
+        running_owner.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[test]
@@ -1089,7 +1095,10 @@ mod tests {
             Err(RegistryError::IdempotencyConflict(client_request_id))
                 if client_request_id == CLIENT_REQUEST_ID
         ));
-        owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        owner.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[test]
@@ -1109,7 +1118,10 @@ mod tests {
         clock.advance(Duration::from_nanos(1));
         let replacement = reserve_owner(&registry, next, OTHER_TASK_ID);
         assert_eq!(registry.logical_task_count_for_test(), Ok(1));
-        replacement.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        replacement.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[test]
@@ -1120,7 +1132,7 @@ mod tests {
             let owner = reserve_owner(&registry, submit_payload(), &task_id);
             owner
                 .rollback_before_running(SubmitFailure::new(
-                    ErrorCode::InternalError,
+                    UseCaseErrorCode::InternalError,
                     "pre-running rollback",
                 ))
                 .unwrap();
@@ -1130,7 +1142,7 @@ mod tests {
         let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
         owner.publish_running(running(TASK_ID)).unwrap();
         owner.fail(SubmitFailure::new(
-            ErrorCode::InternalError,
+            UseCaseErrorCode::InternalError,
             "cleanup uncertain",
         ));
         assert_eq!(registry.logical_task_count_for_test(), Ok(1));
@@ -1184,9 +1196,10 @@ mod tests {
         assert_eq!(owners.load(Ordering::SeqCst), 1);
         assert_eq!(rejected, CALLS - 1);
         assert_eq!(registry.logical_task_count_for_test(), Ok(1));
-        winner
-            .unwrap()
-            .fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        winner.unwrap().fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
         assert_eq!(registry.logical_task_count_for_test(), Ok(0));
     }
 
@@ -1202,7 +1215,10 @@ mod tests {
 
         let snapshot_error = registry.snapshot(TASK_ID).unwrap_err();
         assert_eq!(snapshot_error, RegistryError::StateUnavailable);
-        assert_eq!(snapshot_error.error_code(), Some(ErrorCode::InternalError));
+        assert_eq!(
+            snapshot_error.error_code(),
+            Some(UseCaseErrorCode::InternalError)
+        );
         assert_eq!(
             registry.snapshot_by_client_request_id(CLIENT_REQUEST_ID),
             Err(RegistryError::StateUnavailable)
@@ -1256,7 +1272,10 @@ mod tests {
             registry.snapshot_by_client_request_id(CLIENT_REQUEST_ID),
             Ok(Some(expected))
         );
-        owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        owner.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[test]
@@ -1274,8 +1293,14 @@ mod tests {
         let new_owner = reserve_owner(&restarted, submit_payload(), OTHER_TASK_ID);
         assert_eq!(new_owner.task_id(), OTHER_TASK_ID);
 
-        previous_owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
-        new_owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        previous_owner.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
+        new_owner.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[tokio::test]
@@ -1377,7 +1402,10 @@ mod tests {
             owner.publish_running(finished(TASK_ID)),
             Err(RegistryError::RunningSnapshotRequired)
         );
-        owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        owner.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[tokio::test]
@@ -1386,10 +1414,7 @@ mod tests {
         let runner_starts = AtomicUsize::new(0);
         let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
         runner_starts.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(
-            owner.request().payload().client_request_id,
-            CLIENT_REQUEST_ID
-        );
+        assert_eq!(owner.request().client_request_id(), CLIENT_REQUEST_ID);
         assert_eq!(
             owner.request().budget().wall_timeout(),
             Duration::from_secs(5)
@@ -1400,7 +1425,10 @@ mod tests {
         assert_eq!(waiter.task_id(), TASK_ID);
         assert_eq!(waiter.wait().await, SubmitObservation::Task(expected));
         assert_eq!(runner_starts.load(Ordering::SeqCst), 1);
-        owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        owner.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[tokio::test]
@@ -1419,7 +1447,7 @@ mod tests {
             serde_json::from_str::<Request>(&second_json).unwrap(),
         )
         .unwrap();
-        assert_eq!(first.payload(), second.payload());
+        assert_eq!(first.identity(), second.identity());
 
         let registry = TaskRegistry::new();
         let owner = match registry.reserve_submit(first, TASK_ID.to_owned()).unwrap() {
@@ -1441,7 +1469,10 @@ mod tests {
             waiter.wait().await,
             SubmitObservation::Task(running(TASK_ID))
         );
-        owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        owner.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[test]
@@ -1489,10 +1520,16 @@ mod tests {
                 error,
                 RegistryError::IdempotencyConflict(CLIENT_REQUEST_ID.to_owned())
             );
-            assert_eq!(error.error_code(), Some(ErrorCode::IdempotencyConflict));
+            assert_eq!(
+                error.error_code(),
+                Some(UseCaseErrorCode::IdempotencyConflict)
+            );
             assert_eq!(registry.snapshot(TASK_ID), Ok(Some(expected)));
             assert_eq!(registry.snapshot(OTHER_TASK_ID), Ok(None));
-            owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+            owner.fail(SubmitFailure::new(
+                UseCaseErrorCode::InternalError,
+                "test done",
+            ));
         }
     }
 
@@ -1517,7 +1554,10 @@ mod tests {
             registry.snapshot_by_client_request_id(OTHER_CLIENT_REQUEST_ID),
             Ok(None)
         );
-        first.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        first.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[test]
@@ -1549,7 +1589,10 @@ mod tests {
         );
         let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
         assert_eq!(owner.task_id(), TASK_ID);
-        owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        owner.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[test]
@@ -1601,7 +1644,10 @@ mod tests {
         changed.command.program = "/usr/bin/false".to_owned();
         let replacement = reserve_owner(&registry, changed, OTHER_TASK_ID);
         assert_eq!(replacement.task_id(), OTHER_TASK_ID);
-        replacement.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        replacement.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[test]
@@ -1638,7 +1684,10 @@ mod tests {
             registry.snapshot_by_client_request_id(CLIENT_REQUEST_ID),
             Ok(Some(running(TASK_ID)))
         );
-        owner.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        owner.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1701,9 +1750,10 @@ mod tests {
             })
             .collect();
         assert!(task_ids.windows(2).all(|pair| pair[0] == pair[1]));
-        owner
-            .unwrap()
-            .fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        owner.unwrap().fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1759,7 +1809,10 @@ mod tests {
             match handle.await.unwrap() {
                 Ok(found_owner) => owner = Some(found_owner),
                 Err(error) => {
-                    assert_eq!(error.error_code(), Some(ErrorCode::IdempotencyConflict));
+                    assert_eq!(
+                        error.error_code(),
+                        Some(UseCaseErrorCode::IdempotencyConflict)
+                    );
                     conflict_index = Some(index);
                 }
             }
@@ -1778,9 +1831,10 @@ mod tests {
                 1
             );
         }
-        owner
-            .unwrap()
-            .fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        owner.unwrap().fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1790,7 +1844,7 @@ mod tests {
         let start = Arc::new(Barrier::new(CALLS));
         let decisions = Arc::new(AtomicUsize::new(0));
         let runner_starts = Arc::new(AtomicUsize::new(0));
-        let expected = SubmitFailure::new(ErrorCode::InternalError, "runner start failed");
+        let expected = SubmitFailure::new(UseCaseErrorCode::InternalError, "runner start failed");
         let mut handles = Vec::new();
 
         for index in 0..CALLS {
@@ -1841,7 +1895,10 @@ mod tests {
         );
         let retry = reserve_owner(&registry, submit_payload(), OTHER_TASK_ID);
         assert_eq!(retry.task_id(), OTHER_TASK_ID);
-        retry.fail(SubmitFailure::new(ErrorCode::InternalError, "test done"));
+        retry.fail(SubmitFailure::new(
+            UseCaseErrorCode::InternalError,
+            "test done",
+        ));
     }
 
     #[tokio::test]
@@ -1849,7 +1906,7 @@ mod tests {
         let registry = TaskRegistry::new();
         let owner = reserve_owner(&registry, submit_payload(), TASK_ID);
         let running = owner.publish_running(running(TASK_ID)).unwrap();
-        let expected = SubmitFailure::new(ErrorCode::InternalError, "cleanup uncertain");
+        let expected = SubmitFailure::new(UseCaseErrorCode::InternalError, "cleanup uncertain");
 
         assert_eq!(
             owner.fail(expected),

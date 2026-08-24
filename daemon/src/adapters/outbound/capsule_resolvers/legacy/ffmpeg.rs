@@ -1,19 +1,24 @@
 //! 기존 FFmpeg reference Capsule resolver다.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::path::Path;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 
+use crate::application::{ProfileSubmission, UseCaseErrorCode};
 use crate::artifact::DeclaredOutputArtifact;
 use crate::digest::Sha256Digest;
-use crate::protocol::{ErrorCode, ProfileInputValue, ProfileRequestPayload};
+use crate::execution_plan::ResolvedExecutionPlan;
 use crate::resource_budget::ResourceBudget;
 use crate::runtime_package::{ResolvedRuntimePackage, RuntimePackageCache};
+use taskcage_core::capsule::{ProfileCall, ProfileValue};
 
-use super::{parse_source, resolve_budget};
-use crate::application::capsule::registry::{
-    ProfileError, ProfileStartupError, ResolvedProfile, VerifiedProfileExecution,
-};
-use crate::application::capsule::resolver::{CapsuleResolution, CapsuleResolver};
+use super::{input, parse_source, resolve_budget};
+use crate::adapters::outbound::capsule_resolvers::ProfileStartupError;
+use crate::application::capsule::registry::{ProfileError, ResolvedProfile};
+#[cfg(test)]
+use crate::application::capsule::resolver::ProfileExecutionKind;
+use crate::application::capsule::resolver::{CapsuleResolution, CapsuleResolver, ProfileExecution};
 
 pub(crate) const FFMPEG_PROFILE_NAME: &str = "ffmpeg-audio-to-wav";
 pub(crate) const FFMPEG_PROFILE_VERSION: &str = "1.0.0";
@@ -53,26 +58,27 @@ impl FfmpegResolver {
 }
 
 impl CapsuleResolver for FfmpegResolver {
-    fn resolve(&self, request: &ProfileRequestPayload) -> Result<CapsuleResolution, ProfileError> {
-        if request.profile.name != FFMPEG_PROFILE_NAME
-            || request.profile.version != FFMPEG_PROFILE_VERSION
+    fn resolve(&self, request: &ProfileSubmission) -> Result<CapsuleResolution, ProfileError> {
+        let call = request.call();
+        if call.identity().name() != FFMPEG_PROFILE_NAME
+            || call.identity().version() != FFMPEG_PROFILE_VERSION
         {
             return Ok(CapsuleResolution::NotFound);
         }
-        let (source, sample_rate_hz, channels) = validate_ffmpeg_inputs(request)?;
-        let budget = resolve_budget(&self.default_budget, request.resource_overrides.as_ref())?;
+        let (source, sample_rate_hz, channels) = validate_ffmpeg_call(call)?;
+        let budget = resolve_budget(&self.default_budget, call.resource_overrides())?;
         let package = self.cache.resolve(self.digest).map_err(|error| {
             ProfileError::new(
-                ErrorCode::EnvironmentUnavailable,
+                UseCaseErrorCode::EnvironmentUnavailable,
                 format!("registered FFmpeg Runtime Package is unavailable: {error}"),
             )
         })?;
         validate_ffmpeg_package_contract(&package).map_err(|error| {
-            ProfileError::new(ErrorCode::EnvironmentUnavailable, error.to_string())
+            ProfileError::new(UseCaseErrorCode::EnvironmentUnavailable, error.to_string())
         })?;
         let entrypoint = package.entrypoint().try_clone().map_err(|error| {
             ProfileError::new(
-                ErrorCode::EnvironmentUnavailable,
+                UseCaseErrorCode::EnvironmentUnavailable,
                 format!("verified FFmpeg entrypoint descriptor could not be pinned: {error}"),
             )
         })?;
@@ -82,58 +88,98 @@ impl CapsuleResolver for FfmpegResolver {
             self.maximum_artifact_bytes,
         )
         .expect("static FFmpeg output contract must be valid");
-        Ok(CapsuleResolution::Resolved(Box::new(ResolvedProfile {
-            request: request.clone(),
+        Ok(CapsuleResolution::Resolved(Box::new(ResolvedProfile::new(
+            request.clone(),
             source,
             output,
             budget,
-            execution: VerifiedProfileExecution::LegacyFfmpeg {
+            Box::new(FfmpegExecution {
                 entrypoint,
                 sample_rate_hz,
                 channels,
-            },
-            output_slot: FFMPEG_OUTPUT_SLOT.to_owned(),
-        })))
+            }),
+            FFMPEG_OUTPUT_SLOT.to_owned(),
+        ))))
     }
 }
 
-pub(crate) fn validate_ffmpeg_inputs(
-    request: &ProfileRequestPayload,
+#[derive(Debug)]
+struct FfmpegExecution {
+    entrypoint: File,
+    sample_rate_hz: i64,
+    channels: i64,
+}
+
+impl ProfileExecution for FfmpegExecution {
+    fn into_plan(
+        self: Box<Self>,
+        _profile_name: &str,
+        input: PathBuf,
+        output: PathBuf,
+        working_directory: PathBuf,
+        budget: ResourceBudget,
+    ) -> ResolvedExecutionPlan {
+        ResolvedExecutionPlan::from_pinned_entrypoint(
+            self.entrypoint,
+            OsString::from("ffmpeg"),
+            ffmpeg_arguments(&input, self.sample_rate_hz, self.channels, &output),
+            working_directory,
+            BTreeMap::new(),
+            budget,
+        )
+    }
+
+    #[cfg(test)]
+    fn kind(&self) -> ProfileExecutionKind {
+        ProfileExecutionKind::LegacyFfmpeg
+    }
+}
+
+fn validate_ffmpeg_call(
+    call: &ProfileCall,
 ) -> Result<(crate::artifact::LocalInputArtifact, i64, i64), ProfileError> {
-    if request.inputs.len() != 3 {
+    if call.inputs().len() != 3 {
         return Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
+            UseCaseErrorCode::InvalidProfileInput,
             "ffmpeg-audio-to-wav requires exactly source, sample_rate_hz, and channels inputs",
         ));
     }
-    let source = parse_source(request)?;
+    let source = parse_source(call)?;
     let sample_rate_hz = allowed_int64(
-        request,
+        call,
         "sample_rate_hz",
         FFMPEG_SAMPLE_RATES,
         "8000, 16000, 22050, 44100, or 48000",
     )?;
-    let channels = allowed_int64(request, "channels", FFMPEG_CHANNELS, "1 or 2")?;
+    let channels = allowed_int64(call, "channels", FFMPEG_CHANNELS, "1 or 2")?;
     Ok((source, sample_rate_hz, channels))
 }
 
 fn allowed_int64(
-    request: &ProfileRequestPayload,
+    call: &ProfileCall,
     slot: &'static str,
     allowed: &[i64],
     allowed_description: &'static str,
 ) -> Result<i64, ProfileError> {
-    match request.inputs.get(slot) {
-        Some(ProfileInputValue::Int64 { value }) if allowed.contains(value) => Ok(*value),
-        Some(ProfileInputValue::Int64 { .. }) => Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
+    match input(call, slot) {
+        Some(ProfileValue::Int64(value)) if allowed.contains(value) => Ok(*value),
+        Some(ProfileValue::Int64(_)) => Err(ProfileError::new(
+            UseCaseErrorCode::InvalidProfileInput,
             format!("inputs.{slot} must be {allowed_description}"),
         )),
         _ => Err(ProfileError::new(
-            ErrorCode::InvalidProfileInput,
+            UseCaseErrorCode::InvalidProfileInput,
             format!("inputs.{slot} must be INT64"),
         )),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn validate_ffmpeg_inputs(
+    request: &crate::protocol::ProfileRequestPayload,
+) -> Result<(crate::artifact::LocalInputArtifact, i64, i64), ProfileError> {
+    let call = crate::protocol_mapper::profile_call(request);
+    validate_ffmpeg_call(&call)
 }
 
 fn validate_ffmpeg_package_contract(

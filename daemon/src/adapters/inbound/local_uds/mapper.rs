@@ -9,12 +9,123 @@ use taskcage_core::task::{
     TerminationReason as DomainTerminationReason,
 };
 
+use crate::application::ProfileSubmission;
+use crate::application::UseCaseErrorCode;
+use crate::application::task::{SubmitValidationError, ValidatedSubmit};
+use crate::execution_plan::RawCommand;
 use crate::protocol::{
-    CpuMax, OutputLimits, ProcessResult, ProfileInputValue, ProfileRequestPayload,
-    ProfileResourceOverrides as WireProfileResourceOverrides, ResourceLimits, TaskOutput,
-    TaskPayload, TaskTiming, TaskUsage, TerminationReason,
+    CpuMax, OutputLimits, PROTOCOL_VERSION, ProcessResult, ProfileInputValue,
+    ProfileRequestPayload, ProfileResourceOverrides as WireProfileResourceOverrides, Request,
+    ResourceLimits, SubmitTaskPayload, TaskOutput, TaskPayload, TaskTiming, TaskUsage,
+    TerminationReason,
 };
 use crate::resource_budget::{ResourceBudget, ResourceBudgetError, VerifiedEffectiveLimits};
+
+pub(crate) const fn error_code(code: UseCaseErrorCode) -> crate::protocol::ErrorCode {
+    use crate::protocol::ErrorCode;
+
+    match code {
+        UseCaseErrorCode::ArtifactDigestMismatch => ErrorCode::ArtifactDigestMismatch,
+        UseCaseErrorCode::CapacityExhausted => ErrorCode::CapacityExhausted,
+        UseCaseErrorCode::EnvironmentUnavailable => ErrorCode::EnvironmentUnavailable,
+        UseCaseErrorCode::IdempotencyConflict => ErrorCode::IdempotencyConflict,
+        UseCaseErrorCode::InternalError => ErrorCode::InternalError,
+        UseCaseErrorCode::InvalidArtifactPath => ErrorCode::InvalidArtifactPath,
+        UseCaseErrorCode::InvalidProfileInput => ErrorCode::InvalidProfileInput,
+        UseCaseErrorCode::LimitExceedsPolicy => ErrorCode::LimitExceedsPolicy,
+        UseCaseErrorCode::ProfileNotFound => ErrorCode::ProfileNotFound,
+        UseCaseErrorCode::TaskAlreadyFinished => ErrorCode::TaskAlreadyFinished,
+        UseCaseErrorCode::TaskNotFound => ErrorCode::TaskNotFound,
+    }
+}
+
+pub(crate) fn validated_submit(
+    request: Request,
+) -> Result<(String, ValidatedSubmit), SubmitValidationError> {
+    let Request::SubmitTask {
+        protocol_version,
+        request_id,
+        payload,
+    } = request
+    else {
+        return Err(SubmitValidationError::NotSubmitTask);
+    };
+    if protocol_version != PROTOCOL_VERSION {
+        return Err(SubmitValidationError::UnsupportedProtocolVersion(
+            protocol_version,
+        ));
+    }
+    validate_uuid("requestId", &request_id)?;
+    let submit = validated_submit_payload(payload)?;
+    Ok((request_id, submit))
+}
+
+pub(crate) fn validated_submit_payload(
+    payload: SubmitTaskPayload,
+) -> Result<ValidatedSubmit, SubmitValidationError> {
+    validate_uuid("clientRequestId", &payload.client_request_id)?;
+    validate_command(&payload)?;
+    let budget = resource_budget(&payload.limits, &payload.output)?;
+    let command = RawCommand {
+        program: payload.command.program,
+        arguments: payload.command.args,
+        working_directory: payload.command.working_directory,
+        environment: payload.command.environment,
+    };
+    Ok(ValidatedSubmit::from_raw(
+        payload.client_request_id,
+        command,
+        budget,
+    ))
+}
+
+fn validate_uuid(field: &'static str, value: &str) -> Result<(), SubmitValidationError> {
+    let bytes = value.as_bytes();
+    let valid = bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(SubmitValidationError::InvalidUuid { field })
+    }
+}
+
+fn validate_command(payload: &SubmitTaskPayload) -> Result<(), SubmitValidationError> {
+    let command = &payload.command;
+    if !command.program.starts_with('/') {
+        return Err(SubmitValidationError::ProgramNotAbsolute);
+    }
+    if !command.working_directory.starts_with('/') {
+        return Err(SubmitValidationError::WorkingDirectoryNotAbsolute);
+    }
+    reject_nul("command.program", &command.program)?;
+    reject_nul("command.workingDirectory", &command.working_directory)?;
+    for argument in &command.args {
+        reject_nul("command.args", argument)?;
+    }
+    for (key, value) in &command.environment {
+        if key.is_empty() || key.contains('=') {
+            return Err(SubmitValidationError::InvalidEnvironmentKey);
+        }
+        reject_nul("command.environment key", key)?;
+        reject_nul("command.environment value", value)?;
+    }
+    Ok(())
+}
+
+fn reject_nul(field: &'static str, value: &str) -> Result<(), SubmitValidationError> {
+    if value.as_bytes().contains(&0) {
+        Err(SubmitValidationError::NulByte { field })
+    } else {
+        Ok(())
+    }
+}
 
 pub(crate) fn profile_call(request: &ProfileRequestPayload) -> ProfileCall {
     let mut call = ProfileCall::new(
@@ -31,6 +142,10 @@ pub(crate) fn profile_call(request: &ProfileRequestPayload) -> ProfileCall {
         call = call.with_resource_overrides(profile_resource_overrides(overrides));
     }
     call
+}
+
+pub(crate) fn profile_submission(request: &ProfileRequestPayload) -> ProfileSubmission {
+    ProfileSubmission::new(request.client_request_id.clone(), profile_call(request))
 }
 
 fn profile_value(value: &ProfileInputValue) -> ProfileValue {
@@ -94,6 +209,7 @@ pub(crate) fn resource_budget(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn resource_limits(budget: &ResourceBudget) -> ResourceLimits {
     resource_policy(budget.as_core().resources())
 }

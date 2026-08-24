@@ -5,7 +5,7 @@ use super::config::DaemonConfig;
 #[cfg(target_os = "linux")]
 use super::listeners;
 #[cfg(target_os = "linux")]
-use crate::application::task::TaskRegistrySettings;
+use crate::adapters::task_service::TaskRegistrySettings;
 #[cfg(target_os = "linux")]
 use crate::capacity::TaskCapacitySettings;
 #[cfg(target_os = "linux")]

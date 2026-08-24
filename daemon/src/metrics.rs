@@ -138,7 +138,7 @@ fn outcome_name(reason: TerminationReason) -> &'static str {
 #[cfg(target_os = "linux")]
 pub(crate) async fn serve(
     listener: tokio::net::TcpListener,
-    handlers: Arc<crate::handlers::ProtocolHandlers<crate::application::task::SubmitCoordinator>>,
+    handlers: Arc<crate::handlers::ProtocolHandlers<crate::adapters::task_service::TaskService>>,
 ) -> Result<(), std::io::Error> {
     loop {
         let (stream, _) = listener.accept().await?;
