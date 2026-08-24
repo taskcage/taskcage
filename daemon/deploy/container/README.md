@@ -69,12 +69,12 @@ Build the production image from this repository:
 ```bash
 docker build \
   --file daemon/deploy/container/Dockerfile \
-  --tag taskcage-local:0.6.0 \
+  --tag taskcage-local:0.6.1 \
   .
 ```
 
 Use the local image without editing the Compose file:
 
 ```bash
-TASKCAGE_IMAGE=taskcage-local TASKCAGE_VERSION=0.6.0 docker compose up --detach --wait
+TASKCAGE_IMAGE=taskcage-local TASKCAGE_VERSION=0.6.1 docker compose up --detach --wait
 ```
