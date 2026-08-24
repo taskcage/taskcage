@@ -1,4 +1,4 @@
-//! TaskCage protocol의 bounded length-prefixed JSON frame codec이다.
+//! Local Protocol v1/v2의 bounded length-prefixed JSON frame codec이다.
 
 use std::fmt;
 use std::io;

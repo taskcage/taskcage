@@ -1,4 +1,4 @@
-//! Unix domain socket에서 protocol v1 frame을 순서대로 처리한다.
+//! Unix domain socket에서 Local Protocol frame을 순서대로 처리한다.
 
 use std::future::Future;
 use std::io;
@@ -24,7 +24,6 @@ use crate::application::task::SubmitContext;
 use crate::application::task::TaskRegistrySettings;
 use crate::application::task::{SubmitCoordinator, SubmitMetadata, TaskStartTime};
 use crate::audit;
-use crate::codec::{FrameError, decode_json, read_frame_or_eof, write_json_frame};
 use crate::deadline::MonotonicDeadline;
 use crate::fail_stop::FailStopCoordinator;
 use crate::handlers::ProtocolHandlers;
@@ -32,6 +31,8 @@ use crate::protocol::{
     ErrorCode, ErrorPayload, PROFILE_PROTOCOL_VERSION, PROTOCOL_VERSION, Request, Response,
 };
 use crate::startup::StartupOwnership;
+
+use super::codec::{FrameError, decode_json, read_frame_or_eof, write_json_frame};
 
 type DispatchFuture = Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
 type Dispatch = Arc<dyn Fn(Request) -> DispatchFuture + Send + Sync + 'static>;
@@ -788,9 +789,9 @@ mod tests {
     use tokio::sync::{Notify, Semaphore, oneshot};
     use tokio::time::{sleep, timeout};
 
+    use super::super::codec::read_json_frame;
     use super::*;
     use crate::capacity::{TaskCapacity, TaskCapacitySettings};
-    use crate::codec::read_json_frame;
     use crate::preflight::{CapabilityProbe, SystemProbe};
     use crate::protocol::{
         CapabilitiesPayload, CommandSpec, CpuMax, EmptyPayload, OutputLimits, ProcessResult,

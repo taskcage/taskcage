@@ -1,4 +1,4 @@
-//! Remote principal secret 검증과 session revocation 상태를 관리한다.
+//! Remote TLS principal secret 검증과 session revocation 상태를 관리한다.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};

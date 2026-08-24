@@ -1,4 +1,4 @@
-//! Explicit conversions between local wire DTOs and backend-independent domain values.
+//! Local wire DTO와 backend-independent domain 값 사이의 명시적 변환이다.
 
 use taskcage_core::capsule::{
     CpuMaxOverride, ProfileCall, ProfileIdentity, ProfileResourceOverrides, ProfileValue,
