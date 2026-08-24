@@ -1183,7 +1183,11 @@ mod tests {
             "mode": "0444"
         }));
         files.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
-        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1229,7 +1233,15 @@ mod tests {
         )
         .collect();
 
-        assert_eq!(library_paths, vec![cache.entry_path(report.digest).join(ROOTFS_NAME).join("lib")]);
+        assert_eq!(
+            library_paths,
+            vec![
+                cache
+                    .entry_path(report.digest)
+                    .join(ROOTFS_NAME)
+                    .join("lib")
+            ]
+        );
     }
 
     #[test]
