@@ -5,7 +5,12 @@ TaskCage는 daemon과 SDK의 버전을 독립적으로 관리한다. 이 문서�
 
 ## Unreleased
 
-현재 문서화된 변경 없음.
+## taskcaged 0.6.0
+
+- Capsule 실행의 공개 동작을 유지하면서 application, Linux runtime, protocol adapter와 bootstrap 경계를 분리한다.
+- opt-in Prometheus `/metrics` endpoint로 실행 중인 Task, capacity, 완료 결과, cleanup 및 duration을 노출한다.
+- Local UDS와 Remote TLS adapter의 request·response 변환을 분리하고 Capsule identity 검증을 일관되게 적용한다.
+- Docker 기반 Java Capsule E2E와 재사용 가능한 benchmark lab로 FFmpeg 정상 실행, 제한 및 cleanup을 검증한다.
 
 ## taskcaged 0.5.0 - 2026-08-20
 
