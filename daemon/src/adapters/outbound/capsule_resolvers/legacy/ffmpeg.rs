@@ -82,6 +82,12 @@ impl CapsuleResolver for FfmpegResolver {
                 format!("verified FFmpeg entrypoint descriptor could not be pinned: {error}"),
             )
         })?;
+        let environment = package.dynamic_library_environment().map_err(|error| {
+            ProfileError::new(
+                UseCaseErrorCode::EnvironmentUnavailable,
+                format!("registered FFmpeg Runtime Package library paths are unavailable: {error}"),
+            )
+        })?;
         let output = DeclaredOutputArtifact::new(
             FFMPEG_OUTPUT_FILE,
             FFMPEG_OUTPUT_MEDIA_TYPE,
@@ -97,6 +103,7 @@ impl CapsuleResolver for FfmpegResolver {
                 entrypoint,
                 sample_rate_hz,
                 channels,
+                environment,
             }),
             FFMPEG_OUTPUT_SLOT.to_owned(),
         ))))
@@ -108,6 +115,7 @@ struct FfmpegExecution {
     entrypoint: File,
     sample_rate_hz: i64,
     channels: i64,
+    environment: BTreeMap<OsString, OsString>,
 }
 
 impl ProfileExecution for FfmpegExecution {
@@ -124,7 +132,7 @@ impl ProfileExecution for FfmpegExecution {
             OsString::from("ffmpeg"),
             ffmpeg_arguments(&input, self.sample_rate_hz, self.channels, &output),
             working_directory,
-            BTreeMap::new(),
+            self.environment,
             budget,
         )
     }

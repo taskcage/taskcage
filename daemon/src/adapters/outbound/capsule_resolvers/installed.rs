@@ -84,6 +84,12 @@ impl CapsuleResolver for InstalledCapsuleResolver {
                 format!("verified Capsule entrypoint descriptor could not be pinned: {error}"),
             )
         })?;
+        let environment = package.dynamic_library_environment().map_err(|error| {
+            ProfileError::new(
+                UseCaseErrorCode::EnvironmentUnavailable,
+                format!("Capsule Runtime Package library paths are unavailable: {error}"),
+            )
+        })?;
         let output_contract = invocation.declared_output();
         let output = DeclaredOutputArtifact::new(
             &output_contract.file_name,
@@ -104,6 +110,7 @@ impl CapsuleResolver for InstalledCapsuleResolver {
             Box::new(InstalledExecution {
                 entrypoint,
                 arguments,
+                environment,
             }),
             output_contract.name.clone(),
         ))))
@@ -114,6 +121,7 @@ impl CapsuleResolver for InstalledCapsuleResolver {
 struct InstalledExecution {
     entrypoint: File,
     arguments: Vec<VerifiedArgument>,
+    environment: BTreeMap<OsString, OsString>,
 }
 
 impl ProfileExecution for InstalledExecution {
@@ -137,7 +145,7 @@ impl ProfileExecution for InstalledExecution {
                 })
                 .collect(),
             working_directory,
-            BTreeMap::new(),
+            self.environment,
             budget,
         )
     }
