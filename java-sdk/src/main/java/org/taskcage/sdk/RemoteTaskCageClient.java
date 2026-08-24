@@ -4,8 +4,8 @@ import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ServiceLoader;
 import java.util.UUID;
-import org.taskcage.sdk.internal.remote.DefaultRemoteTaskCageClient;
 
 /** Authenticated TLS client for Profile-only execution on a Remote TaskCage daemon. */
 public interface RemoteTaskCageClient extends AutoCloseable {
@@ -20,7 +20,19 @@ public interface RemoteTaskCageClient extends AutoCloseable {
     }
 
     static RemoteTaskCageClient connect(RemoteConnectionOptions options) {
-        return new DefaultRemoteTaskCageClient(options);
+        return provider().connect(options);
+    }
+
+    /** Internal implementation provider loaded from the SDK artifact. */
+    interface Provider {
+        RemoteTaskCageClient connect(RemoteConnectionOptions options);
+    }
+
+    private static Provider provider() {
+        return ServiceLoader.load(Provider.class)
+                .findFirst()
+                .orElseThrow(
+                        () -> new IllegalStateException("RemoteTaskCageClient provider is unavailable"));
     }
 
     RemoteCapabilities capabilities();

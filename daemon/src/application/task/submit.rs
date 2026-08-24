@@ -3,7 +3,9 @@
 #[cfg(any(target_os = "linux", test))]
 use std::future::Future;
 #[cfg(any(target_os = "linux", test))]
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 use thiserror::Error;
 #[cfg(any(target_os = "linux", test))]
@@ -13,6 +15,8 @@ use tokio::sync::oneshot;
 use std::sync::Arc;
 
 #[cfg(any(target_os = "linux", test))]
+use super::cancellation::{CancellationRuntime, RunningCancellation, cancellation_channel};
+#[cfg(any(target_os = "linux", test))]
 use super::completion;
 #[cfg(any(target_os = "linux", test))]
 use super::ports::{
@@ -21,44 +25,34 @@ use super::ports::{
 #[cfg(any(target_os = "linux", test))]
 pub(crate) use super::ports::{RegistryError, SubmitFailure, SubmitObservation};
 #[cfg(any(target_os = "linux", test))]
-use super::ports::{
-    RunnerPermit, TaskRunConfig, TaskStartTime, TaskStartTimeSource, VerifiedRunningTask,
-};
-#[cfg(target_os = "linux")]
-use super::ports::{TaskExecutionPort, TaskRunFailure, TaskRunFailureKind, TaskUseCases};
-#[cfg(target_os = "linux")]
-use super::{cancel, query};
-#[cfg(target_os = "linux")]
-use crate::adapters::task_registry::MonotonicClock;
-#[cfg(any(target_os = "linux", test))]
+use super::ports::{TaskStartTime, TaskStartTimeSource, VerifiedRunningTask};
+#[cfg(test)]
 use crate::adapters::task_registry::TaskRegistry;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 pub(crate) use crate::adapters::task_registry::TaskRegistrySettings;
+#[cfg(test)]
+use crate::capacity::TaskCapacitySettings;
 #[cfg(any(target_os = "linux", test))]
-use crate::cancellation::{CancellationRuntime, RunningCancellation, cancellation_channel};
-#[cfg(any(target_os = "linux", test))]
-use crate::capacity::{TaskCapacity, TaskCapacityPermit, TaskCapacitySettings};
-use crate::execution_plan::ResolvedExecutionPlan;
+use crate::capacity::{TaskCapacity, TaskCapacityPermit};
+use crate::execution_plan::{RawCommand, ResolvedExecutionPlan};
 #[cfg(test)]
 use crate::fail_stop::CleanupFailureReport;
+#[cfg(test)]
+use crate::fail_stop::FailStopSettings;
 #[cfg(any(target_os = "linux", test))]
-use crate::fail_stop::{ActiveExecution, FailStopCoordinator, FailStopSettings};
-#[cfg(target_os = "linux")]
-use crate::preflight::VerifiedEnvironment;
+use crate::fail_stop::{ActiveExecution, FailStopCoordinator};
 #[cfg(any(target_os = "linux", test))]
 use taskcage_core::task::TaskSnapshot as TaskPayload;
 
-#[cfg(target_os = "linux")]
-use crate::adapters::linux_executor::TaskRunner;
+use crate::application::ProfileSubmission;
+use crate::application::UseCaseErrorCode;
 #[cfg(any(target_os = "linux", test))]
 use crate::metrics::RuntimeMetrics;
-use crate::protocol::ErrorCode;
-use crate::protocol::{PROTOCOL_VERSION, ProfileRequestPayload, Request, SubmitTaskPayload};
+#[cfg(test)]
+use crate::protocol::{PROTOCOL_VERSION, Request, SubmitTaskPayload};
 #[cfg(any(target_os = "linux", test))]
 use crate::resource_budget::VerifiedEffectiveLimits;
 use crate::resource_budget::{ResourceBudget, ResourceBudgetError};
-#[cfg(target_os = "linux")]
-use crate::{artifact::StagedArtifactTask, profile::ProfileTaskRecord};
 
 #[cfg(any(target_os = "linux", test))]
 const CAPACITY_EXHAUSTED_MESSAGE: &str = "all task execution slots are in use";
@@ -181,17 +175,17 @@ pub(crate) enum SubmitError {
 
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug)]
-struct SubmitExecutionConfig {
-    task_id: String,
-    submitted_at: String,
-    start_time: TaskStartTimeSource,
-    cleanup_timeout: Duration,
-    plan: ResolvedExecutionPlan,
+pub(crate) struct SubmitExecutionConfig {
+    pub(crate) task_id: String,
+    pub(crate) submitted_at: String,
+    pub(crate) start_time: TaskStartTimeSource,
+    pub(crate) cleanup_timeout: Duration,
+    pub(crate) plan: ResolvedExecutionPlan,
 }
 
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug)]
-enum ExecutionCompletion {
+pub(crate) enum ExecutionCompletion {
     #[cfg(target_os = "linux")]
     Real(TaskPayload),
     #[cfg(test)]
@@ -200,7 +194,7 @@ enum ExecutionCompletion {
 
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug)]
-struct ExecutionFailure {
+pub(crate) struct ExecutionFailure {
     submit: SubmitFailure,
     capacity_reusable: bool,
     cleanup_complete: bool,
@@ -217,7 +211,7 @@ struct OwnerRuntime {
 
 #[cfg(any(target_os = "linux", test))]
 #[derive(Clone)]
-struct SubmissionRuntime {
+pub(crate) struct SubmissionRuntime {
     capacity: Arc<TaskCapacity>,
     fail_stop: Arc<FailStopCoordinator>,
     metrics: Arc<RuntimeMetrics>,
@@ -225,7 +219,11 @@ struct SubmissionRuntime {
 
 #[cfg(any(target_os = "linux", test))]
 impl ExecutionFailure {
-    fn new(submit: SubmitFailure, capacity_reusable: bool, cleanup_complete: bool) -> Self {
+    pub(crate) fn new(
+        submit: SubmitFailure,
+        capacity_reusable: bool,
+        cleanup_complete: bool,
+    ) -> Self {
         Self {
             submit,
             capacity_reusable,
@@ -234,285 +232,22 @@ impl ExecutionFailure {
     }
 }
 
-/// UDS handler가 사용할 단일 submit 진입점이다. Registry와 Runner는 외부에 따로 노출하지 않는다.
-#[cfg(target_os = "linux")]
-#[derive(Debug)]
-pub(crate) struct SubmitCoordinator {
-    registry: TaskRegistry<MonotonicClock>,
-    runner: Arc<dyn TaskExecutionPort>,
-    capacity: Arc<TaskCapacity>,
-    fail_stop: Arc<FailStopCoordinator>,
-    metrics: Arc<RuntimeMetrics>,
-}
-
-#[cfg(target_os = "linux")]
-impl SubmitCoordinator {
-    pub(crate) fn initialize(
-        environment: VerifiedEnvironment,
-        capacity_settings: TaskCapacitySettings,
-        registry_settings: TaskRegistrySettings,
+#[cfg(any(target_os = "linux", test))]
+impl SubmissionRuntime {
+    pub(crate) fn new(
+        capacity: Arc<TaskCapacity>,
         fail_stop: Arc<FailStopCoordinator>,
-    ) -> crate::Result<Self> {
-        Ok(Self {
-            registry: TaskRegistry::initialize(registry_settings),
-            runner: Arc::new(TaskRunner::initialize(environment, Arc::clone(&fail_stop))?),
-            capacity: Arc::new(TaskCapacity::new(capacity_settings)),
+        metrics: Arc<RuntimeMetrics>,
+    ) -> Self {
+        Self {
+            capacity,
             fail_stop,
-            metrics: Arc::new(RuntimeMetrics::default()),
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn initialize_with_cgroup_create_faults(
-        environment: VerifiedEnvironment,
-        capacity_settings: TaskCapacitySettings,
-        registry_settings: TaskRegistrySettings,
-        fail_stop: Arc<FailStopCoordinator>,
-        faults: Arc<crate::cgroup::CgroupCreateFaults>,
-    ) -> crate::Result<Self> {
-        Ok(Self {
-            registry: TaskRegistry::initialize(registry_settings),
-            runner: Arc::new(TaskRunner::initialize_with_cgroup_create_faults(
-                environment,
-                Arc::clone(&fail_stop),
-                faults,
-            )?),
-            capacity: Arc::new(TaskCapacity::new(capacity_settings)),
-            fail_stop,
-            metrics: Arc::new(RuntimeMetrics::default()),
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn initialize_with_cleanup_faults(
-        environment: VerifiedEnvironment,
-        capacity_settings: TaskCapacitySettings,
-        registry_settings: TaskRegistrySettings,
-        fail_stop: Arc<FailStopCoordinator>,
-        faults: Arc<crate::cleanup_fault::CleanupFaults>,
-    ) -> crate::Result<Self> {
-        Ok(Self {
-            registry: TaskRegistry::initialize(registry_settings),
-            runner: Arc::new(TaskRunner::initialize_with_cleanup_faults(
-                environment,
-                Arc::clone(&fail_stop),
-                faults,
-            )?),
-            capacity: Arc::new(TaskCapacity::new(capacity_settings)),
-            fail_stop,
-            metrics: Arc::new(RuntimeMetrics::default()),
-        })
-    }
-
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "UDS handler가 다음 단계에서 이 단일 진입점만 호출합니다"
-        )
-    )]
-    pub(crate) async fn submit<F>(
-        &self,
-        request: Request,
-        metadata: SubmitMetadata,
-        finished_time: F,
-    ) -> Result<SubmitOutcome, SubmitError>
-    where
-        F: FnOnce() -> (String, Instant) + Send + 'static,
-    {
-        let (request_id, validated) = ValidatedSubmit::try_from_request(request)?;
-        self.submit_validated(request_id, validated, metadata, finished_time)
-            .await
-    }
-
-    pub(crate) async fn submit_validated<F>(
-        &self,
-        request_id: String,
-        validated: ValidatedSubmit,
-        metadata: SubmitMetadata,
-        finished_time: F,
-    ) -> Result<SubmitOutcome, SubmitError>
-    where
-        F: FnOnce() -> (String, Instant) + Send + 'static,
-    {
-        let runner = Arc::clone(&self.runner);
-        coordinate_validated_submit_with_runtime(
-            self.registry.clone(),
-            self.submission_runtime(),
-            request_id,
-            validated,
-            metadata,
-            move |config, running_sender, cancellation| async move {
-                runner
-                    .execute_task(
-                        RunnerPermit::new(),
-                        TaskRunConfig {
-                            task_id: config.task_id,
-                            submitted_at: config.submitted_at,
-                            start_time: config.start_time,
-                            cleanup_timeout: config.cleanup_timeout,
-                            plan: config.plan,
-                        },
-                        running_sender,
-                        cancellation,
-                        Box::new(finished_time),
-                    )
-                    .await
-                    .map(|completed| ExecutionCompletion::Real(completed.into_payload()))
-                    .map_err(runner_execution_failure)
-            },
-        )
-        .await
-    }
-
-    pub(crate) async fn submit_profile_validated<F>(
-        &self,
-        request_id: String,
-        validated: ValidatedSubmit,
-        metadata: SubmitMetadata,
-        finished_time: F,
-        profile_task: Arc<ProfileTaskRecord>,
-        staged_artifacts: StagedArtifactTask,
-    ) -> Result<SubmitOutcome, SubmitError>
-    where
-        F: FnOnce() -> (String, Instant) + Send + 'static,
-    {
-        let runner = Arc::clone(&self.runner);
-        coordinate_validated_submit_with_runtime(
-            self.registry.clone(),
-            self.submission_runtime(),
-            request_id,
-            validated,
-            metadata,
-            move |config, running_sender, cancellation| async move {
-                let completed = runner
-                    .execute_task(
-                        RunnerPermit::new(),
-                        TaskRunConfig {
-                            task_id: config.task_id,
-                            submitted_at: config.submitted_at,
-                            start_time: config.start_time,
-                            cleanup_timeout: config.cleanup_timeout,
-                            plan: config.plan,
-                        },
-                        running_sender,
-                        cancellation,
-                        Box::new(finished_time),
-                    )
-                    .await
-                    .map_err(runner_execution_failure)?;
-                let payload = completed.into_payload();
-                profile_task
-                    .finalize(&payload, staged_artifacts)
-                    .map_err(|error| {
-                        ExecutionFailure::new(
-                            SubmitFailure::new(ErrorCode::InternalError, error.to_string()),
-                            false,
-                            false,
-                        )
-                    })?;
-                Ok(ExecutionCompletion::Real(payload))
-            },
-        )
-        .await
-    }
-
-    pub(crate) async fn cancel(&self, task_id: &str) -> Result<TaskPayload, RegistryError> {
-        cancel::cancel_task(&self.registry, task_id).await
-    }
-
-    pub(crate) async fn wait_idle(&self) {
-        self.capacity.wait_idle().await;
-    }
-
-    pub(crate) fn render_metrics(&self) -> String {
-        self.metrics.render(
-            self.capacity.in_use(),
-            self.capacity.settings().max_concurrent_tasks(),
-        )
-    }
-
-    fn submission_runtime(&self) -> SubmissionRuntime {
-        SubmissionRuntime {
-            capacity: Arc::clone(&self.capacity),
-            fail_stop: Arc::clone(&self.fail_stop),
-            metrics: Arc::clone(&self.metrics),
+            metrics,
         }
     }
-
-    pub(crate) fn snapshot(&self, task_id: &str) -> Result<Option<TaskPayload>, RegistryError> {
-        query::task_snapshot(&self.registry, task_id)
-    }
-
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "diagnostic profile boundary keeps this test-only lookup"
-        )
-    )]
-    pub(crate) fn snapshot_by_client_request_id(
-        &self,
-        client_request_id: &str,
-    ) -> Result<Option<TaskPayload>, RegistryError> {
-        query::task_snapshot_by_client_request_id(&self.registry, client_request_id)
-    }
-
-    pub(crate) fn has_client_request_id(
-        &self,
-        client_request_id: &str,
-    ) -> Result<bool, RegistryError> {
-        query::has_client_request_id(&self.registry, client_request_id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn capacity_is_available_for_test(&self) -> bool {
-        self.capacity.try_acquire().is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn retained_capacity_for_test(&self) -> u32 {
-        self.capacity.retained_for_fail_stop()
-    }
 }
 
-#[cfg(target_os = "linux")]
-impl TaskUseCases for SubmitCoordinator {
-    fn submit_validated(
-        &self,
-        request_id: String,
-        validated: ValidatedSubmit,
-        context: SubmitContext,
-    ) -> impl Future<Output = Result<SubmitOutcome, SubmitError>> + Send {
-        SubmitCoordinator::submit_validated(
-            self,
-            request_id,
-            validated,
-            context.metadata,
-            context.finished_time,
-        )
-    }
-
-    fn snapshot(&self, task_id: &str) -> Result<Option<TaskPayload>, RegistryError> {
-        SubmitCoordinator::snapshot(self, task_id)
-    }
-
-    fn cancel(
-        &self,
-        task_id: &str,
-    ) -> impl Future<Output = Result<TaskPayload, RegistryError>> + Send {
-        SubmitCoordinator::cancel(self, task_id)
-    }
-}
-
-#[cfg(any(target_os = "linux", test))]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "단위 시험은 raw Request 경계를, production handler는 검증된 경계를 사용합니다"
-    )
-)]
+#[cfg(test)]
 async fn coordinate_submit<R, E, Fut>(
     registry: R,
     capacity: Arc<TaskCapacity>,
@@ -543,7 +278,7 @@ where
     .await
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 async fn coordinate_validated_submit<R, E, Fut>(
     registry: R,
     capacity: Arc<TaskCapacity>,
@@ -580,7 +315,7 @@ where
 }
 
 #[cfg(any(target_os = "linux", test))]
-async fn coordinate_validated_submit_with_runtime<R, E, Fut>(
+pub(crate) async fn coordinate_validated_submit_with_runtime<R, E, Fut>(
     registry: R,
     runtime: SubmissionRuntime,
     request_id: String,
@@ -618,7 +353,7 @@ where
                 task_id: String::new(),
                 effective_limits: None,
                 observation: SubmitObservation::Failed(SubmitFailure::new(
-                    ErrorCode::EnvironmentUnavailable,
+                    UseCaseErrorCode::EnvironmentUnavailable,
                     "cgroup v2 execution environment is unavailable",
                 )),
             });
@@ -648,7 +383,7 @@ where
             let active = active.expect("새 실행 owner에는 활성 실행 소유권이 있어야 합니다");
             let Some(capacity_permit) = runtime.capacity.try_acquire() else {
                 let observation = owner.rollback_before_running(SubmitFailure::new(
-                    ErrorCode::CapacityExhausted,
+                    UseCaseErrorCode::CapacityExhausted,
                     CAPACITY_EXHAUSTED_MESSAGE,
                 ))?;
                 active.complete();
@@ -781,7 +516,8 @@ async fn run_after_running<O, Fut>(
             Ok(running) => running,
             Err(error) => {
                 completion::report_running_publication_failure(&fail_stop, owner.task_id());
-                let failure = SubmitFailure::new(ErrorCode::InternalError, error.to_string());
+                let failure =
+                    SubmitFailure::new(UseCaseErrorCode::InternalError, error.to_string());
                 let observation = owner.fail(failure);
                 let _ = initial_sender.send(observation);
                 capacity_permit.retain_for_fail_stop();
@@ -840,7 +576,8 @@ fn finish_after_running<O>(
             Ok(running) => running,
             Err(error) => {
                 completion::report_running_publication_failure(&fail_stop, owner.task_id());
-                let failure = SubmitFailure::new(ErrorCode::InternalError, error.to_string());
+                let failure =
+                    SubmitFailure::new(UseCaseErrorCode::InternalError, error.to_string());
                 let observation = owner.fail(failure);
                 let _ = initial_sender.send(observation);
                 capacity_permit.retain_for_fail_stop();
@@ -935,7 +672,7 @@ fn finish_without_running<O>(
 #[cfg(any(target_os = "linux", test))]
 fn send_initial_failure(initial_sender: oneshot::Sender<SubmitObservation>, error: RegistryError) {
     let _ = initial_sender.send(SubmitObservation::Failed(SubmitFailure::new(
-        ErrorCode::InternalError,
+        UseCaseErrorCode::InternalError,
         error.to_string(),
     )));
 }
@@ -959,26 +696,6 @@ where
     owner.finish(payload)
 }
 
-#[cfg(target_os = "linux")]
-fn runner_execution_failure(error: TaskRunFailure) -> ExecutionFailure {
-    let capacity_reusable = error.capacity_reusable();
-    let cleanup_complete = error.cleanup_complete();
-    let failure = match error.kind() {
-        TaskRunFailureKind::CgroupReadBackMismatch => SubmitFailure::new(
-            ErrorCode::InternalError,
-            "cgroup limit read-back verification failed",
-        ),
-        TaskRunFailureKind::CgroupReadBackRollbackUncertain => SubmitFailure::new(
-            ErrorCode::EnvironmentUnavailable,
-            "cgroup v2 execution environment is unavailable",
-        ),
-        TaskRunFailureKind::Other => {
-            SubmitFailure::new(ErrorCode::InternalError, error.into_error().to_string())
-        }
-    };
-    ExecutionFailure::new(failure, capacity_reusable, cleanup_complete)
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct ValidatedSubmit {
     identity: SubmissionIdentity,
@@ -990,63 +707,53 @@ pub(crate) struct ValidatedSubmit {
 /// 실행 plan에는 staging 절대 path처럼 caller request가 아닌 값이 들어가므로 여기에 포함하지 않는다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SubmissionIdentity {
-    Raw(SubmitTaskPayload),
-    Profile(ProfileRequestPayload),
+    Raw(RawSubmission),
+    Profile(ProfileSubmission),
+}
+
+/// Wire DTO와 분리된 Raw Command 멱등 identity다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RawSubmission {
+    client_request_id: String,
+    command: RawCommand,
+    budget: ResourceBudget,
 }
 
 impl ValidatedSubmit {
-    pub(crate) fn try_from_request(
-        request: Request,
-    ) -> Result<(String, Self), SubmitValidationError> {
-        let Request::SubmitTask {
-            protocol_version,
-            request_id,
-            payload,
-        } = request
-        else {
-            return Err(SubmitValidationError::NotSubmitTask);
-        };
-        if protocol_version != PROTOCOL_VERSION {
-            return Err(SubmitValidationError::UnsupportedProtocolVersion(
-                protocol_version,
-            ));
-        }
-        validate_uuid("requestId", &request_id)?;
-        let submit = Self::try_from_payload(payload)?;
-        Ok((request_id, submit))
-    }
-
-    pub(crate) fn try_from_payload(
-        payload: SubmitTaskPayload,
-    ) -> Result<Self, SubmitValidationError> {
-        validate_uuid("clientRequestId", &payload.client_request_id)?;
-        validate_command(&payload)?;
-        let budget =
-            ResourceBudget::try_from_protocol(payload.limits.clone(), payload.output.clone())?;
-        let plan = ResolvedExecutionPlan::from_validated_raw(&payload.command, budget);
-        Ok(Self {
-            identity: SubmissionIdentity::Raw(payload),
-            plan,
-        })
-    }
-
-    pub(crate) fn from_profile(
-        payload: ProfileRequestPayload,
-        plan: ResolvedExecutionPlan,
+    pub(crate) fn from_raw(
+        client_request_id: String,
+        command: RawCommand,
+        budget: ResourceBudget,
     ) -> Self {
+        let plan = ResolvedExecutionPlan::from_validated_raw(&command, budget.clone());
         Self {
-            identity: SubmissionIdentity::Profile(payload),
+            identity: SubmissionIdentity::Raw(RawSubmission {
+                client_request_id,
+                command,
+                budget,
+            }),
             plan,
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn payload(&self) -> &SubmitTaskPayload {
-        match &self.identity {
-            SubmissionIdentity::Raw(payload) => payload,
-            SubmissionIdentity::Profile(_) => {
-                panic!("Profile request에는 Raw Command payload가 없습니다")
-            }
+    pub(crate) fn try_from_request(
+        request: Request,
+    ) -> Result<(String, Self), SubmitValidationError> {
+        crate::adapters::inbound::local_uds::mapper::validated_submit(request)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_from_payload(
+        payload: SubmitTaskPayload,
+    ) -> Result<Self, SubmitValidationError> {
+        crate::adapters::inbound::local_uds::mapper::validated_submit_payload(payload)
+    }
+
+    pub(crate) fn from_profile(submission: ProfileSubmission, plan: ResolvedExecutionPlan) -> Self {
+        Self {
+            identity: SubmissionIdentity::Profile(submission),
+            plan,
         }
     }
 
@@ -1056,8 +763,8 @@ impl ValidatedSubmit {
 
     pub(crate) fn client_request_id(&self) -> &str {
         match &self.identity {
-            SubmissionIdentity::Raw(payload) => &payload.client_request_id,
-            SubmissionIdentity::Profile(payload) => &payload.client_request_id,
+            SubmissionIdentity::Raw(submission) => &submission.client_request_id,
+            SubmissionIdentity::Profile(submission) => submission.client_request_id(),
         }
     }
 
@@ -1067,54 +774,6 @@ impl ValidatedSubmit {
 
     fn plan(&self) -> &ResolvedExecutionPlan {
         &self.plan
-    }
-}
-
-fn validate_uuid(field: &'static str, value: &str) -> Result<(), SubmitValidationError> {
-    let bytes = value.as_bytes();
-    let valid = bytes.len() == 36
-        && bytes.iter().enumerate().all(|(index, byte)| {
-            if matches!(index, 8 | 13 | 18 | 23) {
-                *byte == b'-'
-            } else {
-                byte.is_ascii_hexdigit()
-            }
-        });
-    if valid {
-        Ok(())
-    } else {
-        Err(SubmitValidationError::InvalidUuid { field })
-    }
-}
-
-fn validate_command(payload: &SubmitTaskPayload) -> Result<(), SubmitValidationError> {
-    let command = &payload.command;
-    if !command.program.starts_with('/') {
-        return Err(SubmitValidationError::ProgramNotAbsolute);
-    }
-    if !command.working_directory.starts_with('/') {
-        return Err(SubmitValidationError::WorkingDirectoryNotAbsolute);
-    }
-    reject_nul("command.program", &command.program)?;
-    reject_nul("command.workingDirectory", &command.working_directory)?;
-    for argument in &command.args {
-        reject_nul("command.args", argument)?;
-    }
-    for (key, value) in &command.environment {
-        if key.is_empty() || key.contains('=') {
-            return Err(SubmitValidationError::InvalidEnvironmentKey);
-        }
-        reject_nul("command.environment key", key)?;
-        reject_nul("command.environment value", value)?;
-    }
-    Ok(())
-}
-
-fn reject_nul(field: &'static str, value: &str) -> Result<(), SubmitValidationError> {
-    if value.as_bytes().contains(&0) {
-        Err(SubmitValidationError::NulByte { field })
-    } else {
-        Ok(())
     }
 }
 
@@ -1156,6 +815,8 @@ mod tests {
     use tokio::sync::{Barrier, Notify};
     use tokio::time::{Duration as TokioDuration, timeout};
 
+    #[cfg(target_os = "linux")]
+    use crate::adapters::task_service::TaskService as SubmitCoordinator;
     #[cfg(target_os = "linux")]
     use crate::cleanup_fault::{CleanupFaultMode, CleanupFaultPoint, CleanupFaults};
     #[cfg(target_os = "linux")]
@@ -1463,7 +1124,8 @@ mod tests {
 
         let (_, validated) = ValidatedSubmit::try_from_request(request).unwrap();
 
-        assert_eq!(validated.payload(), &expected);
+        let expected = ValidatedSubmit::try_from_payload(expected).unwrap();
+        assert_eq!(validated.identity(), expected.identity());
     }
 
     #[test]
@@ -1688,7 +1350,7 @@ mod tests {
         let capacity = task_capacity(1);
         let executor_starts = Arc::new(AtomicUsize::new(0));
         let first_starts = Arc::clone(&executor_starts);
-        let expected = SubmitFailure::new(ErrorCode::InternalError, "runner start failed");
+        let expected = SubmitFailure::new(UseCaseErrorCode::InternalError, "runner start failed");
         let first = coordinate_submit(
             registry.clone(),
             Arc::clone(&capacity),
@@ -1839,7 +1501,7 @@ mod tests {
         assert!(matches!(
             outcome.observation,
             SubmitObservation::Failed(SubmitFailure {
-                code: ErrorCode::InternalError,
+                code: UseCaseErrorCode::InternalError,
                 ..
             })
         ));
@@ -2002,7 +1664,7 @@ mod tests {
         assert_eq!(
             rejected.observation,
             SubmitObservation::Failed(SubmitFailure::new(
-                ErrorCode::CapacityExhausted,
+                UseCaseErrorCode::CapacityExhausted,
                 CAPACITY_EXHAUSTED_MESSAGE,
             ))
         );
@@ -2137,7 +1799,7 @@ mod tests {
         assert!(matches!(
             rejected.observation,
             SubmitObservation::Failed(SubmitFailure {
-                code: ErrorCode::CapacityExhausted,
+                code: UseCaseErrorCode::CapacityExhausted,
                 ..
             })
         ));
@@ -2198,7 +1860,7 @@ mod tests {
                 running_sender.send(verified_running(&config)).unwrap();
                 first_fail.notified().await;
                 Err(retained_failure(SubmitFailure::new(
-                    ErrorCode::InternalError,
+                    UseCaseErrorCode::InternalError,
                     "cleanup uncertain",
                 )))
             },
@@ -2240,7 +1902,7 @@ mod tests {
         assert_eq!(
             second.observation,
             SubmitObservation::Failed(SubmitFailure::new(
-                ErrorCode::CapacityExhausted,
+                UseCaseErrorCode::CapacityExhausted,
                 CAPACITY_EXHAUSTED_MESSAGE,
             ))
         );
@@ -2301,7 +1963,7 @@ mod tests {
         assert!(matches!(
             outcome.observation,
             SubmitObservation::Failed(SubmitFailure {
-                code: ErrorCode::EnvironmentUnavailable,
+                code: UseCaseErrorCode::EnvironmentUnavailable,
                 ..
             })
         ));
@@ -2337,7 +1999,7 @@ mod tests {
                 running_sender.send(verified_running(&config)).unwrap();
                 fail_owner.notified().await;
                 Err(retained_failure(SubmitFailure::new(
-                    ErrorCode::InternalError,
+                    UseCaseErrorCode::InternalError,
                     "cleanup uncertain",
                 )))
             },
@@ -2430,7 +2092,7 @@ mod tests {
         let capacity = task_capacity(1);
         let fail_stop = fail_stop_runtime();
         let validated = ValidatedSubmit::try_from_payload(payload()).unwrap();
-        let mut applied_limits = validated.payload().limits.clone();
+        let mut applied_limits = crate::protocol_mapper::resource_limits(validated.budget());
         applied_limits.memory_max_bytes += 1;
         let release = Arc::new(Notify::new());
         let release_owner = Arc::clone(&release);
@@ -2693,7 +2355,7 @@ mod tests {
         assert_eq!(
             capacity_rejected.observation,
             SubmitObservation::Failed(SubmitFailure::new(
-                ErrorCode::CapacityExhausted,
+                UseCaseErrorCode::CapacityExhausted,
                 CAPACITY_EXHAUSTED_MESSAGE,
             ))
         );
@@ -2930,7 +2592,7 @@ mod tests {
         assert!(matches!(
             outcome.observation,
             SubmitObservation::Failed(SubmitFailure {
-                code: ErrorCode::InternalError,
+                code: UseCaseErrorCode::InternalError,
                 ..
             })
         ));
@@ -3090,7 +2752,7 @@ mod tests {
         assert!(matches!(
             rejected.observation,
             SubmitObservation::Failed(SubmitFailure {
-                code: ErrorCode::EnvironmentUnavailable,
+                code: UseCaseErrorCode::EnvironmentUnavailable,
                 ..
             })
         ));
@@ -3197,7 +2859,7 @@ mod tests {
             assert!(matches!(
                 outcome.observation,
                 SubmitObservation::Failed(SubmitFailure {
-                    code: ErrorCode::InternalError,
+                    code: UseCaseErrorCode::InternalError,
                     ..
                 })
             ));
@@ -3339,7 +3001,7 @@ mod tests {
             assert!(matches!(
                 rejected.observation,
                 SubmitObservation::Failed(SubmitFailure {
-                    code: ErrorCode::EnvironmentUnavailable,
+                    code: UseCaseErrorCode::EnvironmentUnavailable,
                     ..
                 })
             ));

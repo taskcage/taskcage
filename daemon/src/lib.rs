@@ -15,7 +15,6 @@ pub mod bundle;
     not(any(target_os = "linux", test)),
     allow(dead_code, reason = "protocol task 취소는 Linux에서만 제공됩니다")
 )]
-mod cancellation;
 pub mod capability;
 mod capacity;
 #[cfg(target_os = "linux")]
@@ -108,9 +107,9 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use adapters::linux_executor::{ExecutionConfig, execute};
 #[cfg(target_os = "linux")]
-use application::task::{TaskStartTime, TaskStartTimeSource};
+use application::task::cancellation::cancellation_channel;
 #[cfg(target_os = "linux")]
-use cancellation::cancellation_channel;
+use application::task::{TaskStartTime, TaskStartTimeSource};
 #[cfg(target_os = "linux")]
 use cgroup::CgroupManager;
 use cgroup::{CgroupError, CgroupLimits, JobStats};

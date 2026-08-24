@@ -13,11 +13,9 @@ use taskcage_core::task::{
 };
 
 #[cfg(target_os = "linux")]
-use crate::application::task::SubmitCoordinator;
+use crate::adapters::task_service::{TaskRegistrySettings, TaskService};
 #[cfg(test)]
 use crate::application::task::SubmitMetadata;
-#[cfg(target_os = "linux")]
-use crate::application::task::TaskRegistrySettings;
 #[cfg(test)]
 use crate::application::task::TaskStartTime;
 use crate::application::task::ports::TaskUseCases as ProtocolTaskCore;
@@ -145,7 +143,7 @@ impl<C> ProtocolHandlers<C> {
 }
 
 #[cfg(target_os = "linux")]
-impl ProtocolHandlers<SubmitCoordinator> {
+impl ProtocolHandlers<TaskService> {
     pub(crate) fn initialize(
         preflight: Result<VerifiedEnvironment, PreflightError>,
         capacity_settings: TaskCapacitySettings,
@@ -161,12 +159,7 @@ impl ProtocolHandlers<SubmitCoordinator> {
             deployment_policy,
             fail_stop,
             move |environment, settings| {
-                SubmitCoordinator::initialize(
-                    environment,
-                    settings,
-                    registry_settings,
-                    core_fail_stop,
-                )
+                TaskService::initialize(environment, settings, registry_settings, core_fail_stop)
             },
         )?;
         handlers.profile = profile.map(Arc::new);
@@ -310,7 +303,9 @@ impl ProtocolHandlers<SubmitCoordinator> {
                 "protocol v2 local profiles are not enabled",
             );
         };
-        let prepared = match runtime.validate(&payload) {
+        let profile_submission = protocol_mapper::profile_submission(&payload);
+        let profile_identity = payload.profile.clone();
+        let prepared = match runtime.validate(&profile_submission) {
             Ok(prepared) => prepared,
             Err(error) => return profile_error_response(request_id, error),
         };
@@ -381,8 +376,8 @@ impl ProtocolHandlers<SubmitCoordinator> {
                 return profile_error_response(request_id, error);
             }
         };
-        let (profile_request, budget, staged_artifacts, plan, output_slot) = staged.into_plan();
-        let profile_task = runtime.new_task(&task_id, &profile_request, budget, output_slot);
+        let (profile_submission, budget, staged_artifacts, plan, output_slot) = staged.into_plan();
+        let profile_task = runtime.new_task(&task_id, &profile_identity, budget, output_slot);
         if let Some(principal) = &remote_principal {
             self.register_remote_task(task_id.clone(), principal.clone());
         }
@@ -390,7 +385,7 @@ impl ProtocolHandlers<SubmitCoordinator> {
         let outcome = core
             .submit_profile_validated(
                 request_id.clone(),
-                ValidatedSubmit::from_profile(profile_request, plan),
+                ValidatedSubmit::from_profile(profile_submission, plan),
                 metadata,
                 finished_time,
                 Arc::clone(&profile_task),
@@ -460,7 +455,7 @@ impl ProtocolHandlers<SubmitCoordinator> {
             }
             SubmitObservation::Failed(failure) => {
                 runtime.release(reservation);
-                if failure.code != ErrorCode::InternalError
+                if protocol_mapper::error_code(failure.code) != ErrorCode::InternalError
                     && let Some(principal) = &remote_principal
                 {
                     self.remove_remote_task_if_owned(&task_id, principal);
@@ -468,7 +463,7 @@ impl ProtocolHandlers<SubmitCoordinator> {
                 error_response_for(
                     PROFILE_PROTOCOL_VERSION,
                     request_id,
-                    failure.code,
+                    protocol_mapper::error_code(failure.code),
                     failure.message,
                 )
             }
@@ -583,7 +578,8 @@ impl ProtocolHandlers<SubmitCoordinator> {
                 "daemon-installed profiles are not enabled",
             ));
         };
-        let prepared = match runtime.validate(payload) {
+        let submission = protocol_mapper::profile_submission(payload);
+        let prepared = match runtime.validate(&submission) {
             Ok(prepared) => prepared,
             Err(error) => return Some(profile_error_response(request_id.to_owned(), error)),
         };
@@ -686,7 +682,7 @@ fn profile_error_response(request_id: String, error: crate::profile::ProfileErro
     error_response_for(
         PROFILE_PROTOCOL_VERSION,
         request_id,
-        error.code(),
+        protocol_mapper::error_code(error.code()),
         error.to_string(),
     )
 }
@@ -723,7 +719,7 @@ fn reservation_client_request_id(reservation: &ProfileReservation) -> &str {
 
 #[cfg(target_os = "linux")]
 async fn existing_profile_response(
-    core: &Arc<SubmitCoordinator>,
+    core: &Arc<TaskService>,
     runtime: &LocalProfileRuntime,
     request_id: String,
     task: Arc<ProfileTaskRecord>,
@@ -808,7 +804,7 @@ where
             return RequestHandling::Unhandled(request);
         }
         let request_id = request.request_id().to_owned();
-        let (validated_request_id, validated) = match ValidatedSubmit::try_from_request(request) {
+        let (validated_request_id, validated) = match protocol_mapper::validated_submit(request) {
             Ok(validated) => validated,
             Err(error) => {
                 return RequestHandling::Handled(submit_validation_error(request_id, error));
@@ -998,7 +994,11 @@ fn submit_error(request_id: String, error: SubmitError) -> Response {
 }
 
 fn submit_failure_response(request_id: String, failure: SubmitFailure) -> Response {
-    error_response(request_id, failure.code, failure.message)
+    error_response(
+        request_id,
+        protocol_mapper::error_code(failure.code),
+        failure.message,
+    )
 }
 
 fn registry_error_response(request_id: String, error: RegistryError) -> Response {
@@ -1007,7 +1007,10 @@ fn registry_error_response(request_id: String, error: RegistryError) -> Response
 }
 
 fn registry_error_code(error: &RegistryError) -> ErrorCode {
-    error.error_code().unwrap_or(ErrorCode::InternalError)
+    error
+        .error_code()
+        .map(protocol_mapper::error_code)
+        .unwrap_or(ErrorCode::InternalError)
 }
 
 fn error_response(request_id: String, code: ErrorCode, message: impl Into<String>) -> Response {
@@ -1496,7 +1499,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     async fn wait_for_profile_result(
-        handlers: &ProtocolHandlers<SubmitCoordinator>,
+        handlers: &ProtocolHandlers<TaskService>,
         task_id: &str,
     ) -> crate::protocol::ProfileTaskPayload {
         timeout(TokioDuration::from_secs(10), async {
@@ -1861,7 +1864,7 @@ mod tests {
                 task_id: TASK_ID.to_owned(),
                 effective_limits: None,
                 observation: SubmitObservation::Failed(SubmitFailure::new(
-                    ErrorCode::CapacityExhausted,
+                    crate::application::UseCaseErrorCode::CapacityExhausted,
                     "all task execution slots are in use",
                 )),
             })),
@@ -2947,7 +2950,7 @@ mod tests {
             DeploymentResourcePolicy::for_test(),
             Arc::clone(&fail_stop),
             move |environment, settings| {
-                SubmitCoordinator::initialize_with_cgroup_create_faults(
+                TaskService::initialize_with_cgroup_create_faults(
                     environment,
                     settings,
                     TaskRegistrySettings::new(16).unwrap(),

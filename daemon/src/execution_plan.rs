@@ -12,12 +12,69 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::File;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use crate::protocol::CommandSpec;
 use crate::resource_budget::ResourceBudget;
-pub(crate) use taskcage_core::{
-    ExecutionCommand as ResolvedCommand, ExecutionExecutable as ResolvedExecutable,
-};
+
+/// Inbound mapper가 검증한 shell-free Raw Command다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RawCommand {
+    pub(crate) program: String,
+    pub(crate) arguments: Vec<String>,
+    pub(crate) working_directory: String,
+    pub(crate) environment: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+/// shell이나 PATH 해석 없이 Linux 실행 adapter에 전달할 내부 명령이다.
+pub(crate) struct ResolvedCommand {
+    executable: ResolvedExecutable,
+    arguments: Vec<OsString>,
+    working_directory: PathBuf,
+    environment: BTreeMap<OsString, OsString>,
+}
+
+#[derive(Debug, Clone)]
+/// 검증된 실행 파일을 Linux adapter가 여는 방식을 표현한다.
+pub(crate) enum ResolvedExecutable {
+    Path(OsString),
+    Pinned {
+        descriptor: Arc<File>,
+        argv0: OsString,
+    },
+}
+
+impl ResolvedCommand {
+    fn new(
+        executable: ResolvedExecutable,
+        arguments: Vec<OsString>,
+        working_directory: PathBuf,
+        environment: BTreeMap<OsString, OsString>,
+    ) -> Self {
+        Self {
+            executable,
+            arguments,
+            working_directory,
+            environment,
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ResolvedExecutable,
+        Vec<OsString>,
+        PathBuf,
+        BTreeMap<OsString, OsString>,
+    ) {
+        (
+            self.executable,
+            self.arguments,
+            self.working_directory,
+            self.environment,
+        )
+    }
+}
 
 #[derive(Debug, Clone)]
 /// 실행 출처와 무관하게 Runner가 소비하는 내부 실행 계약이다.
@@ -28,7 +85,7 @@ pub(crate) struct ResolvedExecutionPlan {
 
 impl ResolvedExecutionPlan {
     /// Protocol v1 검증을 통과한 Raw Command를 내부 실행 계약으로 고정한다.
-    pub(crate) fn from_validated_raw(command: &CommandSpec, budget: ResourceBudget) -> Self {
+    pub(crate) fn from_validated_raw(command: &RawCommand, budget: ResourceBudget) -> Self {
         Self {
             command: resolved_command_from_validated_raw(command),
             budget,
@@ -47,7 +104,7 @@ impl ResolvedExecutionPlan {
         Self {
             command: ResolvedCommand::new(
                 ResolvedExecutable::Pinned {
-                    descriptor: std::sync::Arc::new(entrypoint),
+                    descriptor: Arc::new(entrypoint),
                     argv0,
                 },
                 arguments,
@@ -67,7 +124,7 @@ impl ResolvedExecutionPlan {
     }
 }
 
-fn resolved_command_from_validated_raw(command: &CommandSpec) -> ResolvedCommand {
+fn resolved_command_from_validated_raw(command: &RawCommand) -> ResolvedCommand {
     let environment = command
         .environment
         .iter()
@@ -76,7 +133,7 @@ fn resolved_command_from_validated_raw(command: &CommandSpec) -> ResolvedCommand
 
     ResolvedCommand::new(
         ResolvedExecutable::Path(OsString::from(&command.program)),
-        command.args.iter().map(OsString::from).collect(),
+        command.arguments.iter().map(OsString::from).collect(),
         PathBuf::from(&command.working_directory),
         environment,
     )
@@ -109,9 +166,9 @@ mod tests {
 
     #[test]
     fn raw_command_preserves_exact_argv_tokens_without_shell_interpretation() {
-        let command = CommandSpec {
+        let command = RawCommand {
             program: "/opt/task cage/bin/tool".to_owned(),
-            args: vec![
+            arguments: vec![
                 "value with spaces".to_owned(),
                 "$HOME".to_owned(),
                 "; touch /tmp/must-not-exist".to_owned(),
@@ -151,9 +208,9 @@ mod tests {
             ("LANG".to_owned(), "C.UTF-8".to_owned()),
             ("TOKEN".to_owned(), "value with spaces;$HOME".to_owned()),
         ]);
-        let command = CommandSpec {
+        let command = RawCommand {
             program: "/usr/bin/true".to_owned(),
-            args: Vec::new(),
+            arguments: Vec::new(),
             working_directory: "/srv/task cage/job 42".to_owned(),
             environment: explicit_environment,
         };
@@ -179,9 +236,9 @@ mod tests {
     #[test]
     fn raw_plan_preserves_the_verified_resource_budget() {
         let expected = budget();
-        let command = CommandSpec {
+        let command = RawCommand {
             program: "/usr/bin/true".to_owned(),
-            args: Vec::new(),
+            arguments: Vec::new(),
             working_directory: "/".to_owned(),
             environment: BTreeMap::new(),
         };

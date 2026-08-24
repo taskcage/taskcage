@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::signals::{reload_remote_credentials, shutdown_signal, wait_for_listener_shutdown};
-use crate::application::task::SubmitCoordinator;
+use crate::adapters::task_service::TaskService;
 use crate::handlers::ProtocolHandlers;
 use crate::remote_backend::LocalProfileRemoteBackend;
 use crate::remote_config::RemoteDaemonConfig;
@@ -20,7 +20,7 @@ pub(super) async fn serve(
     has_local_profile: bool,
     remote: Option<RemoteDaemonConfig>,
     metrics_listen: Option<SocketAddr>,
-    handlers: Arc<ProtocolHandlers<SubmitCoordinator>>,
+    handlers: Arc<ProtocolHandlers<TaskService>>,
 ) -> Result<()> {
     if remote.is_some() && !has_local_profile {
         return Err(Error::InvalidArgument(
@@ -88,7 +88,7 @@ async fn serve_local_and_remote(
     startup: StartupOwnership,
     cleanup_timeout: Duration,
     max_local_connections: NonZeroUsize,
-    handlers: Arc<ProtocolHandlers<SubmitCoordinator>>,
+    handlers: Arc<ProtocolHandlers<TaskService>>,
     remote: Arc<RemoteDaemonConfig>,
     credentials: remote_auth::CredentialStore,
     dispatcher: Arc<RemoteDispatcher<LocalProfileRemoteBackend>>,

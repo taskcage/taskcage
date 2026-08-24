@@ -4,11 +4,11 @@ use std::future::pending;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::application::task::cancellation::CancellationRuntime;
 use crate::application::task::ports::{
     CompletedTask, FinishedTime, RunnerPermit, TaskExecutionPort, TaskRunConfig, TaskRunFailure,
     TaskRunFailureKind, TaskStartTime, TaskStartTimeSource, VerifiedRunningTask,
 };
-use crate::cancellation::CancellationRuntime;
 use crate::cgroup::{CgroupError, CgroupManager, JobCgroup, JobStats, VerifiedCgroupLimits};
 use crate::deadline::MonotonicDeadline;
 use crate::execution_plan::{ResolvedCommand, ResolvedExecutable};

@@ -1,9 +1,9 @@
 package org.taskcage.sdk;
 
-import org.taskcage.sdk.internal.client.DefaultTaskCageClient;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.ServiceLoader;
 import java.util.UUID;
 import java.util.concurrent.TimeoutException;
 
@@ -36,7 +36,18 @@ public interface TaskCageClient extends AutoCloseable {
      * Creates a client. The Unix domain socket is opened lazily on the first request.
      */
     static TaskCageClient connect(TaskCageClientConfig config) {
-        return new DefaultTaskCageClient(config);
+        return provider().connect(config);
+    }
+
+    /** Internal implementation provider loaded from the SDK artifact. */
+    interface Provider {
+        TaskCageClient connect(TaskCageClientConfig config);
+    }
+
+    private static Provider provider() {
+        return ServiceLoader.load(Provider.class)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("TaskCageClient provider is unavailable"));
     }
 
     /** Returns the daemon capabilities after a request-response round trip. */

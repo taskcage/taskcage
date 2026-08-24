@@ -19,10 +19,11 @@ use thiserror::Error;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::task::JoinSet;
 
-use crate::application::task::SubmitContext;
 #[cfg(test)]
-use crate::application::task::TaskRegistrySettings;
-use crate::application::task::{SubmitCoordinator, SubmitMetadata, TaskStartTime};
+use crate::adapters::task_service::TaskRegistrySettings;
+use crate::adapters::task_service::TaskService;
+use crate::application::task::SubmitContext;
+use crate::application::task::{SubmitMetadata, TaskStartTime};
 use crate::audit;
 use crate::deadline::MonotonicDeadline;
 use crate::fail_stop::FailStopCoordinator;
@@ -278,7 +279,7 @@ pub(crate) async fn serve_protocol_until<S>(
     startup: StartupOwnership,
     cleanup_timeout: Duration,
     max_concurrent_connections: NonZeroUsize,
-    handlers: Arc<ProtocolHandlers<SubmitCoordinator>>,
+    handlers: Arc<ProtocolHandlers<TaskService>>,
     shutdown: S,
 ) -> Result<(), ServerError>
 where

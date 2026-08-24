@@ -6,11 +6,9 @@
 
 pub mod artifact;
 pub mod capsule;
-mod execution;
 pub mod policy;
 pub mod task;
 
 pub mod output;
 
 pub use capsule::{CapsuleIdentity, IdentityError, is_valid_capsule_name};
-pub use execution::{ExecutionCommand, ExecutionExecutable};
