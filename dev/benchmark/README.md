@@ -58,6 +58,9 @@ python3 dev/benchmark/lab.py run \
   --concurrency 1 --warmup 1 --iterations 3
 ```
 
+기본적으로 두 비교 Worker container에 `CPU 1.0`을 적용한다. 이는 Capsule의 기본 `CPU 1` 예산과
+동일한 조건에서 비교하기 위한 설정이며, 필요하면 `--comparator-cpus`로 변경할 수 있다.
+
 기본값은 `normal`, `timeout_child`, `memory_limit`을 각각 `processbuilder`, `taskcage`로 한 번씩 측정하며
 warm-up은 수행하지 않는다(`warmup=0`, `iterations=1`). 실행 중 표시되는
 `http://127.0.0.1:8765`에서 현재 단계, 종료 원인별 TaskCage metric과 컨테이너 자원 그래프를 확인할 수 있다.

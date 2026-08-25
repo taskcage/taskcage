@@ -170,6 +170,7 @@ def render(result: dict[str, Any], destination: pathlib.Path) -> None:
 
 def execute(args: argparse.Namespace) -> None:
     if not shutil.which("docker"): raise SystemExit("docker is required")
+    if args.comparator_cpus <= 0: raise SystemExit("--comparator-cpus must be positive")
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     root = ROOT / "results" / "runs" / run_id; root.mkdir(parents=True)
     shutil.copy2(ROOT / "dashboard.html", root / "dashboard.html")
@@ -178,10 +179,10 @@ def execute(args: argparse.Namespace) -> None:
     if input_file and not input_file.is_file():
         raise SystemExit(f"--input must point to a regular file: {input_file}")
     input_manifest = None if input_file is None else {"name": input_file.name, "bytes": input_file.stat().st_size}
-    write_json(root / "manifest.json", {"runId": run_id, "environment": {"kind": "local-docker", "hostArchitecture": os.uname().machine}, "comparators": ["processbuilder", "taskcage"], "scenarios": args.scenarios, "normalWorkload": args.normal_workload, "concurrency": args.concurrency, "warmup": args.warmup, "iterations": args.iterations, "input": input_manifest, "measurementBoundary": "worker submission through terminal result and normal output validation; excludes input preparation, build, service start and warm-up"})
+    write_json(root / "manifest.json", {"runId": run_id, "environment": {"kind": "local-docker", "hostArchitecture": os.uname().machine}, "comparators": ["processbuilder", "taskcage"], "scenarios": args.scenarios, "normalWorkload": args.normal_workload, "comparatorCpuLimit": args.comparator_cpus, "concurrency": args.concurrency, "warmup": args.warmup, "iterations": args.iterations, "input": input_manifest, "measurementBoundary": "worker submission through terminal result and normal output validation; excludes input preparation, build, service start and warm-up"})
     dashboard = start_dashboard(root, args.port)
     print(f"Live dashboard: http://127.0.0.1:{args.port}/dashboard.html")
-    env = os.environ | {"BENCHMARK_MAX_CONCURRENT_TASKS": str(args.concurrency)}
+    env = os.environ | {"BENCHMARK_MAX_CONCURRENT_TASKS": str(args.concurrency), "BENCHMARK_WORKER_CPUS": str(args.comparator_cpus)}
     if input_file:
         env["BENCHMARK_INPUT_HOST_PATH"] = str(input_file)
     executions: list[dict[str, Any]] = []
@@ -239,7 +240,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     run_parser = sub.add_parser("run")
     run_parser.add_argument("--concurrency", type=int, default=2); run_parser.add_argument("--warmup", type=int, default=0); run_parser.add_argument("--iterations", type=int, default=1)
-    run_parser.add_argument("--scenarios", nargs="+", default=["normal", "timeout_child", "memory_limit"]); run_parser.add_argument("--input", type=pathlib.Path, help="optional host media file for normal Capsule and ProcessBuilder runs"); run_parser.add_argument("--normal-workload", choices=["audio_to_wav", "video_transcode"], default="audio_to_wav"); run_parser.add_argument("--port", type=int, default=8765)
+    run_parser.add_argument("--scenarios", nargs="+", default=["normal", "timeout_child", "memory_limit"]); run_parser.add_argument("--input", type=pathlib.Path, help="optional host media file for normal Capsule and ProcessBuilder runs"); run_parser.add_argument("--normal-workload", choices=["audio_to_wav", "video_transcode"], default="audio_to_wav"); run_parser.add_argument("--comparator-cpus", type=float, default=1.0, help="CPU limit applied to both benchmark worker containers; default matches the Capsule CPU budget"); run_parser.add_argument("--port", type=int, default=8765)
     run_parser.add_argument("--no-keep-dashboard", action="store_false", dest="keep_dashboard",
                             help="close the dashboard server immediately after writing the report")
     args = parser.parse_args()
