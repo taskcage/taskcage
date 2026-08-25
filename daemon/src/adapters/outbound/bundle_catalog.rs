@@ -403,11 +403,6 @@ impl BundleCatalog {
     where
         F: FnMut(IdentityActivationPoint) -> BundleResult<()>,
     {
-        if !source.is_absolute() {
-            return Err(BundleError::Archive(
-                "source는 absolute path여야 합니다".to_owned(),
-            ));
-        }
         self.import_with_policy(source, keys, false, identity_hook)
     }
 
