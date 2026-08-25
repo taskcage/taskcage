@@ -42,8 +42,6 @@ public final class ExecutionWorkerBenchmark {
     private static final Path FFMPEG = Path.of("/usr/bin/ffmpeg");
     private static final Path GHOST_TREE = Path.of("/usr/local/libexec/taskcage/ghost-tree");
     private static final Path MEMORY_HOG = Path.of("/usr/local/libexec/taskcage/memory-hog");
-    private static final String DOCKER = "docker";
-    private static final String DOCKER_TASK_METRICS = "TASKCAGE_DOCKER_TASK_METRICS";
     private static final CapsuleIdentity FFMPEG_CAPSULE =
             new CapsuleIdentity("ffmpeg-audio-to-wav", "1.0.0");
     private static final CapsuleIdentity FFMPEG_VIDEO_CAPSULE =
@@ -65,18 +63,23 @@ public final class ExecutionWorkerBenchmark {
         int measuredBatches = positiveInt(System.getenv().getOrDefault("BENCHMARK_ITERATIONS", "1"));
 
         List<BatchMetric> measured = new ArrayList<>();
-        for (int batch = 0; batch < warmupBatches + measuredBatches; batch++) {
-            Path workDirectory = WORK_ROOT.resolve(mode.jsonName + "-" + scenario.jsonName + "-" + UUID.randomUUID());
-            Files.createDirectories(workDirectory);
-            InputArtifact source = createInputArtifact();
-            try {
-                long startedNanos = System.nanoTime();
-                List<TaskMetric> tasks = run(
-                        mode, scenario, batch, concurrency, workDirectory, source, normalWorkload);
-                if (batch >= warmupBatches) measured.add(new BatchMetric(elapsedMillis(startedNanos), tasks));
-            } finally {
-                source.delete();
+        List<TaskCageSession> taskCageSessions = taskCageSessions(mode, concurrency);
+        try {
+            for (int batch = 0; batch < warmupBatches + measuredBatches; batch++) {
+                Path workDirectory = WORK_ROOT.resolve(mode.jsonName + "-" + scenario.jsonName + "-" + UUID.randomUUID());
+                Files.createDirectories(workDirectory);
+                InputArtifact source = createInputArtifact();
+                try {
+                    long startedNanos = System.nanoTime();
+                    List<TaskMetric> tasks = run(
+                            mode, scenario, batch, concurrency, workDirectory, source, normalWorkload, taskCageSessions);
+                    if (batch >= warmupBatches) measured.add(new BatchMetric(elapsedMillis(startedNanos), tasks));
+                } finally {
+                    source.delete();
+                }
             }
+        } finally {
+            taskCageSessions.forEach(TaskCageSession::close);
         }
         List<TaskMetric> measuredTasks = measured.stream().flatMap(batch -> batch.tasks.stream()).toList();
         List<String> validationErrors = validate(mode, scenario, measuredTasks);
@@ -88,7 +91,8 @@ public final class ExecutionWorkerBenchmark {
     }
 
     private static List<TaskMetric> run(Mode mode, Scenario scenario, int batch, int concurrency, Path workDirectory,
-                                        InputArtifact source, NormalWorkload normalWorkload)
+                                        InputArtifact source, NormalWorkload normalWorkload,
+                                        List<TaskCageSession> taskCageSessions)
             throws InterruptedException, ExecutionException {
         ExecutorService pool = Executors.newFixedThreadPool(concurrency);
         try {
@@ -98,10 +102,9 @@ public final class ExecutionWorkerBenchmark {
                 Callable<TaskMetric> task = switch (mode) {
                     case PROCESS_BUILDER -> () -> runProcessBuilder(
                             scenario, batch, taskIndex, concurrency, workDirectory, source, normalWorkload);
-                    case DOCKER_PER_TASK -> () -> runDockerPerTask(
-                            scenario, batch, taskIndex, concurrency, workDirectory, source, normalWorkload);
                     case TASK_CAGE -> () -> runTaskCage(
-                            scenario, batch, taskIndex, concurrency, workDirectory, source, normalWorkload);
+                            scenario, batch, taskIndex, concurrency, workDirectory, source, normalWorkload,
+                            taskCageSessions.get(taskIndex));
                 };
                 futures.add(pool.submit(task));
             }
@@ -170,170 +173,26 @@ public final class ExecutionWorkerBenchmark {
 
     private static TaskMetric runTaskCage(Scenario scenario, int batch, int index, int concurrency,
                                           Path workDirectory, InputArtifact source,
-                                          NormalWorkload normalWorkload) throws Exception {
+                                          NormalWorkload normalWorkload,
+                                          TaskCageSession session) throws Exception {
         Scenario taskScenario = taskScenario(scenario, batch, index, concurrency);
         long startedNanos = System.nanoTime();
-        try (TaskCageClient client = TaskCageClient.connect(TaskCageClientConfig.builder()
-                .socketPath(Path.of(requiredEnv("TASKCAGE_SOCKET")))
-                .connectTimeout(Duration.ofSeconds(2))
-                .requestTimeout(Duration.ofSeconds(5))
-                .build());
-             CapsuleRunner runner = CapsuleRunner.external(client)) {
-            CapsuleExecutionResult finished = runner.execute(
-                    UUID.randomUUID(), requestFor(taskScenario, source.reference(), normalWorkload),
-                    normalWorkload.waitTimeout());
-            ExecutionResult result = finished.execution();
-            boolean outputVerified = taskScenario != Scenario.NORMAL
-                    || verifiedCapsuleOutput(finished, normalWorkload);
-            return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName, result.terminationReason().name(),
-                    result.usage().cpuTimeMicros(), result.usage().memoryPeakBytes(), 0, true,
-                    outputVerified);
-        }
+        CapsuleExecutionResult finished = session.runner.execute(
+                UUID.randomUUID(), requestFor(taskScenario, source.reference(), normalWorkload),
+                normalWorkload.waitTimeout());
+        ExecutionResult result = finished.execution();
+        boolean outputVerified = taskScenario != Scenario.NORMAL
+                || verifiedCapsuleOutput(finished, normalWorkload);
+        return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName, result.terminationReason().name(),
+                result.usage().cpuTimeMicros(), result.usage().memoryPeakBytes(), 0, true,
+                outputVerified);
     }
 
-    private static TaskMetric runDockerPerTask(Scenario scenario, int batch, int index, int concurrency,
-                                               Path workDirectory, InputArtifact source,
-                                               NormalWorkload normalWorkload) throws Exception {
-        Scenario taskScenario = taskScenario(scenario, batch, index, concurrency);
-        Command taskCommand = commandFor(taskScenario, index, workDirectory, source.file(), normalWorkload);
-        String containerName = "taskcage-benchmark-" + UUID.randomUUID();
-        long startedNanos = System.nanoTime();
-
-        if (taskScenario == Scenario.TIMEOUT_CHILD) {
-            Process process = startDocker(dockerRun(containerName, "128m", 32, GHOST_TREE.toString(),
-                    taskCommand.arguments));
-            try {
-                awaitReady(taskCommand.readyPath, Duration.ofSeconds(3));
-                runDocker(List.of(DOCKER, "stop", "--time", "0", containerName));
-                if (!process.waitFor(10, TimeUnit.SECONDS)) {
-                    process.destroyForcibly();
-                    throw new IllegalStateException("docker timeout task did not stop");
-                }
-                boolean removed = dockerContainerAbsent(containerName);
-                return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName,
-                        "TIMED_OUT_CONTAINER", null, null, 0, removed, true);
-            } finally {
-                process.destroyForcibly();
-                removeDockerContainer(containerName);
-            }
-        }
-
-        if (taskScenario == Scenario.MEMORY_LIMIT) {
-            String containerId = runDocker(dockerRunDetached(containerName, "16m", 8, MEMORY_HOG.toString(),
-                    taskCommand.arguments)).trim();
-            try {
-                runDocker(List.of(DOCKER, "wait", containerId));
-                boolean oomKilled = Boolean.parseBoolean(runDocker(List.of(
-                        DOCKER, "inspect", "--format", "{{.State.OOMKilled}}", containerId)).trim());
-                removeDockerContainer(containerName);
-                return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName,
-                        oomKilled ? "MEMORY_LIMIT_EXCEEDED" : "EXITED_NON_ZERO", null, null,
-                        0, dockerContainerAbsent(containerName), true);
-            } finally {
-                removeDockerContainer(containerName);
-            }
-        }
-
-        Process process = startDocker(dockerRun(containerName, "1024m", 32,
-                "/usr/local/bin/taskcage-docker-task-exec", dockerCommand(taskCommand)));
-        String output = readProcessOutput(process, normalWorkload.waitTimeout());
-        DockerTaskMetrics metrics = parseDockerTaskMetrics(output);
-        boolean removed = dockerContainerAbsent(containerName);
-        return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName,
-                metrics.exitCode == 0 ? "EXITED" : "EXITED_NON_ZERO", metrics.cpuTimeMicros,
-                metrics.memoryPeakBytes, 0, removed, verifiedOutput(taskCommand));
-    }
-
-    private static List<String> dockerRun(String name, String memory, int pids, String entrypoint,
-                                          List<String> arguments) {
-        List<String> command = dockerRunBase(name, memory, pids);
-        command.add("--rm");
-        command.add("--entrypoint");
-        command.add(entrypoint);
-        command.add(requiredEnv("BENCHMARK_TASK_IMAGE"));
-        command.addAll(arguments);
-        return command;
-    }
-
-    private static List<String> dockerRunDetached(String name, String memory, int pids, String entrypoint,
-                                                  List<String> arguments) {
-        List<String> command = dockerRunBase(name, memory, pids);
-        command.add("--detach");
-        command.add("--entrypoint");
-        command.add(entrypoint);
-        command.add(requiredEnv("BENCHMARK_TASK_IMAGE"));
-        command.addAll(arguments);
-        return command;
-    }
-
-    private static List<String> dockerRunBase(String name, String memory, int pids) {
-        return new ArrayList<>(List.of(DOCKER, "run", "--name", name, "--cpus", "1.0",
-                "--memory", memory, "--pids-limit", Integer.toString(pids),
-                "--workdir", "/taskcage-work", "--volume",
-                requiredEnv("BENCHMARK_WORK_VOLUME") + ":/taskcage-work"));
-    }
-
-    private static List<String> dockerCommand(Command command) {
-        List<String> arguments = new ArrayList<>();
-        arguments.add(command.program.toString());
-        arguments.addAll(command.arguments);
-        return arguments;
-    }
-
-    private static Process startDocker(List<String> arguments) throws IOException {
-        return new ProcessBuilder(arguments).redirectErrorStream(true).start();
-    }
-
-    private static String runDocker(List<String> arguments) throws Exception {
-        Process process = startDocker(arguments);
-        return readProcessOutput(process, Duration.ofSeconds(15));
-    }
-
-    private static String readProcessOutput(Process process, Duration timeout) throws Exception {
-        if (!process.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
-            process.destroyForcibly();
-            throw new IllegalStateException("docker command did not complete within " + timeout);
-        }
-        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        if (process.exitValue() != 0) {
-            throw new IllegalStateException("docker command failed (" + process.exitValue() + "): " + output);
-        }
-        return output;
-    }
-
-    private static DockerTaskMetrics parseDockerTaskMetrics(String output) {
-        for (String line : output.lines().toList()) {
-            String[] values = line.trim().split("\\s+");
-            if (values.length == 4 && values[0].equals(DOCKER_TASK_METRICS)) {
-                try {
-                    return new DockerTaskMetrics(Long.parseLong(values[1]), Long.parseLong(values[2]),
-                            Integer.parseInt(values[3]));
-                } catch (NumberFormatException exception) {
-                    throw new IllegalStateException("invalid Docker task metrics: " + line, exception);
-                }
-            }
-        }
-        throw new IllegalStateException("Docker task metrics were not emitted: " + output);
-    }
-
-    private static boolean dockerContainerAbsent(String name) throws Exception {
-        Process process = startDocker(List.of(DOCKER, "container", "inspect", name));
-        if (!process.waitFor(10, TimeUnit.SECONDS)) {
-            process.destroyForcibly();
-            return false;
-        }
-        return process.exitValue() != 0;
-    }
-
-    private static void removeDockerContainer(String name) {
-        try {
-            Process process = startDocker(List.of(DOCKER, "rm", "--force", name));
-            process.waitFor(10, TimeUnit.SECONDS);
-        } catch (IOException ignored) {
-            // Best effort only: the benchmark reports a failed cleanup assertion if it survives.
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
-        }
+    private static List<TaskCageSession> taskCageSessions(Mode mode, int concurrency) {
+        if (mode != Mode.TASK_CAGE) return List.of();
+        List<TaskCageSession> sessions = new ArrayList<>();
+        for (int index = 0; index < concurrency; index++) sessions.add(new TaskCageSession());
+        return sessions;
     }
 
     private static CapsuleRequest requestFor(
@@ -486,6 +345,21 @@ public final class ExecutionWorkerBenchmark {
 
     private static long elapsedMillis(long startedNanos) {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+    }
+
+    private static final class TaskCageSession implements AutoCloseable {
+        private final TaskCageClient client = TaskCageClient.connect(TaskCageClientConfig.builder()
+                .socketPath(Path.of(requiredEnv("TASKCAGE_SOCKET")))
+                .connectTimeout(Duration.ofSeconds(2))
+                .requestTimeout(Duration.ofSeconds(5))
+                .build());
+        private final CapsuleRunner runner = CapsuleRunner.external(client);
+
+        @Override
+        public void close() {
+            runner.close();
+            client.close();
+        }
     }
 
     private static final class ProcessUsageSampler implements AutoCloseable {
@@ -666,7 +540,6 @@ public final class ExecutionWorkerBenchmark {
         if (workload == Scenario.TIMEOUT_CHILD) {
             return switch (mode) {
                 case TASK_CAGE -> "TIMED_OUT";
-                case DOCKER_PER_TASK -> "TIMED_OUT_CONTAINER";
                 case PROCESS_BUILDER -> "TIMED_OUT_ROOT_ONLY";
             };
         }
@@ -736,15 +609,14 @@ public final class ExecutionWorkerBenchmark {
     }
 
     enum Mode {
-        PROCESS_BUILDER("processbuilder"), DOCKER_PER_TASK("docker_per_task"), TASK_CAGE("taskcage");
+        PROCESS_BUILDER("processbuilder"), TASK_CAGE("taskcage");
         private final String jsonName;
         Mode(String jsonName) { this.jsonName = jsonName; }
         static Mode parse(String value) { return switch (value) {
             case "processbuilder" -> PROCESS_BUILDER;
-            case "docker_per_task" -> DOCKER_PER_TASK;
             case "taskcage" -> TASK_CAGE;
             default -> throw new IllegalArgumentException(
-                    "BENCHMARK_MODE must be processbuilder, docker_per_task or taskcage");
+                    "BENCHMARK_MODE must be processbuilder or taskcage");
         }; }
     }
 
@@ -831,7 +703,6 @@ public final class ExecutionWorkerBenchmark {
             this(program, arguments, readyPath, null);
         }
     }
-    private record DockerTaskMetrics(long memoryPeakBytes, long cpuTimeMicros, int exitCode) {}
     private record InputArtifact(Path file, LocalInputArtifact reference) {
         private void delete() throws IOException {
             Files.deleteIfExists(file);

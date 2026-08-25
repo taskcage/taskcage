@@ -40,14 +40,6 @@ def command(
     return subprocess.run(args, cwd=REPO, check=check, text=True, capture_output=capture, env=env)
 
 
-def docker_socket_path() -> str:
-    endpoint = command(
-        ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], capture=True).stdout.strip()
-    if not endpoint.startswith("unix://"):
-        raise SystemExit(f"the benchmark requires a local Unix Docker socket, got: {endpoint}")
-    return endpoint.removeprefix("unix://")
-
-
 def parse_prometheus(text: str) -> dict[str, float]:
     values = {}
     for line in text.splitlines():
@@ -82,7 +74,7 @@ def container_stats(service: str) -> dict[str, Any]:
         return {}
 
 
-def daemon_process_resources() -> dict[str, int]:
+def daemon_process_memory_peak() -> int:
     """Read taskcaged itself; a privileged container root cgroup is too broad to use."""
     try:
         output = command(COMPOSE + [
@@ -90,37 +82,27 @@ def daemon_process_resources() -> dict[str, int]:
             "pid=$(for d in /proc/[0-9]*; do [ \"$(cat \"$d/comm\" 2>/dev/null)\" = taskcaged ] "
             "&& { echo \"${d##*/}\"; break; }; done); "
             "[ -n \"$pid\" ] || exit 1; "
-            "awk '/^VmHWM:/ { print $2 * 1024 }' \"/proc/$pid/status\"; "
-            "awk '{ print ($14 + $15) * 10000 }' \"/proc/$pid/stat\"",
-        ], capture=True).stdout.splitlines()
-        memory_peak = int(output[0].strip())
-        cpu_usage = int(output[1].strip())
-        return {"memoryPeakBytes": memory_peak, "cpuTimeMicros": cpu_usage}
-    except (IndexError, ValueError, subprocess.CalledProcessError):
-        return {"memoryPeakBytes": -1, "cpuTimeMicros": -1}
+            "awk '/^VmHWM:/ { print $2 * 1024 }' \"/proc/$pid/status\"",
+        ], capture=True).stdout.strip()
+        return int(output)
+    except (ValueError, subprocess.CalledProcessError):
+        return -1
 
 
-def pipeline_resources(mode: str, worker: dict[str, Any], daemon: dict[str, int] | None = None) -> dict[str, Any]:
-    """Sum independently bounded components; memory is a component-peak upper bound."""
+def execution_memory_upper_bound(mode: str, worker: dict[str, Any], daemon_memory_peak: int | None = None) -> dict[str, Any]:
+    """Report a conservative full execution footprint from separately isolated components."""
     worker_resources = worker["executorContainer"]
     components = [{"name": "java-worker", "memoryPeakBytes": worker_resources["memoryPeakBytes"],
-                   "cpuTimeMicros": worker_resources["cpuUsageMicros"]}]
-    if mode == "docker_per_task":
+                   }]
+    if mode == "taskcage":
+        components.append({"name": "taskcage-daemon", "memoryPeakBytes": daemon_memory_peak or -1})
         task = worker["taskResources"]
-        components.append({"name": "task-container", "memoryPeakBytes": task["memoryPeakBytes"],
-                           "cpuTimeMicros": task["cpuTimeMicros"]})
-    elif mode == "taskcage":
-        components.append({"name": "taskcage-daemon", **(daemon or {})})
-        task = worker["taskResources"]
-        components.append({"name": "task-cgroup", "memoryPeakBytes": task["memoryPeakBytes"],
-                           "cpuTimeMicros": task["cpuTimeMicros"]})
+        components.append({"name": "task-cgroup", "memoryPeakBytes": task["memoryPeakBytes"]})
 
-    def total(name: str) -> int:
-        values = [component.get(name, -1) for component in components]
-        return sum(values) if all(isinstance(value, int) and value >= 0 for value in values) else -1
+    values = [component["memoryPeakBytes"] for component in components]
+    memory_peak = sum(values) if all(isinstance(value, int) and value >= 0 for value in values) else -1
 
-    return {"memoryPeakBytes": total("memoryPeakBytes"), "cpuTimeMicros": total("cpuTimeMicros"),
-            "components": components}
+    return {"memoryPeakBytes": memory_peak, "components": components}
 
 
 def collect_sample(output: pathlib.Path) -> dict[str, Any]:
@@ -167,23 +149,21 @@ SCENARIO_LABELS = {
 }
 MODE_LABELS = {
     "processbuilder": "ProcessBuilder",
-    "docker_per_task": "Docker per task",
     "taskcage": "TaskCage",
 }
-MODE_COLORS = {"processbuilder": "#64748b", "docker_per_task": "#d97706", "taskcage": "#2563eb"}
+MODE_COLORS = {"processbuilder": "#64748b", "taskcage": "#2563eb"}
 
 
 def metric(execution: dict[str, Any], name: str) -> tuple[float, str]:
     worker = execution["workerResult"]
     if name == "latency":
         return float(worker["tasks"]["latencyMs"]["p50"]), "ms"
-    resources = execution.get("pipelineResources", worker["taskResources"])
+    resources = execution.get("executionMemoryUpperBound", worker["taskResources"])
     container = worker["executorContainer"]
     if name == "memory":
         value = resources["memoryPeakBytes"]
         return float(value if value >= 0 else container["memoryPeakBytes"]) / 1024 / 1024, "MiB"
-    value = resources["cpuTimeMicros"]
-    return float(value if value >= 0 else container["cpuUsageMicros"]) / 1000, "ms"
+    raise ValueError(f"unsupported metric: {name}")
 
 
 def chart(title: str, description: str, executions: list[dict[str, Any]], name: str) -> str:
@@ -230,10 +210,6 @@ def analysis(executions: list[dict[str, Any]]) -> str:
         direct, managed = metric(normal["processbuilder"], "latency")[0], metric(normal["taskcage"], "latency")[0]
         delta = managed - direct
         notes.append(f"정상 변환에서 TaskCage의 p50은 ProcessBuilder 대비 {delta:,.0f} ms ({delta / direct * 100:.1f}%) 차이입니다.")
-    if {"docker_per_task", "taskcage"} <= normal.keys():
-        docker_latency, managed = metric(normal["docker_per_task"], "latency")[0], metric(normal["taskcage"], "latency")[0]
-        delta = managed - docker_latency
-        notes.append(f"정상 변환에서 TaskCage의 p50은 Docker per task 대비 {delta:,.0f} ms ({delta / docker_latency * 100:.1f}%) 차이입니다.")
     timeout = {item["mode"]: item for item in executions if item["scenario"] == "timeout_child"}
     if {"processbuilder", "taskcage"} <= timeout.keys():
         residual = timeout["processbuilder"]["workerResult"]["cleanup"]["residualProcesses"]
@@ -253,7 +229,7 @@ def render(result: dict[str, Any], destination: pathlib.Path) -> None:
     status_class = "passed" if validation["passed"] else "failed"
     destination.write_text(f'''<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TaskCage Benchmark Report</title><style>
 body{{font-family:system-ui,sans-serif;max-width:1100px;margin:40px auto;padding:0 20px;color:#17212b;background:#f8fafc}}.card{{background:#fff;border:1px solid #d8dee4;border-radius:12px;padding:20px;margin:16px 0}}h1{{margin-bottom:4px}}h2{{margin:0 0 6px}}h3{{font-size:14px;margin:20px 0 8px}}.muted{{color:#64748b;margin:0}}.status{{display:inline-block;border-radius:999px;padding:6px 10px;font-weight:700}}.passed{{background:#dcfce7;color:#166534}}.failed{{background:#fee2e2;color:#991b1b}}.bar-row{{display:grid;grid-template-columns:120px 1fr 170px;gap:10px;align-items:center;margin:7px 0;font-size:13px}}.bar-track{{height:16px;background:#e2e8f0;border-radius:999px;overflow:hidden}}.bar-track i{{display:block;height:100%;border-radius:999px}}table{{border-collapse:collapse;width:100%;font-size:14px}}td,th{{border:1px solid #d8dee4;padding:8px;text-align:left}}th{{background:#f4f7fa}}.cleanup-o{{color:#166534;font-weight:800}}.cleanup-x{{color:#b91c1c;font-weight:800}}li{{margin:7px 0}}code{{background:#e2e8f0;padding:2px 4px;border-radius:4px}}@media(max-width:650px){{.bar-row{{grid-template-columns:1fr;gap:4px}}}}
-</style><h1>TaskCage Benchmark Report</h1><p class="muted">실행 ID: {html.escape(result["runId"])} · {html.escape(result["environment"]["kind"])}</p><p><span class="status {status_class}">{status}</span></p>{analysis(executions)}<section class="card"><h2>정상 변환 전체 처리 비용</h2><p class="muted">성능 그래프는 정상 FFmpeg 변환만 사용합니다. 모든 실행기는 Java Worker를 포함합니다. Docker per task는 Worker와 작업 컨테이너, TaskCage는 Worker·taskcaged 프로세스·Task cgroup을 합산합니다. 메모리는 각 구성 요소 peak의 합계이므로 전체 시스템 동시 peak의 보수적 상한입니다.</p></section>{chart("작업 지연시간", "막대는 p50이며 p95를 함께 표기합니다.", normal, "latency")}{chart("구성 요소 peak 메모리 합계", "Java Worker와 실행 구성 요소의 peak memory를 합산합니다.", normal, "memory")}{chart("구성 요소 CPU 시간 합계", "Java Worker와 실행 구성 요소의 CPU 시간을 합산합니다.", normal, "cpu")}{control_table(controls)}<section class="card"><h2>측정 경계</h2><p>정상 작업 지연시간에는 요청 제출부터 terminal result와 출력 검증까지 포함하며, 이미지 build/pull·입력 준비·daemon 시작·warm-up은 제외합니다. 전체 자원값에는 Worker 및 해당 실행 구성 요소의 초기화 비용이 포함됩니다. 실패 시나리오는 성능 비교가 아니라 제어 의미를 검증합니다. 이 보고서는 로컬 Docker 실험 결과이므로 공개 성능 주장은 native Linux 반복 측정으로 재검증해야 합니다.</p></section></html>''', encoding="utf-8")
+</style><h1>TaskCage Benchmark Report</h1><p class="muted">실행 ID: {html.escape(result["runId"])} · {html.escape(result["environment"]["kind"])}</p><p><span class="status {status_class}">{status}</span></p>{analysis(executions)}<section class="card"><h2>정상 변환: Java 호출 기준 비교</h2><p class="muted">성능 그래프는 정상 FFmpeg 변환만 사용합니다. 지연시간은 Java가 요청을 시작한 시점부터 검증된 결과를 받는 시점까지입니다. 메모리는 ProcessBuilder의 Java Worker·프로세스 트리, TaskCage의 Java Worker·taskcaged·Task cgroup을 포함한 구성 요소 peak 합계입니다. 서로 다른 구성 요소의 peak 시점이 다를 수 있으므로, 메모리 값은 전체 실행 footprint의 보수적 상한입니다.</p></section>{chart("작업 지연시간", "막대는 p50이며 p95를 함께 표기합니다.", normal, "latency")}{chart("전체 실행 footprint 메모리 상한", "Java Worker와 실행 구성 요소를 포함합니다.", normal, "memory")}{control_table(controls)}<section class="card"><h2>측정 경계</h2><p>정상 작업 지연시간에는 요청 제출부터 terminal result와 출력 검증까지 포함하며, 이미지 build/pull·입력 준비·daemon 시작·warm-up은 제외합니다. 실패 시나리오는 성능 비교가 아니라 제어 의미를 검증합니다. 이 보고서는 로컬 Docker 실험 결과이므로 공개 성능 주장은 native Linux 반복 측정으로 재검증해야 합니다.</p></section></html>''', encoding="utf-8")
 
 
 def execute(args: argparse.Namespace) -> None:
@@ -266,13 +242,10 @@ def execute(args: argparse.Namespace) -> None:
     if input_file and not input_file.is_file():
         raise SystemExit(f"--input must point to a regular file: {input_file}")
     input_manifest = None if input_file is None else {"name": input_file.name, "bytes": input_file.stat().st_size}
-    write_json(root / "manifest.json", {"runId": run_id, "environment": {"kind": "local-docker", "hostArchitecture": os.uname().machine}, "comparators": ["processbuilder", "docker_per_task", "taskcage"], "scenarios": args.scenarios, "normalWorkload": args.normal_workload, "comparatorCpuLimit": args.comparator_cpus, "concurrency": args.concurrency, "warmup": args.warmup, "iterations": args.iterations, "input": input_manifest, "measurementBoundary": "latency covers worker submission through terminal result and normal output validation; resource totals include the Java Worker and its execution components"})
+    write_json(root / "manifest.json", {"runId": run_id, "environment": {"kind": "local-docker", "hostArchitecture": os.uname().machine}, "comparators": ["processbuilder", "taskcage"], "scenarios": args.scenarios, "normalWorkload": args.normal_workload, "comparatorCpuLimit": args.comparator_cpus, "concurrency": args.concurrency, "warmup": args.warmup, "iterations": args.iterations, "input": input_manifest, "measurementBoundary": "latency covers Java request submission through terminal result and normal output validation; memory is a conservative full execution footprint upper bound"})
     env = os.environ | {
         "BENCHMARK_MAX_CONCURRENT_TASKS": str(args.concurrency),
         "BENCHMARK_WORKER_CPUS": str(args.comparator_cpus),
-        "BENCHMARK_DOCKER_SOCKET_PATH": docker_socket_path(),
-        "BENCHMARK_TASK_IMAGE": "taskcage-benchmark/taskcaged:local",
-        "BENCHMARK_WORK_VOLUME": "taskcage-benchmark_taskcage-work",
     }
     if input_file:
         env["BENCHMARK_INPUT_HOST_PATH"] = str(input_file)
@@ -283,7 +256,7 @@ def execute(args: argparse.Namespace) -> None:
         command(COMPOSE + ["build", "--quiet", "taskcaged", "benchmark-worker"], env=env)
         append(events, {"type": "build_finished"})
         for scenario in args.scenarios:
-            for mode in ("processbuilder", "docker_per_task", "taskcage"):
+            for mode in ("processbuilder", "taskcage"):
                 append(events, {"type": "execution_started", "scenario": scenario, "mode": mode})
                 if mode == "taskcage": command(COMPOSE + ["up", "--detach", "--wait", "taskcaged"], env=env)
                 worker_command = COMPOSE + ["run", "--rm", "--no-deps", "-e", f"BENCHMARK_MODE={mode}", "-e", f"BENCHMARK_SCENARIO={scenario}", "-e", f"BENCHMARK_NORMAL_WORKLOAD={args.normal_workload}", "-e", f"BENCHMARK_CONCURRENCY={args.concurrency}", "-e", f"BENCHMARK_WARMUP={args.warmup}", "-e", f"BENCHMARK_ITERATIONS={args.iterations}", "-e", "BENCHMARK_TASK_IMAGE=taskcage-benchmark/taskcaged:local", "-e", "BENCHMARK_WORK_VOLUME=taskcage-benchmark_taskcage-work"]
@@ -306,12 +279,12 @@ def execute(args: argparse.Namespace) -> None:
                     collect_sample(samples)
                 item = {"scenario": scenario, "mode": mode, "workerExitCode": worker_process.returncode,
                         "workerResult": worker}
-                daemon_resources = None
+                daemon_memory_peak = None
                 if mode == "taskcage":
-                    daemon_resources = daemon_process_resources()
+                    daemon_memory_peak = daemon_process_memory_peak()
                     command(COMPOSE + ["exec", "--no-TTY", "taskcaged", "taskcage-container-verify-cleanup"], env=env)
                     item["daemonCleanupVerified"] = True
-                item["pipelineResources"] = pipeline_resources(mode, worker, daemon_resources)
+                item["executionMemoryUpperBound"] = execution_memory_upper_bound(mode, worker, daemon_memory_peak)
                 executions.append(item); append(events, {"type": "execution_finished", **item})
                 command(COMPOSE + ["down", "--volumes", "--remove-orphans"], env=env)
         validation = result_validation(executions)

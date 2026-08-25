@@ -32,7 +32,6 @@ COPY dev/container/ffmpeg-video-transcode.Capsulefile /usr/local/share/taskcage/
 COPY dev/container/ghost-tree-timeout.Capsulefile /usr/local/share/taskcage/ghost-tree-timeout.Capsulefile
 COPY dev/container/memory-hog-limit.Capsulefile /usr/local/share/taskcage/memory-hog-limit.Capsulefile
 COPY --chmod=0755 dev/container/verify-cleanup.sh /usr/local/bin/taskcage-container-verify-cleanup
-COPY --chmod=0755 dev/container/docker-task-exec.sh /usr/local/bin/taskcage-docker-task-exec
 
 ENV RUST_LOG=taskcaged=info \
     TASKCAGE_LOG_FORMAT=json
@@ -89,7 +88,7 @@ RUN ./java-sdk/gradlew -p ./dev/benchmark/runner installDist --no-daemon
 FROM daemon AS benchmark-worker
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends docker.io openjdk-17-jre-headless \
+    && apt-get install -y --no-install-recommends openjdk-17-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=benchmark-builder /workspace/dev/benchmark/runner/build/install/taskcage-execution-worker-benchmark /opt/taskcage-benchmark

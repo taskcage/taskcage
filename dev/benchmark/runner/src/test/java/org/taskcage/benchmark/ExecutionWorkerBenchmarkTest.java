@@ -28,26 +28,6 @@ class ExecutionWorkerBenchmarkTest {
     }
 
     @Test
-    void acceptsContainerMemoryLimitEvidence() {
-        var task = task("memory_limit", "MEMORY_LIMIT_EXCEEDED", null, null, 0, true, true);
-
-        assertTrue(ExecutionWorkerBenchmark.validate(
-                ExecutionWorkerBenchmark.Mode.DOCKER_PER_TASK,
-                ExecutionWorkerBenchmark.Scenario.MEMORY_LIMIT,
-                List.of(task)).isEmpty());
-    }
-
-    @Test
-    void requiresThePerTaskContainerTimeoutToRemoveTheTask() {
-        var task = task("timeout_child", "TIMED_OUT_CONTAINER", null, null, 0, false, true);
-
-        assertFalse(ExecutionWorkerBenchmark.validate(
-                ExecutionWorkerBenchmark.Mode.DOCKER_PER_TASK,
-                ExecutionWorkerBenchmark.Scenario.TIMEOUT_CHILD,
-                List.of(task)).isEmpty());
-    }
-
-    @Test
     void rejectsAZeroExitWhenNormalOutputIsInvalid() {
         var task = task("normal", "EXITED", null, null, 0, true, false);
 
