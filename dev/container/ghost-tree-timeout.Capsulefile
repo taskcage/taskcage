@@ -1,0 +1,11 @@
+FROM runtime://org.taskcage/ghost-tree:0.0.0-container.1
+CAPSULE ghost-tree-timeout@1.0.0
+
+INPUT source ARTIFACT
+OPTION marker INT ALLOWED 1
+OUTPUT ready FILE ready.txt MEDIA_TYPE text/plain MAX_BYTES 1024
+
+COMMAND --hold-parent ${ready} ${marker} ${source}
+
+LIMIT CPU 1 MEMORY 128MiB PIDS 32 TIMEOUT 1m
+ALLOW OVERRIDE TIMEOUT

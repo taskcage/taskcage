@@ -1,0 +1,12 @@
+FROM runtime://org.taskcage/memory-hog:0.0.0-container.1
+CAPSULE memory-hog-limit@1.0.0
+
+INPUT source ARTIFACT
+OPTION bytes INT ALLOWED 67108864
+OPTION seconds INT ALLOWED 30
+# The benchmark intentionally exceeds this limit, so this output is never published.
+OUTPUT completed FILE completed.txt MEDIA_TYPE text/plain MAX_BYTES 1024
+
+COMMAND ${bytes} ${seconds} ${source}
+
+LIMIT CPU 1 MEMORY 16MiB PIDS 8 TIMEOUT 1m
