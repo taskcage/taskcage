@@ -18,7 +18,6 @@ TaskCage의 외부 CLI 작업 경계를 반복 검증하는 로컬 실험실이�
 scenario definition
   -> Java worker execution
   -> collector (daemon Prometheus metrics + container samples + terminal results)
-  -> live local dashboard
   -> raw JSON + self-contained HTML report
 ```
 
@@ -62,14 +61,13 @@ python3 dev/benchmark/lab.py run \
 동일한 조건에서 비교하기 위한 설정이며, 필요하면 `--comparator-cpus`로 변경할 수 있다.
 
 기본값은 `normal`, `timeout_child`, `memory_limit`을 각각 `processbuilder`, `taskcage`로 한 번씩 측정하며
-warm-up은 수행하지 않는다(`warmup=0`, `iterations=1`). 실행 중 표시되는
-`http://127.0.0.1:8765`에서 현재 단계, 종료 원인별 TaskCage metric과 컨테이너 자원 그래프를 확인할 수 있다.
-실행이 끝나면 컨테이너는 정리하지만 대시보드는 유지하며, 확인을 마친 뒤 `Ctrl-C`로 닫는다.
+warm-up은 수행하지 않는다(`warmup=0`, `iterations=1`). 실행이 끝나면 컨테이너를 정리하고, 터미널에
+원시 JSON과 정적 HTML 보고서의 절대 경로를 출력한다. HTML 보고서에는 시나리오·실행기별 지연시간,
+메모리 peak, CPU 사용 시간, 프로세스 정리 결과와 자동 해석이 포함된다.
 
 ```bash
 python3 dev/benchmark/lab.py run --concurrency 8 --warmup 2 --iterations 30
 python3 dev/benchmark/lab.py run --scenarios normal --concurrency 16
-python3 dev/benchmark/lab.py run --no-keep-dashboard # 자동화에서 보고서 작성 후 바로 종료
 ```
 
 Worker는 정상 output, 시나리오별 terminal reason, TaskCage 사용량과 cleanup evidence를 자동 검증한다.

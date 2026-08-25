@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import html
-import http.server
 import json
 import os
 import pathlib
@@ -39,29 +38,6 @@ def command(
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=REPO, check=check, text=True, capture_output=capture, env=env)
-
-
-class State:
-    def __init__(self, root: pathlib.Path):
-        self.path, self.value = root / "live.json", {"phase": "preparing", "samples": []}
-        self.lock = threading.Lock(); self.flush()
-
-    def flush(self) -> None: write_json(self.path, self.value)
-    def update(self, **changes: Any) -> None:
-        with self.lock: self.value.update(changes); self.flush()
-    def sample(self, sample: dict[str, Any]) -> None:
-        with self.lock: self.value["samples"] = (self.value["samples"] + [sample])[-120:]; self.flush()
-
-
-class SilentHandler(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, *_: Any) -> None: pass
-
-
-def start_dashboard(root: pathlib.Path, port: int) -> http.server.ThreadingHTTPServer:
-    handler = lambda *args, **kwargs: SilentHandler(*args, directory=str(root), **kwargs)
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server
 
 
 def parse_prometheus(text: str) -> dict[str, float]:
@@ -98,7 +74,7 @@ def container_stats(service: str) -> dict[str, Any]:
         return {}
 
 
-def collect_sample(state: State, output: pathlib.Path) -> dict[str, Any]:
+def collect_sample(output: pathlib.Path) -> dict[str, Any]:
     sample = {
         "at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "daemonMetrics": daemon_metrics(),
@@ -107,13 +83,12 @@ def collect_sample(state: State, output: pathlib.Path) -> dict[str, Any]:
     }
     with output.open("a", encoding="utf-8") as file:
         file.write(json.dumps(sample, ensure_ascii=False) + "\n")
-    state.sample(sample)
     return sample
 
 
-def collect(stop: threading.Event, state: State, output: pathlib.Path) -> None:
+def collect(stop: threading.Event, output: pathlib.Path) -> None:
     while not stop.wait(.5):
-        collect_sample(state, output)
+        collect_sample(output)
 
 
 def display_metric(value: Any, divisor: float, suffix: str) -> str:
@@ -136,36 +111,90 @@ def result_validation(executions: list[dict[str, Any]]) -> dict[str, Any]:
     return {"passed": not errors, "errors": errors}
 
 
-def render(result: dict[str, Any], destination: pathlib.Path) -> None:
+SCENARIO_LABELS = {
+    "normal": "정상 변환",
+    "timeout_child": "Timeout + 자식 프로세스",
+    "memory_limit": "메모리 제한",
+}
+MODE_LABELS = {
+    "processbuilder": "ProcessBuilder",
+    "docker_per_task": "Docker per task",
+    "taskcage": "TaskCage",
+}
+MODE_COLORS = {"processbuilder": "#64748b", "docker_per_task": "#d97706", "taskcage": "#2563eb"}
+
+
+def metric(execution: dict[str, Any], name: str) -> tuple[float, str]:
+    worker = execution["workerResult"]
+    if name == "latency":
+        return float(worker["tasks"]["latencyMs"]["p50"]), "ms"
+    resources = worker["taskResources"]
+    container = worker["executorContainer"]
+    if name == "memory":
+        value = resources["memoryPeakBytes"]
+        return float(value if value >= 0 else container["memoryPeakBytes"]) / 1024 / 1024, "MiB"
+    value = resources["cpuTimeMicros"]
+    return float(value if value >= 0 else container["cpuUsageMicros"]) / 1000, "ms"
+
+
+def chart(title: str, description: str, executions: list[dict[str, Any]], name: str) -> str:
+    maximum = max((metric(execution, name)[0] for execution in executions), default=1) or 1
+    scenarios = []
+    for scenario in SCENARIO_LABELS:
+        rows = []
+        for execution in (item for item in executions if item["scenario"] == scenario):
+            value, unit = metric(execution, name)
+            tasks = execution["workerResult"]["tasks"]
+            p95 = tasks["latencyMs"]["p95"] if name == "latency" else None
+            detail = f"p50 {value:,.0f} {unit} · p95 {p95:,.0f} ms" if p95 is not None else f"{value:,.1f} {unit}"
+            rows.append(
+                f'<div class="bar-row"><span>{MODE_LABELS[execution["mode"]]}</span>'
+                f'<div class="bar-track"><i style="width:{value / maximum * 100:.1f}%;background:{MODE_COLORS[execution["mode"]]}"></i></div>'
+                f'<strong>{detail}</strong></div>')
+        if rows:
+            scenarios.append(f'<section class="chart-group"><h3>{SCENARIO_LABELS.get(scenario, scenario)}</h3>{"".join(rows)}</section>')
+    return f'<section class="card"><h2>{title}</h2><p class="muted">{description}</p>{"".join(scenarios)}</section>'
+
+
+def cleanup_table(executions: list[dict[str, Any]]) -> str:
     rows = []
-    for execution in result["executions"]:
-        tasks = execution["workerResult"]["tasks"]
-        resources = execution["workerResult"]["taskResources"]
-        container = execution["workerResult"]["executorContainer"]
-        cleanup = execution["workerResult"]["cleanup"]
-        reasons = ", ".join(f"{name}: {count}" for name, count in tasks["terminationReasons"].items())
+    for execution in executions:
+        worker = execution["workerResult"]
+        cleanup = worker["cleanup"]
+        reasons = ", ".join(worker["tasks"]["terminationReasons"])
+        confirmed = "O" if cleanup["cleanupConfirmed"] else "X"
         rows.append(
-            "<tr>"
-            f"<td>{html.escape(execution['scenario'])}</td>"
-            f"<td>{html.escape(execution['mode'])}</td>"
-            f"<td>{tasks['submitted']}</td>"
-            f"<td>{tasks['normalTasks']['latencyMs']['p50']} ms</td>"
-            f"<td>{tasks['normalTasks']['latencyMs']['p95']} ms</td>"
-            f"<td>{html.escape(reasons)}</td>"
-            f"<td>{display_metric(resources['memoryPeakBytes'], 1024 * 1024, 'MiB')}</td>"
-            f"<td>{display_metric(resources['cpuTimeMicros'], 1000, 'ms')}</td>"
-            f"<td>{display_metric(container['memoryPeakBytes'], 1024 * 1024, 'MiB')}</td>"
-            f"<td>{display_metric(container['cpuUsageMicros'], 1000, 'ms')}</td>"
-            f"<td>{cleanup['residualProcesses']}</td>"
-            f"<td>{str(cleanup['cleanupConfirmed']).lower()}</td>"
-            "</tr>"
-        )
+            f'<tr><td>{SCENARIO_LABELS.get(execution["scenario"], execution["scenario"])}</td>'
+            f'<td>{MODE_LABELS[execution["mode"]]}</td><td>{html.escape(reasons)}</td>'
+            f'<td>{cleanup["residualProcesses"]}</td><td class="cleanup-{confirmed.lower()}">{confirmed}</td></tr>')
+    return '<section class="card"><h2>프로세스 정리 결과</h2><table><thead><tr><th>시나리오</th><th>실행기</th><th>종료 원인</th><th>잔여 프로세스</th><th>전체 정리</th></tr></thead><tbody>' + "".join(rows) + "</tbody></table></section>"
+
+
+def analysis(executions: list[dict[str, Any]]) -> str:
+    normal = {item["mode"]: item for item in executions if item["scenario"] == "normal"}
+    notes = []
+    if {"processbuilder", "taskcage"} <= normal.keys():
+        direct, managed = metric(normal["processbuilder"], "latency")[0], metric(normal["taskcage"], "latency")[0]
+        delta = managed - direct
+        notes.append(f"정상 변환에서 TaskCage의 p50은 ProcessBuilder 대비 {delta:,.0f} ms ({delta / direct * 100:.1f}%) 차이입니다.")
+    timeout = {item["mode"]: item for item in executions if item["scenario"] == "timeout_child"}
+    if {"processbuilder", "taskcage"} <= timeout.keys():
+        residual = timeout["processbuilder"]["workerResult"]["cleanup"]["residualProcesses"]
+        notes.append(f"Timeout 시나리오에서 ProcessBuilder는 {residual}개의 descendant가 남았고, TaskCage는 cgroup 정리를 확인했습니다.")
+    memory = {item["mode"]: item for item in executions if item["scenario"] == "memory_limit"}
+    if "taskcage" in memory:
+        notes.append("메모리 제한 시나리오에서 TaskCage는 작업별 memory limit 종료 원인과 peak 사용량을 함께 반환했습니다.")
+    return '<section class="card"><h2>자동 해석</h2><ul>' + "".join(f"<li>{html.escape(note)}</li>" for note in notes) + "</ul></section>"
+
+
+def render(result: dict[str, Any], destination: pathlib.Path) -> None:
+    executions = result["executions"]
     validation = result["validation"]
-    validation_class = "passed" if validation["passed"] else "failed"
-    validation_text = "검증 통과" if validation["passed"] else "검증 실패"
-    error_list = "" if validation["passed"] else "<ul>" + "".join(
-        f"<li>{html.escape(error)}</li>" for error in validation["errors"]) + "</ul>"
-    destination.write_text(f'''<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TaskCage Benchmark Lab</title><style>body{{font-family:system-ui,sans-serif;max-width:1440px;margin:40px auto;padding:0 20px;color:#17212b}}table{{border-collapse:collapse;width:100%;font-size:14px}}td,th{{border:1px solid #d8dee4;padding:8px;text-align:left;vertical-align:top}}th{{background:#f4f7fa}}.status{{display:inline-block;padding:6px 10px;border-radius:999px;font-weight:700}}.passed{{background:#dcfce7;color:#166534}}.failed{{background:#fee2e2;color:#991b1b}}.table-wrap{{overflow:auto}}</style><h1>TaskCage Benchmark Lab 결과</h1><p>실행 ID: {html.escape(result['runId'])} · 환경: {html.escape(result['environment']['kind'])}</p><p><span class="status {validation_class}">{validation_text}</span></p>{error_list}<div class="table-wrap"><table><thead><tr><th>시나리오</th><th>실행기</th><th>Task</th><th>정상 p50</th><th>정상 p95</th><th>종료 원인</th><th>Task 메모리 peak</th><th>Task CPU</th><th>Worker 메모리 peak</th><th>Worker CPU</th><th>잔여 프로세스</th><th>정리 확인</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div><h2>해석</h2><p>지연시간은 Worker 요청 제출부터 결과·정상 출력 검증까지이며 TaskCage SDK/UDS/daemon 비용을 포함합니다. 시작·build·warm-up은 제외합니다. ProcessBuilder에는 task 단위 자원 계측이 없어 해당 칸을 측정 안 됨으로 표시합니다.</p><p>이 보고서는 로컬 실험 증거입니다. Docker Desktop 결과만으로 공개 성능을 주장하지 않으며, native Linux 반복 실행으로 재검증해야 합니다.</p></html>''', encoding="utf-8")
+    status = "검증 통과" if validation["passed"] else "검증 실패"
+    status_class = "passed" if validation["passed"] else "failed"
+    destination.write_text(f'''<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TaskCage Benchmark Report</title><style>
+body{{font-family:system-ui,sans-serif;max-width:1100px;margin:40px auto;padding:0 20px;color:#17212b;background:#f8fafc}}.card{{background:#fff;border:1px solid #d8dee4;border-radius:12px;padding:20px;margin:16px 0}}h1{{margin-bottom:4px}}h2{{margin:0 0 6px}}h3{{font-size:14px;margin:20px 0 8px}}.muted{{color:#64748b;margin:0}}.status{{display:inline-block;border-radius:999px;padding:6px 10px;font-weight:700}}.passed{{background:#dcfce7;color:#166534}}.failed{{background:#fee2e2;color:#991b1b}}.bar-row{{display:grid;grid-template-columns:120px 1fr 170px;gap:10px;align-items:center;margin:7px 0;font-size:13px}}.bar-track{{height:16px;background:#e2e8f0;border-radius:999px;overflow:hidden}}.bar-track i{{display:block;height:100%;border-radius:999px}}table{{border-collapse:collapse;width:100%;font-size:14px}}td,th{{border:1px solid #d8dee4;padding:8px;text-align:left}}th{{background:#f4f7fa}}.cleanup-o{{color:#166534;font-weight:800}}.cleanup-x{{color:#b91c1c;font-weight:800}}li{{margin:7px 0}}code{{background:#e2e8f0;padding:2px 4px;border-radius:4px}}@media(max-width:650px){{.bar-row{{grid-template-columns:1fr;gap:4px}}}}
+</style><h1>TaskCage Benchmark Report</h1><p class="muted">실행 ID: {html.escape(result["runId"])} · {html.escape(result["environment"]["kind"])}</p><p><span class="status {status_class}">{status}</span></p>{analysis(executions)}{chart("작업 지연시간", "막대는 p50이며 p95를 함께 표기합니다. timeout·memory는 terminal result까지의 시간입니다.", executions, "latency")}{chart("메모리 peak", "TaskCage는 task cgroup peak, ProcessBuilder는 Worker container 관측 peak입니다.", executions, "memory")}{chart("CPU 사용 시간", "TaskCage는 task CPU time, ProcessBuilder는 Worker container CPU time입니다.", executions, "cpu")}{cleanup_table(executions)}<section class="card"><h2>측정 경계</h2><p>지연시간에는 요청 제출부터 terminal result와 정상 출력 검증까지 포함하며, 이미지 build/pull·입력 준비·daemon 시작·warm-up은 제외합니다. 이 보고서는 로컬 Docker 실험 결과이므로 공개 성능 주장은 native Linux 반복 측정으로 재검증해야 합니다.</p></section></html>''', encoding="utf-8")
 
 
 def execute(args: argparse.Namespace) -> None:
@@ -173,41 +202,37 @@ def execute(args: argparse.Namespace) -> None:
     if args.comparator_cpus <= 0: raise SystemExit("--comparator-cpus must be positive")
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     root = ROOT / "results" / "runs" / run_id; root.mkdir(parents=True)
-    shutil.copy2(ROOT / "dashboard.html", root / "dashboard.html")
-    state, events, samples = State(root), root / "events.ndjson", root / "samples.ndjson"
+    events, samples = root / "events.ndjson", root / "samples.ndjson"
     input_file = args.input.resolve() if args.input else None
     if input_file and not input_file.is_file():
         raise SystemExit(f"--input must point to a regular file: {input_file}")
     input_manifest = None if input_file is None else {"name": input_file.name, "bytes": input_file.stat().st_size}
     write_json(root / "manifest.json", {"runId": run_id, "environment": {"kind": "local-docker", "hostArchitecture": os.uname().machine}, "comparators": ["processbuilder", "taskcage"], "scenarios": args.scenarios, "normalWorkload": args.normal_workload, "comparatorCpuLimit": args.comparator_cpus, "concurrency": args.concurrency, "warmup": args.warmup, "iterations": args.iterations, "input": input_manifest, "measurementBoundary": "worker submission through terminal result and normal output validation; excludes input preparation, build, service start and warm-up"})
-    dashboard = start_dashboard(root, args.port)
-    print(f"Live dashboard: http://127.0.0.1:{args.port}/dashboard.html")
     env = os.environ | {"BENCHMARK_MAX_CONCURRENT_TASKS": str(args.concurrency), "BENCHMARK_WORKER_CPUS": str(args.comparator_cpus)}
     if input_file:
         env["BENCHMARK_INPUT_HOST_PATH"] = str(input_file)
     executions: list[dict[str, Any]] = []
-    completed = False
     validation = {"passed": False, "errors": ["run did not complete"]}
     try:
-        state.update(phase="building"); append(events, {"type": "build_started"})
+        append(events, {"type": "build_started"})
         command(COMPOSE + ["build", "--quiet", "taskcaged", "benchmark-worker"], env=env)
         append(events, {"type": "build_finished"})
         for scenario in args.scenarios:
             for mode in ("processbuilder", "taskcage"):
-                state.update(phase="running", scenario=scenario, mode=mode); append(events, {"type": "execution_started", "scenario": scenario, "mode": mode})
+                append(events, {"type": "execution_started", "scenario": scenario, "mode": mode})
                 if mode == "taskcage": command(COMPOSE + ["up", "--detach", "--wait", "taskcaged"], env=env)
                 worker_command = COMPOSE + ["run", "--rm", "--no-deps", "-e", f"BENCHMARK_MODE={mode}", "-e", f"BENCHMARK_SCENARIO={scenario}", "-e", f"BENCHMARK_NORMAL_WORKLOAD={args.normal_workload}", "-e", f"BENCHMARK_CONCURRENCY={args.concurrency}", "-e", f"BENCHMARK_WARMUP={args.warmup}", "-e", f"BENCHMARK_ITERATIONS={args.iterations}"]
                 if input_file:
                     worker_command += ["-e", "BENCHMARK_INPUT_FILE=/benchmark-input/input"]
                 worker_command += ["benchmark-worker"]
-                stop = threading.Event(); collector = threading.Thread(target=collect, args=(stop, state, samples), daemon=True); collector.start()
+                stop = threading.Event(); collector = threading.Thread(target=collect, args=(stop, samples), daemon=True); collector.start()
                 try:
                     worker_process = command(worker_command, capture=True, check=False, env=env)
                     worker = json.loads(worker_process.stdout)
                 finally:
                     stop.set(); collector.join(timeout=2)
                     # worker가 terminal result를 반환한 직후 daemon의 running_tasks=0을 보존한다.
-                    collect_sample(state, samples)
+                    collect_sample(samples)
                 item = {"scenario": scenario, "mode": mode, "workerExitCode": worker_process.returncode,
                         "workerResult": worker}
                 if mode == "taskcage":
@@ -219,18 +244,9 @@ def execute(args: argparse.Namespace) -> None:
         result = {"runId": run_id, "environment": {"kind": "local-docker"},
                   "validation": validation, "executions": executions}
         write_json(root / "result.json", result); render(result, root / "report.html")
-        state.update(phase="completed", completed=True, report="report.html", validation=validation)
-        completed = True
-        print(f"Result JSON: {root / 'result.json'}\nReport: {root / 'report.html'}")
+        print(f"Result JSON: {(root / 'result.json').resolve()}\nHTML report: {(root / 'report.html').resolve()}")
     finally:
         command(COMPOSE + ["down", "--volumes", "--remove-orphans"], env=env)
-        if completed and args.keep_dashboard:
-            print("Dashboard remains available after cleanup; press Ctrl-C to close it.")
-            try:
-                threading.Event().wait()
-            except KeyboardInterrupt:
-                pass
-        dashboard.shutdown()
     if not validation["passed"]:
         raise SystemExit("benchmark intent validation failed")
 
@@ -240,9 +256,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     run_parser = sub.add_parser("run")
     run_parser.add_argument("--concurrency", type=int, default=2); run_parser.add_argument("--warmup", type=int, default=0); run_parser.add_argument("--iterations", type=int, default=1)
-    run_parser.add_argument("--scenarios", nargs="+", default=["normal", "timeout_child", "memory_limit"]); run_parser.add_argument("--input", type=pathlib.Path, help="optional host media file for normal Capsule and ProcessBuilder runs"); run_parser.add_argument("--normal-workload", choices=["audio_to_wav", "video_transcode"], default="audio_to_wav"); run_parser.add_argument("--comparator-cpus", type=float, default=1.0, help="CPU limit applied to both benchmark worker containers; default matches the Capsule CPU budget"); run_parser.add_argument("--port", type=int, default=8765)
-    run_parser.add_argument("--no-keep-dashboard", action="store_false", dest="keep_dashboard",
-                            help="close the dashboard server immediately after writing the report")
+    run_parser.add_argument("--scenarios", nargs="+", default=["normal", "timeout_child", "memory_limit"]); run_parser.add_argument("--input", type=pathlib.Path, help="optional host media file for normal Capsule and ProcessBuilder runs"); run_parser.add_argument("--normal-workload", choices=["audio_to_wav", "video_transcode"], default="audio_to_wav"); run_parser.add_argument("--comparator-cpus", type=float, default=1.0, help="CPU limit applied to both benchmark worker containers; default matches the Capsule CPU budget")
     args = parser.parse_args()
     if args.concurrency < 1 or args.warmup < 0 or args.iterations < 1: parser.error("invalid run sizes")
     execute(args)
