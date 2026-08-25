@@ -42,16 +42,18 @@ class BenchmarkLabTest(unittest.TestCase):
             "environment": {"kind": "test"},
             "validation": {"passed": True, "errors": []},
             "executions": [{
-                "scenario": "memory_limit",
-                "mode": "taskcage",
+                "scenario": "normal",
+                "mode": "processbuilder",
                 "workerExitCode": 0,
                 "workerResult": {
-                    "tasks": {"submitted": 1, "normalTasks": {"latencyMs": {"p50": 0, "p95": 0}},
-                              "terminationReasons": {"MEMORY_LIMIT_EXCEEDED": 1}},
+                    "tasks": {"submitted": 1, "latencyMs": {"p50": 20, "p95": 25},
+                              "normalTasks": {"latencyMs": {"p50": 20, "p95": 25}},
+                              "terminationReasons": {"EXITED": 1}},
                     "taskResources": {"memoryPeakBytes": 16 * 1024 * 1024, "cpuTimeMicros": 1_000},
                     "executorContainer": {"memoryPeakBytes": 32 * 1024 * 1024, "cpuUsageMicros": 2_000},
                     "cleanup": {"residualProcesses": 0, "cleanupConfirmed": True},
                 },
+                "executionMemoryUpperBound": {"memoryPeakBytes": 32 * 1024 * 1024, "components": []},
             }],
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -59,9 +61,10 @@ class BenchmarkLabTest(unittest.TestCase):
             lab.render(result, report)
             contents = report.read_text()
 
-        self.assertIn("MEMORY_LIMIT_EXCEEDED: 1", contents)
-        self.assertIn("16.0 MiB", contents)
-        self.assertIn("1.0 ms", contents)
+        self.assertIn("정상 변환: Java 호출 기준 비교", contents)
+        self.assertIn("32.0 MiB", contents)
+        self.assertIn("p50 20 ms", contents)
+        self.assertIn("O/X 결과가 없습니다", contents)
 
 
 if __name__ == "__main__":
