@@ -40,6 +40,14 @@ def command(
     return subprocess.run(args, cwd=REPO, check=check, text=True, capture_output=capture, env=env)
 
 
+def docker_socket_path() -> str:
+    endpoint = command(
+        ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], capture=True).stdout.strip()
+    if not endpoint.startswith("unix://"):
+        raise SystemExit(f"the benchmark requires a local Unix Docker socket, got: {endpoint}")
+    return endpoint.removeprefix("unix://")
+
+
 def parse_prometheus(text: str) -> dict[str, float]:
     values = {}
     for line in text.splitlines():
@@ -139,35 +147,39 @@ def metric(execution: dict[str, Any], name: str) -> tuple[float, str]:
 
 def chart(title: str, description: str, executions: list[dict[str, Any]], name: str) -> str:
     maximum = max((metric(execution, name)[0] for execution in executions), default=1) or 1
-    scenarios = []
-    for scenario in SCENARIO_LABELS:
-        rows = []
-        for execution in (item for item in executions if item["scenario"] == scenario):
-            value, unit = metric(execution, name)
-            tasks = execution["workerResult"]["tasks"]
-            p95 = tasks["latencyMs"]["p95"] if name == "latency" else None
-            detail = f"p50 {value:,.0f} {unit} · p95 {p95:,.0f} ms" if p95 is not None else f"{value:,.1f} {unit}"
-            rows.append(
-                f'<div class="bar-row"><span>{MODE_LABELS[execution["mode"]]}</span>'
-                f'<div class="bar-track"><i style="width:{value / maximum * 100:.1f}%;background:{MODE_COLORS[execution["mode"]]}"></i></div>'
-                f'<strong>{detail}</strong></div>')
-        if rows:
-            scenarios.append(f'<section class="chart-group"><h3>{SCENARIO_LABELS.get(scenario, scenario)}</h3>{"".join(rows)}</section>')
-    return f'<section class="card"><h2>{title}</h2><p class="muted">{description}</p>{"".join(scenarios)}</section>'
+    rows = []
+    for execution in executions:
+        value, unit = metric(execution, name)
+        tasks = execution["workerResult"]["tasks"]
+        p95 = tasks["latencyMs"]["p95"] if name == "latency" else None
+        detail = f"p50 {value:,.0f} {unit} · p95 {p95:,.0f} ms" if p95 is not None else f"{value:,.1f} {unit}"
+        rows.append(
+            f'<div class="bar-row"><span>{MODE_LABELS[execution["mode"]]}</span>'
+            f'<div class="bar-track"><i style="width:{value / maximum * 100:.1f}%;background:{MODE_COLORS[execution["mode"]]}"></i></div>'
+            f'<strong>{detail}</strong></div>')
+    return f'<section class="card"><h2>{title}</h2><p class="muted">{description}</p>{"".join(rows)}</section>'
 
 
-def cleanup_table(executions: list[dict[str, Any]]) -> str:
+def control_table(executions: list[dict[str, Any]]) -> str:
     rows = []
     for execution in executions:
         worker = execution["workerResult"]
         cleanup = worker["cleanup"]
         reasons = ", ".join(worker["tasks"]["terminationReasons"])
         confirmed = "O" if cleanup["cleanupConfirmed"] else "X"
+        scenario = execution["scenario"]
+        policy = "작업별 메모리 제한" if scenario == "memory_limit" else "프로세스 트리 정리"
+        if scenario == "memory_limit":
+            controlled = execution["mode"] != "processbuilder" and "MEMORY_LIMIT_EXCEEDED" in worker["tasks"]["terminationReasons"]
+        else:
+            controlled = cleanup["cleanupConfirmed"] and cleanup["residualProcesses"] == 0
+        control_mark = "O" if controlled else "X"
         rows.append(
             f'<tr><td>{SCENARIO_LABELS.get(execution["scenario"], execution["scenario"])}</td>'
             f'<td>{MODE_LABELS[execution["mode"]]}</td><td>{html.escape(reasons)}</td>'
+            f'<td>{policy}</td><td class="cleanup-{control_mark.lower()}">{control_mark}</td>'
             f'<td>{cleanup["residualProcesses"]}</td><td class="cleanup-{confirmed.lower()}">{confirmed}</td></tr>')
-    return '<section class="card"><h2>프로세스 정리 결과</h2><table><thead><tr><th>시나리오</th><th>실행기</th><th>종료 원인</th><th>잔여 프로세스</th><th>전체 정리</th></tr></thead><tbody>' + "".join(rows) + "</tbody></table></section>"
+    return '<section class="card"><h2>실패 제어 검증</h2><p class="muted">성능 수치는 정상 변환에서만 비교합니다. 아래는 timeout의 전체 정리와 메모리 제한의 작업별 제어 여부를 O/X로 확인합니다.</p><table><thead><tr><th>시나리오</th><th>실행기</th><th>종료 원인</th><th>검증 항목</th><th>제어 적용</th><th>잔여 프로세스</th><th>전체 정리</th></tr></thead><tbody>' + "".join(rows) + "</tbody></table></section>"
 
 
 def analysis(executions: list[dict[str, Any]]) -> str:
@@ -177,6 +189,10 @@ def analysis(executions: list[dict[str, Any]]) -> str:
         direct, managed = metric(normal["processbuilder"], "latency")[0], metric(normal["taskcage"], "latency")[0]
         delta = managed - direct
         notes.append(f"정상 변환에서 TaskCage의 p50은 ProcessBuilder 대비 {delta:,.0f} ms ({delta / direct * 100:.1f}%) 차이입니다.")
+    if {"docker_per_task", "taskcage"} <= normal.keys():
+        docker_latency, managed = metric(normal["docker_per_task"], "latency")[0], metric(normal["taskcage"], "latency")[0]
+        delta = managed - docker_latency
+        notes.append(f"정상 변환에서 TaskCage의 p50은 Docker per task 대비 {delta:,.0f} ms ({delta / docker_latency * 100:.1f}%) 차이입니다.")
     timeout = {item["mode"]: item for item in executions if item["scenario"] == "timeout_child"}
     if {"processbuilder", "taskcage"} <= timeout.keys():
         residual = timeout["processbuilder"]["workerResult"]["cleanup"]["residualProcesses"]
@@ -189,12 +205,14 @@ def analysis(executions: list[dict[str, Any]]) -> str:
 
 def render(result: dict[str, Any], destination: pathlib.Path) -> None:
     executions = result["executions"]
+    normal = [item for item in executions if item["scenario"] == "normal"]
+    controls = [item for item in executions if item["scenario"] != "normal"]
     validation = result["validation"]
     status = "검증 통과" if validation["passed"] else "검증 실패"
     status_class = "passed" if validation["passed"] else "failed"
     destination.write_text(f'''<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TaskCage Benchmark Report</title><style>
 body{{font-family:system-ui,sans-serif;max-width:1100px;margin:40px auto;padding:0 20px;color:#17212b;background:#f8fafc}}.card{{background:#fff;border:1px solid #d8dee4;border-radius:12px;padding:20px;margin:16px 0}}h1{{margin-bottom:4px}}h2{{margin:0 0 6px}}h3{{font-size:14px;margin:20px 0 8px}}.muted{{color:#64748b;margin:0}}.status{{display:inline-block;border-radius:999px;padding:6px 10px;font-weight:700}}.passed{{background:#dcfce7;color:#166534}}.failed{{background:#fee2e2;color:#991b1b}}.bar-row{{display:grid;grid-template-columns:120px 1fr 170px;gap:10px;align-items:center;margin:7px 0;font-size:13px}}.bar-track{{height:16px;background:#e2e8f0;border-radius:999px;overflow:hidden}}.bar-track i{{display:block;height:100%;border-radius:999px}}table{{border-collapse:collapse;width:100%;font-size:14px}}td,th{{border:1px solid #d8dee4;padding:8px;text-align:left}}th{{background:#f4f7fa}}.cleanup-o{{color:#166534;font-weight:800}}.cleanup-x{{color:#b91c1c;font-weight:800}}li{{margin:7px 0}}code{{background:#e2e8f0;padding:2px 4px;border-radius:4px}}@media(max-width:650px){{.bar-row{{grid-template-columns:1fr;gap:4px}}}}
-</style><h1>TaskCage Benchmark Report</h1><p class="muted">실행 ID: {html.escape(result["runId"])} · {html.escape(result["environment"]["kind"])}</p><p><span class="status {status_class}">{status}</span></p>{analysis(executions)}{chart("작업 지연시간", "막대는 p50이며 p95를 함께 표기합니다. timeout·memory는 terminal result까지의 시간입니다.", executions, "latency")}{chart("메모리 peak", "TaskCage는 task cgroup peak, ProcessBuilder는 Worker container 관측 peak입니다.", executions, "memory")}{chart("CPU 사용 시간", "TaskCage는 task CPU time, ProcessBuilder는 Worker container CPU time입니다.", executions, "cpu")}{cleanup_table(executions)}<section class="card"><h2>측정 경계</h2><p>지연시간에는 요청 제출부터 terminal result와 정상 출력 검증까지 포함하며, 이미지 build/pull·입력 준비·daemon 시작·warm-up은 제외합니다. 이 보고서는 로컬 Docker 실험 결과이므로 공개 성능 주장은 native Linux 반복 측정으로 재검증해야 합니다.</p></section></html>''', encoding="utf-8")
+</style><h1>TaskCage Benchmark Report</h1><p class="muted">실행 ID: {html.escape(result["runId"])} · {html.escape(result["environment"]["kind"])}</p><p><span class="status {status_class}">{status}</span></p>{analysis(executions)}<section class="card"><h2>정상 변환 성능 비교</h2><p class="muted">성능 그래프는 정상 FFmpeg 변환만 사용합니다. ProcessBuilder는 FFmpeg 루트 프로세스의 CPU·peak RSS, Docker per task·TaskCage는 각 작업 cgroup의 CPU·peak memory를 사용합니다.</p></section>{chart("작업 지연시간", "막대는 p50이며 p95를 함께 표기합니다.", normal, "latency")}{chart("메모리 peak", "작업 완료까지 관측된 최대 메모리 사용량입니다.", normal, "memory")}{chart("CPU 사용 시간", "작업 실행에 사용된 CPU 시간입니다.", normal, "cpu")}{control_table(controls)}<section class="card"><h2>측정 경계</h2><p>정상 작업 지연시간에는 요청 제출부터 terminal result와 출력 검증까지 포함하며, 이미지 build/pull·입력 준비·daemon 시작·warm-up은 제외합니다. 실패 시나리오는 성능 비교가 아니라 제어 의미를 검증합니다. 이 보고서는 로컬 Docker 실험 결과이므로 공개 성능 주장은 native Linux 반복 측정으로 재검증해야 합니다.</p></section></html>''', encoding="utf-8")
 
 
 def execute(args: argparse.Namespace) -> None:
@@ -207,8 +225,14 @@ def execute(args: argparse.Namespace) -> None:
     if input_file and not input_file.is_file():
         raise SystemExit(f"--input must point to a regular file: {input_file}")
     input_manifest = None if input_file is None else {"name": input_file.name, "bytes": input_file.stat().st_size}
-    write_json(root / "manifest.json", {"runId": run_id, "environment": {"kind": "local-docker", "hostArchitecture": os.uname().machine}, "comparators": ["processbuilder", "taskcage"], "scenarios": args.scenarios, "normalWorkload": args.normal_workload, "comparatorCpuLimit": args.comparator_cpus, "concurrency": args.concurrency, "warmup": args.warmup, "iterations": args.iterations, "input": input_manifest, "measurementBoundary": "worker submission through terminal result and normal output validation; excludes input preparation, build, service start and warm-up"})
-    env = os.environ | {"BENCHMARK_MAX_CONCURRENT_TASKS": str(args.concurrency), "BENCHMARK_WORKER_CPUS": str(args.comparator_cpus)}
+    write_json(root / "manifest.json", {"runId": run_id, "environment": {"kind": "local-docker", "hostArchitecture": os.uname().machine}, "comparators": ["processbuilder", "docker_per_task", "taskcage"], "scenarios": args.scenarios, "normalWorkload": args.normal_workload, "comparatorCpuLimit": args.comparator_cpus, "concurrency": args.concurrency, "warmup": args.warmup, "iterations": args.iterations, "input": input_manifest, "measurementBoundary": "worker submission through terminal result and normal output validation; excludes input preparation, build, service start and warm-up"})
+    env = os.environ | {
+        "BENCHMARK_MAX_CONCURRENT_TASKS": str(args.concurrency),
+        "BENCHMARK_WORKER_CPUS": str(args.comparator_cpus),
+        "BENCHMARK_DOCKER_SOCKET_PATH": docker_socket_path(),
+        "BENCHMARK_TASK_IMAGE": "taskcage-benchmark/taskcaged:local",
+        "BENCHMARK_WORK_VOLUME": "taskcage-benchmark_taskcage-work",
+    }
     if input_file:
         env["BENCHMARK_INPUT_HOST_PATH"] = str(input_file)
     executions: list[dict[str, Any]] = []
@@ -218,17 +242,23 @@ def execute(args: argparse.Namespace) -> None:
         command(COMPOSE + ["build", "--quiet", "taskcaged", "benchmark-worker"], env=env)
         append(events, {"type": "build_finished"})
         for scenario in args.scenarios:
-            for mode in ("processbuilder", "taskcage"):
+            for mode in ("processbuilder", "docker_per_task", "taskcage"):
                 append(events, {"type": "execution_started", "scenario": scenario, "mode": mode})
                 if mode == "taskcage": command(COMPOSE + ["up", "--detach", "--wait", "taskcaged"], env=env)
-                worker_command = COMPOSE + ["run", "--rm", "--no-deps", "-e", f"BENCHMARK_MODE={mode}", "-e", f"BENCHMARK_SCENARIO={scenario}", "-e", f"BENCHMARK_NORMAL_WORKLOAD={args.normal_workload}", "-e", f"BENCHMARK_CONCURRENCY={args.concurrency}", "-e", f"BENCHMARK_WARMUP={args.warmup}", "-e", f"BENCHMARK_ITERATIONS={args.iterations}"]
+                worker_command = COMPOSE + ["run", "--rm", "--no-deps", "-e", f"BENCHMARK_MODE={mode}", "-e", f"BENCHMARK_SCENARIO={scenario}", "-e", f"BENCHMARK_NORMAL_WORKLOAD={args.normal_workload}", "-e", f"BENCHMARK_CONCURRENCY={args.concurrency}", "-e", f"BENCHMARK_WARMUP={args.warmup}", "-e", f"BENCHMARK_ITERATIONS={args.iterations}", "-e", "BENCHMARK_TASK_IMAGE=taskcage-benchmark/taskcaged:local", "-e", "BENCHMARK_WORK_VOLUME=taskcage-benchmark_taskcage-work"]
                 if input_file:
                     worker_command += ["-e", "BENCHMARK_INPUT_FILE=/benchmark-input/input"]
                 worker_command += ["benchmark-worker"]
                 stop = threading.Event(); collector = threading.Thread(target=collect, args=(stop, samples), daemon=True); collector.start()
                 try:
                     worker_process = command(worker_command, capture=True, check=False, env=env)
-                    worker = json.loads(worker_process.stdout)
+                    try:
+                        worker = json.loads(worker_process.stdout)
+                    except json.JSONDecodeError as error:
+                        details = worker_process.stderr.strip() or worker_process.stdout.strip() or "no worker output"
+                        append(events, {"type": "execution_failed", "scenario": scenario, "mode": mode,
+                                        "workerExitCode": worker_process.returncode, "details": details})
+                        raise SystemExit(f"{scenario}/{mode} worker did not return JSON: {details}") from error
                 finally:
                     stop.set(); collector.join(timeout=2)
                     # worker가 terminal result를 반환한 직후 daemon의 running_tasks=0을 보존한다.

@@ -7,10 +7,10 @@ TaskCage의 외부 CLI 작업 경계를 반복 검증하는 로컬 실험실이�
 | 실행기 | 의미 | 주 비교 목적 |
 | --- | --- | --- |
 | `processbuilder` | 장기 실행 Java Worker가 직접 CLI를 시작 | 일반적인 기존 도입 경로 |
+| `docker_per_task` | 같은 Java Worker가 Docker API로 작업마다 컨테이너를 생성 | Job/컨테이너 per-task의 관리 비용과 정리 의미 |
 | `taskcage` | 같은 Java Worker가 UDS로 daemon에 Capsule Task를 제출 | 작업별 제한·정리와 추가 비용 |
-| `docker-per-task` | 이후 추가할 보조 시나리오 | Job/컨테이너 per-task의 패키징·격리 비용 |
 
-`docker-per-task`는 흔한 Job/격리 패턴이지만 TaskCage의 주 고객 경로는 아니다. 따라서 첫 두 실행기를 기본 비교로 유지하고, 세 번째는 별도 보조 실험으로 다룬다.
+`docker_per_task`는 흔한 Job/격리 패턴이지만 TaskCage의 주 고객 경로는 아니다. 세 실행기는 동일한 CPU 1.0 예산에서 실행한다. Docker 실행기는 benchmark 전용으로 Worker에 Docker socket을 연결하며, 일반 서비스 구성의 권장안은 아니다.
 
 ## 계층
 
@@ -60,10 +60,10 @@ python3 dev/benchmark/lab.py run \
 기본적으로 두 비교 Worker container에 `CPU 1.0`을 적용한다. 이는 Capsule의 기본 `CPU 1` 예산과
 동일한 조건에서 비교하기 위한 설정이며, 필요하면 `--comparator-cpus`로 변경할 수 있다.
 
-기본값은 `normal`, `timeout_child`, `memory_limit`을 각각 `processbuilder`, `taskcage`로 한 번씩 측정하며
+기본값은 `normal`, `timeout_child`, `memory_limit`을 각각 `processbuilder`, `docker_per_task`, `taskcage`로 한 번씩 측정하며
 warm-up은 수행하지 않는다(`warmup=0`, `iterations=1`). 실행이 끝나면 컨테이너를 정리하고, 터미널에
-원시 JSON과 정적 HTML 보고서의 절대 경로를 출력한다. HTML 보고서에는 시나리오·실행기별 지연시간,
-메모리 peak, CPU 사용 시간, 프로세스 정리 결과와 자동 해석이 포함된다.
+원시 JSON과 정적 HTML 보고서의 절대 경로를 출력한다. HTML 보고서는 정상 변환에서만 지연시간, 메모리 peak,
+CPU 사용 시간을 비교하고, timeout·memory 제한은 각각 전체 정리와 작업별 제한을 O/X로 표시한다.
 
 ```bash
 python3 dev/benchmark/lab.py run --concurrency 8 --warmup 2 --iterations 30
@@ -79,12 +79,14 @@ Worker는 정상 output, 시나리오별 terminal reason, TaskCage 사용량과 
 
 실시간 수집은 TaskCage daemon의 opt-in Prometheus `/metrics`와 Docker container 사용량을 결합한다.
 종료 원인처럼 label이 있는 Prometheus metric도 label set을 포함한 이름으로 보존한다. ProcessBuilder 측에는
-daemon metrics가 없으므로 Worker container 표본과 terminal result만 수집한다. 각 실행이 terminal result를
+daemon metrics가 없으므로 Worker container 표본과 terminal result를 수집한다. 정상 FFmpeg 비교에서는
+Worker JVM을 제외하기 위해 ProcessBuilder가 시작한 FFmpeg 루트 프로세스의 CPU 시간과 `VmHWM` peak RSS를
+별도로 기록한다. 각 실행이 terminal result를
 반환한 직후 `running_tasks=0`인 마지막 daemon 표본을 한 번 더 기록한다. 짧은 작업의 메모리 peak은 표본
 주기에 따라 낮게 잡힐 수 있으므로, TaskCage Task가 반환하는 `memoryPeakBytes`를 우선 해석한다.
 
 ## 해석 원칙
 
 - Docker Desktop/macOS 결과는 구조·정리 검증용이다. 공개 성능 주장은 native Linux VM/host 반복 결과로만 한다.
-- `timeout_child`는 ProcessBuilder가 root만 종료했을 때의 잔여 descendant를 보이는 안정성 대비다. harness가 이후 정리한 사실도 결과에 명시한다.
-- `memory_limit`은 ProcessBuilder에 동등한 task별 cgroup 경계가 없으므로, 동일 처리량 비교가 아니라 blast radius 대비다.
+- `timeout_child`는 ProcessBuilder가 root만 종료했을 때의 잔여 descendant를 보이는 안정성 대비다. harness가 이후 정리한 사실도 결과에 명시한다. Docker per task와 TaskCage는 작업 경계를 제거한 뒤 잔여 프로세스가 없는지 검증한다.
+- `memory_limit`은 ProcessBuilder에 동등한 task별 cgroup 경계가 없으므로, 동일 처리량 비교가 아니라 작업별 memory limit 적용 여부를 검증한다.

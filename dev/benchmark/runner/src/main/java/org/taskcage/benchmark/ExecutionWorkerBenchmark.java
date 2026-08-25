@@ -42,6 +42,8 @@ public final class ExecutionWorkerBenchmark {
     private static final Path FFMPEG = Path.of("/usr/bin/ffmpeg");
     private static final Path GHOST_TREE = Path.of("/usr/local/libexec/taskcage/ghost-tree");
     private static final Path MEMORY_HOG = Path.of("/usr/local/libexec/taskcage/memory-hog");
+    private static final String DOCKER = "docker";
+    private static final String DOCKER_TASK_METRICS = "TASKCAGE_DOCKER_TASK_METRICS";
     private static final CapsuleIdentity FFMPEG_CAPSULE =
             new CapsuleIdentity("ffmpeg-audio-to-wav", "1.0.0");
     private static final CapsuleIdentity FFMPEG_VIDEO_CAPSULE =
@@ -96,6 +98,8 @@ public final class ExecutionWorkerBenchmark {
                 Callable<TaskMetric> task = switch (mode) {
                     case PROCESS_BUILDER -> () -> runProcessBuilder(
                             scenario, batch, taskIndex, concurrency, workDirectory, source, normalWorkload);
+                    case DOCKER_PER_TASK -> () -> runDockerPerTask(
+                            scenario, batch, taskIndex, concurrency, workDirectory, source, normalWorkload);
                     case TASK_CAGE -> () -> runTaskCage(
                             scenario, batch, taskIndex, concurrency, workDirectory, source, normalWorkload);
                 };
@@ -124,36 +128,44 @@ public final class ExecutionWorkerBenchmark {
                 .redirectOutput(ProcessBuilder.Redirect.DISCARD)
                 .redirectError(ProcessBuilder.Redirect.DISCARD)
                 .start();
+        ProcessUsageSampler usage = taskScenario == Scenario.NORMAL
+                ? ProcessUsageSampler.start(process.pid()) : null;
 
         List<ProcessHandle> descendants = List.of();
         String termination;
-        if (taskScenario == Scenario.TIMEOUT_CHILD && command.readyPath != null) {
-            awaitReady(command.readyPath, Duration.ofSeconds(3));
-            descendants = process.toHandle().descendants().toList();
-            process.destroyForcibly();
-            process.waitFor(5, TimeUnit.SECONDS);
-            termination = "TIMED_OUT_ROOT_ONLY";
-        } else if (taskScenario == Scenario.MEMORY_LIMIT) {
-            Thread.sleep(1_000);
-            process.destroyForcibly();
-            process.waitFor(5, TimeUnit.SECONDS);
-            termination = "CANCELLED_BY_BENCHMARK";
-        } else {
-            if (process.waitFor(normalWorkload.waitTimeout().toMillis(), TimeUnit.MILLISECONDS)) {
-                termination = process.exitValue() == 0 ? "EXITED" : "EXITED_NON_ZERO";
-            } else {
+        try {
+            if (taskScenario == Scenario.TIMEOUT_CHILD && command.readyPath != null) {
+                awaitReady(command.readyPath, Duration.ofSeconds(3));
+                descendants = process.toHandle().descendants().toList();
                 process.destroyForcibly();
                 process.waitFor(5, TimeUnit.SECONDS);
-                termination = "TIMED_OUT_BY_BENCHMARK";
+                termination = "TIMED_OUT_ROOT_ONLY";
+            } else if (taskScenario == Scenario.MEMORY_LIMIT) {
+                Thread.sleep(1_000);
+                process.destroyForcibly();
+                process.waitFor(5, TimeUnit.SECONDS);
+                termination = "CANCELLED_BY_BENCHMARK";
+            } else {
+                if (process.waitFor(normalWorkload.waitTimeout().toMillis(), TimeUnit.MILLISECONDS)) {
+                    termination = process.exitValue() == 0 ? "EXITED" : "EXITED_NON_ZERO";
+                } else {
+                    process.destroyForcibly();
+                    process.waitFor(5, TimeUnit.SECONDS);
+                    termination = "TIMED_OUT_BY_BENCHMARK";
+                }
             }
-        }
 
-        int residual = alive(descendants);
-        descendants.forEach(handle -> {
-            if (handle.isAlive()) handle.destroyForcibly();
-        });
-        return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName, termination, null, null,
-                residual, residual == 0, taskScenario != Scenario.NORMAL || verifiedOutput(command));
+            int residual = alive(descendants);
+            descendants.forEach(handle -> {
+                if (handle.isAlive()) handle.destroyForcibly();
+            });
+            Long cpuMicros = taskScenario == Scenario.NORMAL ? usage.cpuTimeMicros() : null;
+            return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName, termination, cpuMicros,
+                    usage == null ? null : usage.memoryPeakBytes(), residual, residual == 0,
+                    taskScenario != Scenario.NORMAL || verifiedOutput(command));
+        } finally {
+            if (usage != null) usage.close();
+        }
     }
 
     private static TaskMetric runTaskCage(Scenario scenario, int batch, int index, int concurrency,
@@ -176,6 +188,151 @@ public final class ExecutionWorkerBenchmark {
             return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName, result.terminationReason().name(),
                     result.usage().cpuTimeMicros(), result.usage().memoryPeakBytes(), 0, true,
                     outputVerified);
+        }
+    }
+
+    private static TaskMetric runDockerPerTask(Scenario scenario, int batch, int index, int concurrency,
+                                               Path workDirectory, InputArtifact source,
+                                               NormalWorkload normalWorkload) throws Exception {
+        Scenario taskScenario = taskScenario(scenario, batch, index, concurrency);
+        Command taskCommand = commandFor(taskScenario, index, workDirectory, source.file(), normalWorkload);
+        String containerName = "taskcage-benchmark-" + UUID.randomUUID();
+        long startedNanos = System.nanoTime();
+
+        if (taskScenario == Scenario.TIMEOUT_CHILD) {
+            Process process = startDocker(dockerRun(containerName, "128m", 32, GHOST_TREE.toString(),
+                    taskCommand.arguments));
+            try {
+                awaitReady(taskCommand.readyPath, Duration.ofSeconds(3));
+                runDocker(List.of(DOCKER, "stop", "--time", "0", containerName));
+                if (!process.waitFor(10, TimeUnit.SECONDS)) {
+                    process.destroyForcibly();
+                    throw new IllegalStateException("docker timeout task did not stop");
+                }
+                boolean removed = dockerContainerAbsent(containerName);
+                return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName,
+                        "TIMED_OUT_CONTAINER", null, null, 0, removed, true);
+            } finally {
+                process.destroyForcibly();
+                removeDockerContainer(containerName);
+            }
+        }
+
+        if (taskScenario == Scenario.MEMORY_LIMIT) {
+            String containerId = runDocker(dockerRunDetached(containerName, "16m", 8, MEMORY_HOG.toString(),
+                    taskCommand.arguments)).trim();
+            try {
+                runDocker(List.of(DOCKER, "wait", containerId));
+                boolean oomKilled = Boolean.parseBoolean(runDocker(List.of(
+                        DOCKER, "inspect", "--format", "{{.State.OOMKilled}}", containerId)).trim());
+                removeDockerContainer(containerName);
+                return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName,
+                        oomKilled ? "MEMORY_LIMIT_EXCEEDED" : "EXITED_NON_ZERO", null, null,
+                        0, dockerContainerAbsent(containerName), true);
+            } finally {
+                removeDockerContainer(containerName);
+            }
+        }
+
+        Process process = startDocker(dockerRun(containerName, "1024m", 32,
+                "/usr/local/bin/taskcage-docker-task-exec", dockerCommand(taskCommand)));
+        String output = readProcessOutput(process, normalWorkload.waitTimeout());
+        DockerTaskMetrics metrics = parseDockerTaskMetrics(output);
+        boolean removed = dockerContainerAbsent(containerName);
+        return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName,
+                metrics.exitCode == 0 ? "EXITED" : "EXITED_NON_ZERO", metrics.cpuTimeMicros,
+                metrics.memoryPeakBytes, 0, removed, verifiedOutput(taskCommand));
+    }
+
+    private static List<String> dockerRun(String name, String memory, int pids, String entrypoint,
+                                          List<String> arguments) {
+        List<String> command = dockerRunBase(name, memory, pids);
+        command.add("--rm");
+        command.add("--entrypoint");
+        command.add(entrypoint);
+        command.add(requiredEnv("BENCHMARK_TASK_IMAGE"));
+        command.addAll(arguments);
+        return command;
+    }
+
+    private static List<String> dockerRunDetached(String name, String memory, int pids, String entrypoint,
+                                                  List<String> arguments) {
+        List<String> command = dockerRunBase(name, memory, pids);
+        command.add("--detach");
+        command.add("--entrypoint");
+        command.add(entrypoint);
+        command.add(requiredEnv("BENCHMARK_TASK_IMAGE"));
+        command.addAll(arguments);
+        return command;
+    }
+
+    private static List<String> dockerRunBase(String name, String memory, int pids) {
+        return new ArrayList<>(List.of(DOCKER, "run", "--name", name, "--cpus", "1.0",
+                "--memory", memory, "--pids-limit", Integer.toString(pids),
+                "--workdir", "/taskcage-work", "--volume",
+                requiredEnv("BENCHMARK_WORK_VOLUME") + ":/taskcage-work"));
+    }
+
+    private static List<String> dockerCommand(Command command) {
+        List<String> arguments = new ArrayList<>();
+        arguments.add(command.program.toString());
+        arguments.addAll(command.arguments);
+        return arguments;
+    }
+
+    private static Process startDocker(List<String> arguments) throws IOException {
+        return new ProcessBuilder(arguments).redirectErrorStream(true).start();
+    }
+
+    private static String runDocker(List<String> arguments) throws Exception {
+        Process process = startDocker(arguments);
+        return readProcessOutput(process, Duration.ofSeconds(15));
+    }
+
+    private static String readProcessOutput(Process process, Duration timeout) throws Exception {
+        if (!process.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
+            process.destroyForcibly();
+            throw new IllegalStateException("docker command did not complete within " + timeout);
+        }
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        if (process.exitValue() != 0) {
+            throw new IllegalStateException("docker command failed (" + process.exitValue() + "): " + output);
+        }
+        return output;
+    }
+
+    private static DockerTaskMetrics parseDockerTaskMetrics(String output) {
+        for (String line : output.lines().toList()) {
+            String[] values = line.trim().split("\\s+");
+            if (values.length == 4 && values[0].equals(DOCKER_TASK_METRICS)) {
+                try {
+                    return new DockerTaskMetrics(Long.parseLong(values[1]), Long.parseLong(values[2]),
+                            Integer.parseInt(values[3]));
+                } catch (NumberFormatException exception) {
+                    throw new IllegalStateException("invalid Docker task metrics: " + line, exception);
+                }
+            }
+        }
+        throw new IllegalStateException("Docker task metrics were not emitted: " + output);
+    }
+
+    private static boolean dockerContainerAbsent(String name) throws Exception {
+        Process process = startDocker(List.of(DOCKER, "container", "inspect", name));
+        if (!process.waitFor(10, TimeUnit.SECONDS)) {
+            process.destroyForcibly();
+            return false;
+        }
+        return process.exitValue() != 0;
+    }
+
+    private static void removeDockerContainer(String name) {
+        try {
+            Process process = startDocker(List.of(DOCKER, "rm", "--force", name));
+            process.waitFor(10, TimeUnit.SECONDS);
+        } catch (IOException ignored) {
+            // Best effort only: the benchmark reports a failed cleanup assertion if it survives.
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -331,6 +488,85 @@ public final class ExecutionWorkerBenchmark {
         return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
     }
 
+    private static final class ProcessUsageSampler implements AutoCloseable {
+        private final long pid;
+        private final Thread thread;
+        private volatile boolean running = true;
+        private volatile long memoryPeakBytes = -1;
+        private volatile long cpuTimeMicros = -1;
+
+        private ProcessUsageSampler(long pid) {
+            this.pid = pid;
+            thread = new Thread(this::sample, "taskcage-benchmark-process-usage");
+            thread.setDaemon(true);
+            thread.start();
+        }
+
+        static ProcessUsageSampler start(long pid) {
+            return new ProcessUsageSampler(pid);
+        }
+
+        private void sample() {
+            while (running) {
+                memoryPeakBytes = Math.max(memoryPeakBytes, readMemoryPeak(pid));
+                cpuTimeMicros = Math.max(cpuTimeMicros, readCpuTimeMicros(pid));
+                try {
+                    Thread.sleep(10);
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+            memoryPeakBytes = Math.max(memoryPeakBytes, readMemoryPeak(pid));
+            cpuTimeMicros = Math.max(cpuTimeMicros, readCpuTimeMicros(pid));
+        }
+
+        private long memoryPeakBytes() {
+            return memoryPeakBytes;
+        }
+
+        private long cpuTimeMicros() {
+            return cpuTimeMicros;
+        }
+
+        @Override
+        public void close() {
+            running = false;
+            thread.interrupt();
+            try {
+                thread.join(100);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        private static long readMemoryPeak(long pid) {
+            try {
+                for (String line : Files.readAllLines(Path.of("/proc", Long.toString(pid), "status"))) {
+                    if (line.startsWith("VmHWM:") || line.startsWith("VmRSS:")) {
+                        String[] fields = line.trim().split("\\s+");
+                        return Long.parseLong(fields[1]) * 1024;
+                    }
+                }
+            } catch (IOException | NumberFormatException ignored) {
+                // The process can exit between samples; retain the last observed peak.
+            }
+            return -1;
+        }
+
+        private static long readCpuTimeMicros(long pid) {
+            try {
+                String stat = Files.readString(Path.of("/proc", Long.toString(pid), "stat"));
+                int commandEnd = stat.lastIndexOf(')');
+                String[] fields = stat.substring(commandEnd + 1).trim().split("\\s+");
+                long jiffies = Long.parseLong(fields[11]) + Long.parseLong(fields[12]);
+                return TimeUnit.MILLISECONDS.toMicros(jiffies * 10);
+            } catch (IOException | NumberFormatException | IndexOutOfBoundsException ignored) {
+                return -1;
+            }
+        }
+    }
+
     private static String render(Mode mode, Scenario scenario, int concurrency, int warmupBatches,
                                  List<BatchMetric> batches, List<String> validationErrors) {
         List<TaskMetric> tasks = batches.stream().flatMap(batch -> batch.tasks.stream()).toList();
@@ -414,7 +650,7 @@ public final class ExecutionWorkerBenchmark {
                         || task.taskMemoryPeakBytes == null || task.taskMemoryPeakBytes < 0) {
                     errors.add("task " + index + " (" + task.workload + ") has missing TaskCage usage metrics");
                 }
-            } else if (workload == Scenario.TIMEOUT_CHILD) {
+            } else if (mode == Mode.PROCESS_BUILDER && workload == Scenario.TIMEOUT_CHILD) {
                 if (task.cleanupConfirmed || task.residualProcesses < 1) {
                     errors.add("task " + index + " (timeout_child) did not demonstrate a residual descendant");
                 }
@@ -428,10 +664,14 @@ public final class ExecutionWorkerBenchmark {
     private static String expectedTermination(Mode mode, Scenario workload) {
         if (workload == Scenario.NORMAL) return "EXITED";
         if (workload == Scenario.TIMEOUT_CHILD) {
-            return mode == Mode.TASK_CAGE ? "TIMED_OUT" : "TIMED_OUT_ROOT_ONLY";
+            return switch (mode) {
+                case TASK_CAGE -> "TIMED_OUT";
+                case DOCKER_PER_TASK -> "TIMED_OUT_CONTAINER";
+                case PROCESS_BUILDER -> "TIMED_OUT_ROOT_ONLY";
+            };
         }
         if (workload == Scenario.MEMORY_LIMIT) {
-            return mode == Mode.TASK_CAGE ? "MEMORY_LIMIT_EXCEEDED" : "CANCELLED_BY_BENCHMARK";
+            return mode == Mode.PROCESS_BUILDER ? "CANCELLED_BY_BENCHMARK" : "MEMORY_LIMIT_EXCEEDED";
         }
         throw new IllegalArgumentException("mixed_failure is a requested scenario, not a task workload");
     }
@@ -496,14 +736,15 @@ public final class ExecutionWorkerBenchmark {
     }
 
     enum Mode {
-        PROCESS_BUILDER("processbuilder"), TASK_CAGE("taskcage");
+        PROCESS_BUILDER("processbuilder"), DOCKER_PER_TASK("docker_per_task"), TASK_CAGE("taskcage");
         private final String jsonName;
         Mode(String jsonName) { this.jsonName = jsonName; }
         static Mode parse(String value) { return switch (value) {
             case "processbuilder" -> PROCESS_BUILDER;
+            case "docker_per_task" -> DOCKER_PER_TASK;
             case "taskcage" -> TASK_CAGE;
             default -> throw new IllegalArgumentException(
-                    "BENCHMARK_MODE must be processbuilder or taskcage");
+                    "BENCHMARK_MODE must be processbuilder, docker_per_task or taskcage");
         }; }
     }
 
@@ -590,6 +831,7 @@ public final class ExecutionWorkerBenchmark {
             this(program, arguments, readyPath, null);
         }
     }
+    private record DockerTaskMetrics(long memoryPeakBytes, long cpuTimeMicros, int exitCode) {}
     private record InputArtifact(Path file, LocalInputArtifact reference) {
         private void delete() throws IOException {
             Files.deleteIfExists(file);

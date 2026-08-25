@@ -77,6 +77,7 @@ services:
       - taskcage-runtime:/run/taskcage
       - taskcage-work:/taskcage-work
       - ${BENCHMARK_INPUT_HOST_PATH:-/dev/null}:/benchmark-input/input:ro
+      - ${BENCHMARK_DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock
 
 volumes:
   taskcage-runtime:
