@@ -41,8 +41,8 @@ python3 dev/benchmark/lab.py run
 ```bash
 python3 dev/benchmark/lab.py run \
   --input /absolute/path/to/input.mp4 \
-  --scenarios normal \
-  --concurrency 1 --warmup 2 --iterations 100
+  --concurrency 1 --warmup 2 --iterations 100 \
+  --control-iterations 1
 ```
 
 `audio_to_wav`가 너무 빨리 끝나 고정 관리 비용의 비중이 과도하게 보이면, 같은 입력을 H.264로 재인코딩하는 benchmark 전용 Capsule을 사용한다.
@@ -56,7 +56,7 @@ python3 dev/benchmark/lab.py run \
 
 기본적으로 두 비교 Worker container에 `CPU 1.0`을 적용한다. 이는 Capsule의 기본 `CPU 1` 예산과 동일한 조건에서 비교하기 위한 설정이며, 필요하면 `--comparator-cpus`로 변경할 수 있다.
 
-기본값은 `normal`, `timeout_child`, `memory_limit`을 각각 `processbuilder`, `taskcage`로 한 번씩 측정하며 warm-up은 수행하지 않는다(`warmup=0`, `iterations=1`). 실행이 끝나면 컨테이너를 정리하고, 터미널에 원시 JSON과 정적 HTML 보고서의 절대 경로를 출력한다. HTML 보고서는 정상 변환에서만 지연시간과 메모리 peak를 비교하고, timeout·memory 제한은 각각 전체 정리와 작업별 제한을 O/X로 표시한다.
+기본값은 `normal`, `timeout_child`, `memory_limit`을 각각 `processbuilder`, `taskcage`로 한 번씩 측정하며 warm-up은 수행하지 않는다(`warmup=0`, `iterations=1`). `--iterations`와 `--warmup`은 정상 변환에만 적용되며, 제어 시나리오는 기본적으로 `--control-iterations 1`로 실행된다. 실행이 끝나면 컨테이너를 정리하고, 터미널에 원시 JSON과 정적 HTML 보고서의 절대 경로를 출력한다. HTML 보고서는 정상 변환에서만 지연시간과 메모리 peak를 비교하고, timeout·memory 제한은 각각 전체 정리와 작업별 제한을 O/X로 표시한다.
 
 정상 변환의 메모리 그래프는 전체 실행 footprint를 보수적으로 나타낸다. `processbuilder`는 Java Worker와 그 자식 프로세스 트리를, `taskcage`는 Java Worker·`taskcaged` 프로세스·Task cgroup을 포함한다. privileged daemon container의 root cgroup은 호스트 범위까지 보일 수 있어 사용하지 않는다. 서로 다른 구성 요소의 peak 시점은 일치하지 않을 수 있으므로, 값은 같은 시점의 시스템 peak가 아닌 보수적 상한이다.
 

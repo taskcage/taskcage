@@ -182,6 +182,8 @@ def chart(title: str, description: str, executions: list[dict[str, Any]], name: 
 
 
 def control_table(executions: list[dict[str, Any]]) -> str:
+    if not executions:
+        return '<section class="card"><h2>실패 제어 검증</h2><p class="muted">timeout_child 또는 memory_limit 시나리오를 실행하지 않아 O/X 결과가 없습니다.</p></section>'
     rows = []
     for execution in executions:
         worker = execution["workerResult"]
@@ -242,7 +244,7 @@ def execute(args: argparse.Namespace) -> None:
     if input_file and not input_file.is_file():
         raise SystemExit(f"--input must point to a regular file: {input_file}")
     input_manifest = None if input_file is None else {"name": input_file.name, "bytes": input_file.stat().st_size}
-    write_json(root / "manifest.json", {"runId": run_id, "environment": {"kind": "local-docker", "hostArchitecture": os.uname().machine}, "comparators": ["processbuilder", "taskcage"], "scenarios": args.scenarios, "normalWorkload": args.normal_workload, "comparatorCpuLimit": args.comparator_cpus, "concurrency": args.concurrency, "warmup": args.warmup, "iterations": args.iterations, "input": input_manifest, "measurementBoundary": "latency covers Java request submission through terminal result and normal output validation; memory is a conservative full execution footprint upper bound"})
+    write_json(root / "manifest.json", {"runId": run_id, "environment": {"kind": "local-docker", "hostArchitecture": os.uname().machine}, "comparators": ["processbuilder", "taskcage"], "scenarios": args.scenarios, "normalWorkload": args.normal_workload, "comparatorCpuLimit": args.comparator_cpus, "concurrency": args.concurrency, "warmup": args.warmup, "iterations": args.iterations, "controlIterations": args.control_iterations, "input": input_manifest, "measurementBoundary": "latency covers Java request submission through terminal result and normal output validation; memory is a conservative full execution footprint upper bound"})
     env = os.environ | {
         "BENCHMARK_MAX_CONCURRENT_TASKS": str(args.concurrency),
         "BENCHMARK_WORKER_CPUS": str(args.comparator_cpus),
@@ -256,10 +258,12 @@ def execute(args: argparse.Namespace) -> None:
         command(COMPOSE + ["build", "--quiet", "taskcaged", "benchmark-worker"], env=env)
         append(events, {"type": "build_finished"})
         for scenario in args.scenarios:
+            scenario_warmup = args.warmup if scenario == "normal" else 0
+            scenario_iterations = args.iterations if scenario == "normal" else args.control_iterations
             for mode in ("processbuilder", "taskcage"):
                 append(events, {"type": "execution_started", "scenario": scenario, "mode": mode})
                 if mode == "taskcage": command(COMPOSE + ["up", "--detach", "--wait", "taskcaged"], env=env)
-                worker_command = COMPOSE + ["run", "--rm", "--no-deps", "-e", f"BENCHMARK_MODE={mode}", "-e", f"BENCHMARK_SCENARIO={scenario}", "-e", f"BENCHMARK_NORMAL_WORKLOAD={args.normal_workload}", "-e", f"BENCHMARK_CONCURRENCY={args.concurrency}", "-e", f"BENCHMARK_WARMUP={args.warmup}", "-e", f"BENCHMARK_ITERATIONS={args.iterations}", "-e", "BENCHMARK_TASK_IMAGE=taskcage-benchmark/taskcaged:local", "-e", "BENCHMARK_WORK_VOLUME=taskcage-benchmark_taskcage-work"]
+                worker_command = COMPOSE + ["run", "--rm", "--no-deps", "-e", f"BENCHMARK_MODE={mode}", "-e", f"BENCHMARK_SCENARIO={scenario}", "-e", f"BENCHMARK_NORMAL_WORKLOAD={args.normal_workload}", "-e", f"BENCHMARK_CONCURRENCY={args.concurrency}", "-e", f"BENCHMARK_WARMUP={scenario_warmup}", "-e", f"BENCHMARK_ITERATIONS={scenario_iterations}"]
                 if input_file:
                     worker_command += ["-e", "BENCHMARK_INPUT_FILE=/benchmark-input/input"]
                 worker_command += ["benchmark-worker"]
@@ -303,9 +307,9 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     run_parser = sub.add_parser("run")
     run_parser.add_argument("--concurrency", type=int, default=2); run_parser.add_argument("--warmup", type=int, default=0); run_parser.add_argument("--iterations", type=int, default=1)
-    run_parser.add_argument("--scenarios", nargs="+", default=["normal", "timeout_child", "memory_limit"]); run_parser.add_argument("--input", type=pathlib.Path, help="optional host media file for normal Capsule and ProcessBuilder runs"); run_parser.add_argument("--normal-workload", choices=["audio_to_wav", "video_transcode"], default="audio_to_wav"); run_parser.add_argument("--comparator-cpus", type=float, default=1.0, help="CPU limit applied to both benchmark worker containers; default matches the Capsule CPU budget")
+    run_parser.add_argument("--scenarios", nargs="+", default=["normal", "timeout_child", "memory_limit"]); run_parser.add_argument("--input", type=pathlib.Path, help="optional host media file for normal Capsule and ProcessBuilder runs"); run_parser.add_argument("--normal-workload", choices=["audio_to_wav", "video_transcode"], default="audio_to_wav"); run_parser.add_argument("--control-iterations", type=int, default=1, help="iterations for each non-normal control scenario"); run_parser.add_argument("--comparator-cpus", type=float, default=1.0, help="CPU limit applied to both benchmark worker containers; default matches the Capsule CPU budget")
     args = parser.parse_args()
-    if args.concurrency < 1 or args.warmup < 0 or args.iterations < 1: parser.error("invalid run sizes")
+    if args.concurrency < 1 or args.warmup < 0 or args.iterations < 1 or args.control_iterations < 1: parser.error("invalid run sizes")
     execute(args)
 
 

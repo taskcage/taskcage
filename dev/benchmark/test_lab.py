@@ -64,6 +64,7 @@ class BenchmarkLabTest(unittest.TestCase):
         self.assertIn("정상 변환: Java 호출 기준 비교", contents)
         self.assertIn("32.0 MiB", contents)
         self.assertIn("p50 20 ms", contents)
+        self.assertIn("O/X 결과가 없습니다", contents)
 
 
 if __name__ == "__main__":
