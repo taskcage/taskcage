@@ -115,7 +115,8 @@ docker run --rm \
 ```
 
 The Pack's Runtime Package must be compatible with the container's Linux CPU architecture. Signed Pack verification
-and a trust store are future hardened-mode features; they are not required for the basic local-operator flow.
+and a trust store are future hardened-mode features; they are not required for the basic local-operator flow, even
+when a legacy Pack still contains a detached signature.
 
 ## Publishing
 

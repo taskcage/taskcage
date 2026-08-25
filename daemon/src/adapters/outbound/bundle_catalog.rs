@@ -772,12 +772,10 @@ impl VerifiedArchive {
         let bundle: BundleManifest = decode_manifest(&bundle_raw, BUNDLE_JSON)?;
         let profile: BundleProfile = decode_manifest(&profile_raw, PROFILE_JSON)?;
         validate_bundle(&bundle, &profile, &profile_raw)?;
-        if let Some(signature) = signature {
+        if !allow_unsigned {
+            let signature = signature
+                .ok_or_else(|| BundleError::Signature("signature.sig가 필요합니다".to_owned()))?;
             verify_signature(&bundle, &checksums, &signature, keys)?;
-        } else if !allow_unsigned {
-            return Err(BundleError::Signature(
-                "signature.sig가 필요합니다".to_owned(),
-            ));
         }
         let bundle_canonical = canonical_json(&bundle)?;
         let profile_canonical = canonical_json(&profile)?;
@@ -1587,6 +1585,19 @@ pub(crate) mod test_support {
             VerifiedArchive::read(archive.path(), &[], false),
             Err(BundleError::Archive(_))
         ));
+    }
+
+    #[test]
+    fn basic_mode_accepts_a_signed_bundle_without_a_trust_anchor() {
+        let profile = profile_bytes();
+        let bundle = bundle_bytes(
+            &profile,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let (entries, _keys) = signed_entries(bundle, profile);
+        let archive = write_archive(entries);
+
+        assert!(VerifiedArchive::read(archive.path(), &[], true).is_ok());
     }
 
     #[test]
