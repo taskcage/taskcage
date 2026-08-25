@@ -88,6 +88,7 @@ pub mod remote_server {
 }
 pub mod resource_budget;
 pub mod runtime_package;
+pub mod runtime_package_builder;
 #[cfg(target_os = "linux")]
 pub(crate) use adapters::inbound::local_uds::server;
 #[cfg(target_os = "linux")]

@@ -1,12 +1,11 @@
 #!/bin/sh
 set -eu
 
-source_root=/taskcage-work/runtime-package-source
-entrypoint=${source_root}/rootfs/bin/ffmpeg
-library_root=${source_root}/rootfs/lib
-sbom=${source_root}/rootfs/share/sbom.spdx.json
-manifest=${source_root}/runtime-package.json
-file_entries=/taskcage-work/ffmpeg-files.json
+source_root=/taskcage-work/ffmpeg-rootfs
+runtime_package=/taskcage-work/runtime-package-source
+entrypoint=${source_root}/bin/ffmpeg
+library_root=${source_root}/lib
+sbom=${source_root}/share/sbom.spdx.json
 
 case "$(uname -m)" in
   x86_64|aarch64) package_architecture="$(uname -m)" ;;
@@ -16,8 +15,8 @@ case "$(uname -m)" in
     ;;
 esac
 
-rm -rf -- "${source_root}"
-mkdir -p "${source_root}/rootfs/bin" "${library_root}" "${source_root}/rootfs/share"
+rm -rf -- "${source_root}" "${runtime_package}"
+mkdir -p "${source_root}/bin" "${library_root}" "${source_root}/share"
 chmod 0700 "${source_root}"
 
 cp /usr/bin/ffmpeg "${entrypoint}"
@@ -41,45 +40,18 @@ ldd /usr/bin/ffmpeg \
 printf '%s\n' '{"spdxVersion":"SPDX-2.3"}' >"${sbom}"
 chmod 0444 "${sbom}"
 
-{
-  first=true
-  find "${source_root}/rootfs" -type f -printf '%P\n' | sort | while IFS= read -r path; do
-    source_file="${source_root}/rootfs/${path}"
-    case "${path}" in
-      bin/*) mode=0555 ;;
-      *) mode=0444 ;;
-    esac
-    if [ "${first}" = true ]; then
-      first=false
-    else
-      printf ',\n'
-    fi
-    printf '    {"path":"%s","digest":"sha256:%s","sizeBytes":%s,"mode":"%s"}' \
-      "${path}" \
-      "$(sha256sum "${source_file}" | cut -d ' ' -f 1)" \
-      "$(stat -c '%s' "${source_file}")" \
-      "${mode}"
-  done
-  printf '\n'
-} >"${file_entries}"
+case "${package_architecture}" in
+  x86_64) platform=linux/amd64 ;;
+  aarch64) platform=linux/arm64 ;;
+esac
 
-printf '%s\n' \
-  '{' \
-  '  "schemaVersion": "taskcage.runtime-package/v0alpha1",' \
-  '  "id": "org.taskcage.ffmpeg",' \
-  '  "version": "0.0.0-container.1",' \
-  '  "platform": {' \
-  '    "os": "linux",' \
-  "    \"architecture\": \"${package_architecture}\"," \
-  '    "abi": "gnu",' \
-  '    "libc": { "family": "glibc", "minimumVersion": "2.17" }' \
-  '  },' \
-  '  "entrypoint": "bin/ffmpeg",' \
-  '  "libraryPaths": ["lib"],' \
-  '  "files": [' \
-  "$(cat "${file_entries}")" \
-  '  ],' \
-  '  "licenses": [],' \
-  '  "sbom": { "format": "SPDX-JSON-2.3", "path": "share/sbom.spdx.json" }' \
-  '}' >"${manifest}"
-chmod 0444 "${manifest}"
+taskcage runtime build \
+  --source-rootfs "${source_root}" \
+  --output "${runtime_package}" \
+  --id org.taskcage.ffmpeg \
+  --version 0.0.0-container.1 \
+  --platform "${platform}" \
+  --glibc-minimum 2.17 \
+  --entrypoint bin/ffmpeg \
+  --library-path lib \
+  --sbom share/sbom.spdx.json >/dev/null
