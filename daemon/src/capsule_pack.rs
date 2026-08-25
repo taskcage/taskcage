@@ -6,11 +6,10 @@ use std::path::{Path, PathBuf};
 
 use flate2::{Compression, write::GzEncoder};
 use serde::Serialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tar::Builder;
 
-use crate::{Error, capsulefile::CapsulefileSpec};
+use crate::{Error, capsulefile::CapsulefileSpec, runtime_package::manifest::parse_manifest};
 
 const CAPSULE_ARCHIVE: &str = "capsule.tcbundle.tar.gz";
 #[cfg(test)]
@@ -39,22 +38,14 @@ pub fn build(
     let manifest_path = runtime_package.join("runtime-package.json");
     let manifest_bytes = fs::read(&manifest_path)
         .map_err(|source| io_error("Runtime Package manifest 읽기", &manifest_path, source))?;
-    let manifest: Value = serde_json::from_slice(&manifest_bytes).map_err(|source| {
+    let validated_manifest = parse_manifest(&manifest_bytes).map_err(|source| {
         Error::InvalidArgument(format!(
-            "Runtime Package manifest JSON이 잘못되었습니다: {source}"
+            "Runtime Package manifest가 잘못되었습니다: {source}"
         ))
     })?;
-    let package_id = manifest.get("id").and_then(Value::as_str).ok_or_else(|| {
-        Error::InvalidArgument("Runtime Package manifest에 id가 필요합니다".to_owned())
-    })?;
-    let architecture = manifest
-        .pointer("/platform/architecture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            Error::InvalidArgument(
-                "Runtime Package manifest에 platform.architecture가 필요합니다".to_owned(),
-            )
-        })?;
+    let manifest = &validated_manifest.manifest;
+    let package_id = &manifest.id;
+    let architecture = &manifest.platform.architecture;
     let expected_architecture = match target_platform {
         "linux/amd64" => "x86_64",
         "linux/arm64" => "aarch64",
@@ -64,20 +55,13 @@ pub fn build(
             ));
         }
     };
-    if manifest.pointer("/platform/os").and_then(Value::as_str) != Some("linux")
-        || architecture != expected_architecture
-    {
+    if manifest.platform.os != "linux" || architecture != expected_architecture {
         return Err(Error::InvalidArgument(format!(
             "Runtime Package platform이 {target_platform}과 호환되지 않습니다"
         )));
     }
     validate_runtime_tree(runtime_package)?;
-    let canonical_manifest = serde_json_canonicalizer::to_vec(&manifest).map_err(|source| {
-        Error::InvalidArgument(format!(
-            "Runtime Package manifest canonicalization에 실패했습니다: {source}"
-        ))
-    })?;
-    let runtime_digest = format!("sha256:{:x}", Sha256::digest(canonical_manifest));
+    let runtime_digest = validated_manifest.digest.to_string();
     let capsule_archive = capsule_archive(spec, package_id, &runtime_digest)?;
 
     let output_file = OpenOptions::new()
@@ -112,7 +96,7 @@ pub fn build(
         output: output.to_path_buf(),
         name: spec.name.clone(),
         version: spec.version.clone(),
-        runtime_package_id: package_id.to_owned(),
+        runtime_package_id: package_id.clone(),
         runtime_package_digest: runtime_digest,
         platform: target_platform.to_owned(),
     })
@@ -245,6 +229,38 @@ mod tests {
     use flate2::read::GzDecoder;
     use tar::Archive;
 
+    fn write_runtime_manifest(runtime: &Path) {
+        let executable = b"tool";
+        let sbom = b"{\"spdxVersion\":\"SPDX-2.3\"}";
+        fs::write(runtime.join("rootfs/bin/tool"), executable).unwrap();
+        fs::create_dir_all(runtime.join("rootfs/share")).unwrap();
+        fs::write(runtime.join("rootfs/share/sbom.spdx.json"), sbom).unwrap();
+        fs::write(
+            runtime.join("runtime-package.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion":"taskcage.runtime-package/v0alpha1",
+                "id":"org.example.tool",
+                "version":"1.0.0",
+                "platform":{
+                    "os":"linux",
+                    "architecture":"aarch64",
+                    "abi":"gnu",
+                    "libc":{"family":"glibc","minimumVersion":"2.17"}
+                },
+                "entrypoint":"bin/tool",
+                "libraryPaths":[],
+                "files":[
+                    {"path":"bin/tool","digest":format!("sha256:{:x}", Sha256::digest(executable)),"sizeBytes":executable.len(),"mode":"0555"},
+                    {"path":"share/sbom.spdx.json","digest":format!("sha256:{:x}", Sha256::digest(sbom)),"sizeBytes":sbom.len(),"mode":"0444"}
+                ],
+                "licenses":[],
+                "sbom":{"format":"SPDX-JSON-2.3","path":"share/sbom.spdx.json"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn builds_a_self_contained_unsigned_pack_for_the_selected_platform() {
         let root = tempfile::tempdir().unwrap();
@@ -252,16 +268,7 @@ mod tests {
         fs::create_dir(&runtime).unwrap();
         fs::create_dir(runtime.join("rootfs")).unwrap();
         fs::create_dir(runtime.join("rootfs/bin")).unwrap();
-        fs::write(runtime.join("rootfs/bin/tool"), b"tool").unwrap();
-        fs::write(
-            runtime.join("runtime-package.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "id":"org.example.tool",
-                "platform":{"os":"linux","architecture":"aarch64"}
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        write_runtime_manifest(&runtime);
         let spec = capsulefile::parse(
             "FROM runtime://example.org/tool:1\nCAPSULE example.tool@1.0.0\nINPUT source ARTIFACT\nOUTPUT result FILE result.bin MEDIA_TYPE application/octet-stream MAX_BYTES 100\nCOMMAND -i ${source} ${result}\nLIMIT CPU 1 MEMORY 1MiB PIDS 1 TIMEOUT 1m\n",
         )
