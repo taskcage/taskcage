@@ -51,7 +51,13 @@ public final class ExecutionWorkerBenchmark {
             List<TaskMetric> tasks = run(mode, scenario, batch, concurrency, workDirectory);
             if (batch >= warmupBatches) measured.add(new BatchMetric(elapsedMillis(startedNanos), tasks));
         }
-        System.out.println(render(mode, scenario, concurrency, warmupBatches, measured));
+        List<TaskMetric> measuredTasks = measured.stream().flatMap(batch -> batch.tasks.stream()).toList();
+        List<String> validationErrors = validate(mode, scenario, measuredTasks);
+        System.out.println(render(mode, scenario, concurrency, warmupBatches, measured, validationErrors));
+        if (!validationErrors.isEmpty()) {
+            System.err.println("benchmark intent validation failed:\n - " + String.join("\n - ", validationErrors));
+            System.exit(2);
+        }
     }
 
     private static List<TaskMetric> run(Mode mode, Scenario scenario, int batch, int concurrency, Path workDirectory)
@@ -161,8 +167,12 @@ public final class ExecutionWorkerBenchmark {
 
     private static Scenario taskScenario(Scenario requested, int batch, int index, int concurrency) {
         if (requested == Scenario.NORMAL) return Scenario.NORMAL;
-        if (requested == Scenario.TIMEOUT_CHILD) return index == 0 ? Scenario.NORMAL : Scenario.TIMEOUT_CHILD;
-        if (requested == Scenario.MEMORY_LIMIT) return index == 0 ? Scenario.NORMAL : Scenario.MEMORY_LIMIT;
+        if (requested == Scenario.TIMEOUT_CHILD) {
+            return concurrency == 1 || index > 0 ? Scenario.TIMEOUT_CHILD : Scenario.NORMAL;
+        }
+        if (requested == Scenario.MEMORY_LIMIT) {
+            return concurrency == 1 || index > 0 ? Scenario.MEMORY_LIMIT : Scenario.NORMAL;
+        }
 
         int position = Math.floorMod(batch * concurrency + index, 10);
         return switch (position) {
@@ -199,7 +209,7 @@ public final class ExecutionWorkerBenchmark {
     }
 
     private static String render(Mode mode, Scenario scenario, int concurrency, int warmupBatches,
-                                 List<BatchMetric> batches) {
+                                 List<BatchMetric> batches, List<String> validationErrors) {
         List<TaskMetric> tasks = batches.stream().flatMap(batch -> batch.tasks.stream()).toList();
         List<TaskMetric> normalTasks = tasks.stream().filter(TaskMetric::normalWorkload).toList();
         List<Long> batchLatencies = batches.stream().map(BatchMetric::latencyMillis).sorted().toList();
@@ -210,8 +220,9 @@ public final class ExecutionWorkerBenchmark {
         long totalMillis = batchLatencies.stream().mapToLong(Long::longValue).sum();
         long taskPeak = tasks.stream().map(TaskMetric::taskMemoryPeakBytes).filter(value -> value != null)
                 .mapToLong(Long::longValue).max().orElse(-1);
-        long taskCpu = tasks.stream().map(TaskMetric::taskCpuTimeMicros).filter(value -> value != null)
-                .mapToLong(Long::longValue).sum();
+        List<Long> taskCpuSamples = tasks.stream().map(TaskMetric::taskCpuTimeMicros)
+                .filter(value -> value != null).toList();
+        long taskCpu = taskCpuSamples.isEmpty() ? -1 : taskCpuSamples.stream().mapToLong(Long::longValue).sum();
         int residual = tasks.stream().mapToInt(TaskMetric::residualProcesses).sum();
         return "{"
                 + "\"mode\":\"" + mode.jsonName + "\","
@@ -231,8 +242,75 @@ public final class ExecutionWorkerBenchmark {
                 + "\"executorContainer\":{\"memoryPeakBytes\":" + cgroupMemoryPeak()
                 + ",\"cpuUsageMicros\":" + cgroupCpuUsageMicros() + "},"
                 + "\"cleanup\":{\"residualProcesses\":" + residual
-                + ",\"cleanupConfirmed\":" + tasks.stream().allMatch(TaskMetric::cleanupConfirmed) + "}"
+                + ",\"cleanupConfirmed\":" + tasks.stream().allMatch(TaskMetric::cleanupConfirmed) + "},"
+                + "\"validation\":{\"passed\":" + validationErrors.isEmpty()
+                + ",\"errors\":" + stringsJson(validationErrors) + "}"
                 + "}";
+    }
+
+    static List<String> validate(Mode mode, Scenario requestedScenario, List<TaskMetric> tasks) {
+        List<String> errors = new ArrayList<>();
+        if (tasks.isEmpty()) {
+            errors.add("no measured tasks were produced");
+            return errors;
+        }
+        if (requestedScenario == Scenario.TIMEOUT_CHILD
+                && tasks.stream().noneMatch(task -> task.workload.equals(Scenario.TIMEOUT_CHILD.jsonName))) {
+            errors.add("timeout_child scenario did not execute a timeout workload");
+        }
+        if (requestedScenario == Scenario.MEMORY_LIMIT
+                && tasks.stream().noneMatch(task -> task.workload.equals(Scenario.MEMORY_LIMIT.jsonName))) {
+            errors.add("memory_limit scenario did not execute a memory workload");
+        }
+        for (int index = 0; index < tasks.size(); index++) {
+            TaskMetric task = tasks.get(index);
+            Scenario workload;
+            try {
+                workload = Scenario.parse(task.workload);
+            } catch (IllegalArgumentException exception) {
+                errors.add("task " + index + " has unknown workload " + task.workload);
+                continue;
+            }
+            if (workload == Scenario.MIXED_FAILURE) {
+                errors.add("task " + index + " used mixed_failure as a workload instead of a request pattern");
+                continue;
+            }
+            String expectedTermination = expectedTermination(mode, workload);
+            if (!task.termination.equals(expectedTermination)) {
+                errors.add("task " + index + " (" + task.workload + ") expected " + expectedTermination
+                        + " but got " + task.termination);
+            }
+            if (workload == Scenario.NORMAL && !task.outputVerified) {
+                errors.add("task " + index + " (normal) did not produce a verified WAV output");
+            }
+            if (mode == Mode.TASK_CAGE) {
+                if (!task.cleanupConfirmed || task.residualProcesses != 0) {
+                    errors.add("task " + index + " (" + task.workload + ") did not confirm cgroup cleanup");
+                }
+                if (task.taskCpuTimeMicros == null || task.taskCpuTimeMicros < 0
+                        || task.taskMemoryPeakBytes == null || task.taskMemoryPeakBytes < 0) {
+                    errors.add("task " + index + " (" + task.workload + ") has missing TaskCage usage metrics");
+                }
+            } else if (workload == Scenario.TIMEOUT_CHILD) {
+                if (task.cleanupConfirmed || task.residualProcesses < 1) {
+                    errors.add("task " + index + " (timeout_child) did not demonstrate a residual descendant");
+                }
+            } else if (!task.cleanupConfirmed || task.residualProcesses != 0) {
+                errors.add("task " + index + " (" + task.workload + ") left unexpected residual processes");
+            }
+        }
+        return errors;
+    }
+
+    private static String expectedTermination(Mode mode, Scenario workload) {
+        if (workload == Scenario.NORMAL) return "EXITED";
+        if (workload == Scenario.TIMEOUT_CHILD) {
+            return mode == Mode.TASK_CAGE ? "TIMED_OUT" : "TIMED_OUT_ROOT_ONLY";
+        }
+        if (workload == Scenario.MEMORY_LIMIT) {
+            return mode == Mode.TASK_CAGE ? "MEMORY_LIMIT_EXCEEDED" : "CANCELLED_BY_BENCHMARK";
+        }
+        throw new IllegalArgumentException("mixed_failure is a requested scenario, not a task workload");
     }
 
     private static long percentile(List<Long> values, double percentile) {
@@ -245,8 +323,18 @@ public final class ExecutionWorkerBenchmark {
     }
 
     private static String reasonsJson(Map<String, Integer> reasons) {
-        return reasons.entrySet().stream().map(entry -> "\"" + entry.getKey() + "\":" + entry.getValue())
+        return reasons.entrySet().stream().map(entry -> jsonString(entry.getKey()) + ":" + entry.getValue())
                 .collect(java.util.stream.Collectors.joining(",", "{", "}"));
+    }
+
+    private static String stringsJson(List<String> values) {
+        return values.stream().map(ExecutionWorkerBenchmark::jsonString)
+                .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+    }
+
+    private static String jsonString(String value) {
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + "\"";
     }
 
     private static long cgroupMemoryPeak() {
@@ -284,7 +372,7 @@ public final class ExecutionWorkerBenchmark {
         return parsed;
     }
 
-    private enum Mode {
+    enum Mode {
         PROCESS_BUILDER("processbuilder"), TASK_CAGE("taskcage");
         private final String jsonName;
         Mode(String jsonName) { this.jsonName = jsonName; }
@@ -296,7 +384,7 @@ public final class ExecutionWorkerBenchmark {
         }; }
     }
 
-    private enum Scenario {
+    enum Scenario {
         NORMAL("normal"), TIMEOUT_CHILD("timeout_child"), MEMORY_LIMIT("memory_limit"),
         MIXED_FAILURE("mixed_failure");
         private final String jsonName;
@@ -316,9 +404,9 @@ public final class ExecutionWorkerBenchmark {
         }
     }
     private record BatchMetric(long latencyMillis, List<TaskMetric> tasks) {}
-    private record TaskMetric(long latencyMillis, String workload, String termination, Long taskCpuTimeMicros,
-                              Long taskMemoryPeakBytes, int residualProcesses,
-                              boolean cleanupConfirmed, boolean outputVerified) {
+    record TaskMetric(long latencyMillis, String workload, String termination, Long taskCpuTimeMicros,
+                      Long taskMemoryPeakBytes, int residualProcesses,
+                      boolean cleanupConfirmed, boolean outputVerified) {
         private boolean normalWorkload() { return workload.equals(Scenario.NORMAL.jsonName); }
     }
 }
