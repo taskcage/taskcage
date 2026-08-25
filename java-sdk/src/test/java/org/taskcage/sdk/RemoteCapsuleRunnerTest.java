@@ -318,7 +318,7 @@ final class RemoteCapsuleRunnerTest {
             resultRequestTimeout = requestTimeout;
             if (expireNextResultRequest) {
                 expireNextResultRequest = false;
-                LockSupport.parkNanos(requestTimeout.toNanos() + Duration.ofMillis(5).toNanos());
+                parkForAtLeast(requestTimeout.plusMillis(5));
                 throw new TaskCageConnectionException(
                         "simulated transport timeout",
                         new SocketTimeoutException("simulated transport timeout"));
@@ -339,6 +339,16 @@ final class RemoteCapsuleRunnerTest {
 
         @Override
         public void close() {}
+
+        private static void parkForAtLeast(Duration duration) {
+            long startedAt = System.nanoTime();
+            long durationNanos = duration.toNanos();
+            long remainingNanos = durationNanos;
+            while (remainingNanos > 0) {
+                LockSupport.parkNanos(remainingNanos);
+                remainingNanos = durationNanos - (System.nanoTime() - startedAt);
+            }
+        }
 
         private static TaskCageConnectionException lostResponse(String stage) {
             return new TaskCageConnectionException(
