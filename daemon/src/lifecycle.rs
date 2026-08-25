@@ -290,16 +290,19 @@ impl SingleTaskLifecycle {
 pub(crate) fn classify_termination(
     evidence: &TerminationEvidence<'_>,
 ) -> Result<TerminationReason, LifecycleError> {
+    // 커널이 실제 OOM kill을 기록했다면 wall-time/cancel과 같은 시점에 관찰됐더라도
+    // 더 구체적인 종료 증거다. 제한에 닿았지만 kill되지 않은 oom/pids 사건은 아래의
+    // 명시적 control trigger를 덮어쓰지 않는다.
+    if evidence.event_delta.memory_oom_kill > 0 {
+        return Ok(TerminationReason::MemoryLimitExceeded);
+    }
     if let Some(trigger) = evidence.control.first() {
         return Ok(match trigger {
             ControlTrigger::TimedOut => TerminationReason::TimedOut,
             ControlTrigger::Cancelled => TerminationReason::Cancelled,
         });
     }
-    // 실제 kill 증거, PID 제한 증거, kill 없는 OOM 통지 순으로 더 강한 근거를 우선한다.
-    if evidence.event_delta.memory_oom_kill > 0 {
-        return Ok(TerminationReason::MemoryLimitExceeded);
-    }
+    // PID 제한 증거, kill 없는 OOM 통지 순으로 더 강한 근거를 우선한다.
     if evidence.event_delta.pids_max > 0 {
         return Ok(TerminationReason::ProcessLimitExceeded);
     }
@@ -521,6 +524,41 @@ mod tests {
                 .unwrap();
             assert_eq!(reason(payload), expected);
         }
+    }
+
+    #[test]
+    fn oom_kill_evidence_outranks_a_racing_wall_timeout() {
+        let events = KernelEvents {
+            memory_oom: 1,
+            memory_oom_kill: 1,
+            ..KernelEvents::default()
+        };
+        assert_eq!(
+            classify_termination(&TerminationEvidence {
+                execution: started(None, Some(9)),
+                control: ControlTriggers::timed_out(),
+                event_delta: &events,
+                daemon_error: false,
+            }),
+            Ok(TerminationReason::MemoryLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn a_non_killing_oom_notification_does_not_override_timeout() {
+        let events = KernelEvents {
+            memory_oom: 1,
+            ..KernelEvents::default()
+        };
+        assert_eq!(
+            classify_termination(&TerminationEvidence {
+                execution: started(None, Some(9)),
+                control: ControlTriggers::timed_out(),
+                event_delta: &events,
+                daemon_error: false,
+            }),
+            Ok(TerminationReason::TimedOut)
+        );
     }
 
     #[test]

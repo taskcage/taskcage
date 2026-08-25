@@ -72,6 +72,13 @@ pub(super) fn configure_job(
         &path.join("memory.max"),
         &limits.memory_max_bytes.get().to_string(),
     )?;
+    // memory.max는 reclaim 가능한 anonymous page를 swap으로 내보내며 한도 안에서
+    // 프로세스를 계속 살려 둘 수 있다. 작업별 memory budget이 swap으로 우회되지 않게
+    // 지원되는 kernel에서는 이 cgroup의 추가 swap 사용을 막는다.
+    let swap_max = path.join("memory.swap.max");
+    if swap_max.exists() {
+        write_and_verify(&swap_max, "0")?;
+    }
     let oom_group = path.join("memory.oom.group");
     if oom_group.exists() {
         write_and_verify(&oom_group, "1")?;

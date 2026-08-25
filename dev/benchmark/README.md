@@ -38,18 +38,29 @@ Linux cgroup v2를 제공하는 신뢰된 Docker 환경에서 저장소 루트 �
 python3 dev/benchmark/lab.py run
 ```
 
-기본값은 `normal`, `timeout_child`, `memory_limit`을 각각 `processbuilder`, `taskcage`로 실행한다. 실행 중 표시되는 `http://127.0.0.1:8765`에서 현재 단계와 TaskCage metrics를 확인할 수 있다.
+기본값은 `normal`, `timeout_child`, `memory_limit`을 각각 `processbuilder`, `taskcage`로 한 번씩 측정하며
+warm-up은 수행하지 않는다(`warmup=0`, `iterations=1`). 실행 중 표시되는
+`http://127.0.0.1:8765`에서 현재 단계, 종료 원인별 TaskCage metric과 컨테이너 자원 그래프를 확인할 수 있다.
+실행이 끝나면 컨테이너는 정리하지만 대시보드는 유지하며, 확인을 마친 뒤 `Ctrl-C`로 닫는다.
 
 ```bash
 python3 dev/benchmark/lab.py run --concurrency 8 --warmup 2 --iterations 30
 python3 dev/benchmark/lab.py run --scenarios normal --concurrency 16
+python3 dev/benchmark/lab.py run --no-keep-dashboard # 자동화에서 보고서 작성 후 바로 종료
 ```
+
+Worker는 정상 output, 시나리오별 terminal reason, TaskCage 사용량과 cleanup evidence를 자동 검증한다.
+하나라도 의도와 다르면 원시 결과와 HTML 보고서를 남긴 뒤 benchmark process가 0이 아닌 상태로 종료한다.
 
 ## 측정 경계
 
 작업 지연시간은 Worker가 실행 요청을 제출하기 직전부터 정상 출력 검증 또는 terminal result 수신까지다. 따라서 TaskCage의 SDK/UDS 요청과 daemon 처리 비용은 포함한다. 이미지 build/pull, JVM·container·daemon 시작, warm-up은 제외한다.
 
-실시간 수집은 TaskCage daemon의 opt-in Prometheus `/metrics`와 Docker container 사용량을 결합한다. ProcessBuilder 측에는 daemon metrics가 없으므로 Worker container 표본과 terminal result만 수집한다. 짧은 작업의 메모리 peak은 표본 주기에 따라 낮게 잡힐 수 있으므로, TaskCage Task가 반환하는 `memoryPeakBytes`를 우선 해석한다.
+실시간 수집은 TaskCage daemon의 opt-in Prometheus `/metrics`와 Docker container 사용량을 결합한다.
+종료 원인처럼 label이 있는 Prometheus metric도 label set을 포함한 이름으로 보존한다. ProcessBuilder 측에는
+daemon metrics가 없으므로 Worker container 표본과 terminal result만 수집한다. 각 실행이 terminal result를
+반환한 직후 `running_tasks=0`인 마지막 daemon 표본을 한 번 더 기록한다. 짧은 작업의 메모리 peak은 표본
+주기에 따라 낮게 잡힐 수 있으므로, TaskCage Task가 반환하는 `memoryPeakBytes`를 우선 해석한다.
 
 ## 해석 원칙
 

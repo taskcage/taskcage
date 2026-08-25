@@ -1,4 +1,284 @@
-<!doctype html><html lang="ko"><meta charset="utf-8"><title>TaskCage Benchmark Lab</title>
-<style>body{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;color:#17212b}.card{border:1px solid #d8dee4;border-radius:8px;padding:16px;margin:12px 0}pre{overflow:auto;background:#f6f8fa;padding:12px}</style>
-<h1>TaskCage Benchmark Lab</h1><div class="card"><b id="phase">준비 중</b><p id="detail"></p></div><div class="card"><h2>실시간 daemon metrics</h2><pre id="metrics">수집 대기 중</pre></div><div class="card"><h2>컨테이너 표본</h2><pre id="containers">수집 대기 중</pre></div><p>완료 후 같은 실행 디렉터리의 <code>report.html</code>에서 최종 비교 결과를 확인합니다.</p>
-<script>async function refresh(){try{const s=await fetch('live.json?'+Date.now()).then(x=>x.json());phase.textContent=s.phase;detail.textContent=[s.scenario,s.mode].filter(Boolean).join(' · ');const p=s.samples.at(-1);metrics.textContent=p?JSON.stringify(p.daemonMetrics,null,2):'수집 대기 중';containers.textContent=p?JSON.stringify({daemon:p.daemonContainer,worker:p.workerContainer},null,2):'수집 대기 중'}catch(_){}}setInterval(refresh,500);refresh()</script>
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TaskCage Benchmark Lab</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17212b;
+      --muted: #64748b;
+      --line: #d8dee4;
+      --panel: #ffffff;
+      --soft: #f6f8fa;
+      --blue: #2563eb;
+      --blue-open: #dbeafe;
+      --orange: #d97706;
+      --orange-open: #ffedd5;
+      --slate: #475569;
+      --red: #dc2626;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #f8fafc;
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { width: min(1180px, calc(100% - 32px)); margin: 32px auto 64px; }
+    header { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 20px; }
+    h1 { font-size: clamp(26px, 4vw, 38px); letter-spacing: -.035em; margin: 0 0 8px; }
+    h2 { font-size: 18px; margin: 0; }
+    p { margin: 0; }
+    .muted { color: var(--muted); }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel);
+      padding: 8px 12px;
+      white-space: nowrap;
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--orange); }
+    .dot.running { background: var(--blue); box-shadow: 0 0 0 4px var(--blue-open); }
+    .dot.completed { background: var(--slate); }
+    .dot.failed { background: var(--red); }
+    .grid { display: grid; gap: 14px; }
+    .kpis { grid-template-columns: repeat(6, minmax(0, 1fr)); margin-bottom: 14px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 1px 2px rgb(15 23 42 / 4%);
+    }
+    .kpi-label { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+    .kpi-value { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.025em; }
+    .kpi-note { color: var(--muted); font-size: 11px; margin-top: 5px; min-height: 1.2em; }
+    .charts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .chart-card { min-width: 0; }
+    .chart-card.wide { grid-column: 1 / -1; }
+    .chart-head { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; margin-bottom: 4px; }
+    .chart-value { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .chart-subtitle { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+    svg { display: block; width: 100%; height: 190px; overflow: visible; }
+    .legend { display: flex; flex-wrap: wrap; gap: 14px; color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .swatch { width: 18px; height: 3px; border-radius: 99px; }
+    .source-note { color: var(--muted); font-size: 12px; line-height: 1.55; margin-top: 14px; }
+    details { margin-top: 14px; }
+    summary { cursor: pointer; font-weight: 650; }
+    pre { overflow: auto; background: var(--soft); padding: 12px; border-radius: 8px; font-size: 12px; line-height: 1.45; }
+    .report-link { display: none; margin-top: 12px; }
+    .report-link.visible { display: inline-flex; }
+    a { color: var(--blue); font-weight: 650; }
+    @media (max-width: 920px) {
+      .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (max-width: 680px) {
+      main { width: min(100% - 20px, 1180px); margin-top: 20px; }
+      header { flex-direction: column; gap: 12px; }
+      .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .charts { grid-template-columns: 1fr; }
+      .chart-card.wide { grid-column: auto; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>TaskCage Benchmark Lab</h1>
+      <p class="muted" id="detail">실행 준비 중</p>
+    </div>
+    <div class="status"><span class="dot" id="status-dot"></span><strong id="phase">준비 중</strong></div>
+  </header>
+
+  <section class="grid kpis" aria-label="현재 상태">
+    <article class="card"><div class="kpi-label">실행 모드</div><div class="kpi-value" id="mode">—</div><div class="kpi-note" id="scenario">시나리오 대기</div></article>
+    <article class="card"><div class="kpi-label">실행 중 Task</div><div class="kpi-value" id="running">—</div><div class="kpi-note" id="capacity">capacity —</div></article>
+    <article class="card"><div class="kpi-label">시작된 Task</div><div class="kpi-value" id="started">—</div><div class="kpi-note" id="terminations">완료 원인 대기</div></article>
+    <article class="card"><div class="kpi-label">평균 Task 시간</div><div class="kpi-value" id="duration">—</div><div class="kpi-note">완료된 Task 기준</div></article>
+    <article class="card"><div class="kpi-label">Worker 메모리</div><div class="kpi-value" id="worker-memory">—</div><div class="kpi-note" id="worker-pids">PIDs —</div></article>
+    <article class="card"><div class="kpi-label">Daemon 메모리</div><div class="kpi-value" id="daemon-memory">—</div><div class="kpi-note" id="daemon-pids">PIDs —</div></article>
+  </section>
+
+  <section class="grid charts" aria-label="실시간 그래프">
+    <article class="card chart-card wide">
+      <div class="chart-head"><h2>Task 실행 상태</h2><span class="chart-value" id="task-latest">최근 120개 표본</span></div>
+      <p class="chart-subtitle">실행 중 Task와 daemon capacity · 약 0.5초 수집 시도</p>
+      <svg id="task-chart" role="img" aria-label="실행 중 Task와 capacity 추이"></svg>
+      <div class="legend"><span><i class="swatch" style="background:var(--blue)"></i>실행 중 Task</span><span><i class="swatch" style="background:var(--slate)"></i>Capacity</span></div>
+    </article>
+
+    <article class="card chart-card">
+      <div class="chart-head"><h2>컨테이너 메모리</h2><span class="chart-value" id="memory-latest">MiB</span></div>
+      <p class="chart-subtitle">Docker 표본값 · Task memory peak은 최종 결과가 권위값</p>
+      <svg id="memory-chart" role="img" aria-label="Worker와 daemon 컨테이너 메모리 추이"></svg>
+      <div class="legend"><span><i class="swatch" style="background:var(--orange)"></i>Worker</span><span><i class="swatch" style="background:var(--blue)"></i>Daemon</span></div>
+    </article>
+
+    <article class="card chart-card">
+      <div class="chart-head"><h2>컨테이너 CPU</h2><span class="chart-value" id="cpu-latest">%</span></div>
+      <p class="chart-subtitle">Docker CPU 사용률 표본 · 실행기별 부하 흐름 확인</p>
+      <svg id="cpu-chart" role="img" aria-label="Worker와 daemon 컨테이너 CPU 사용률 추이"></svg>
+      <div class="legend"><span><i class="swatch" style="background:var(--orange)"></i>Worker</span><span><i class="swatch" style="background:var(--blue)"></i>Daemon</span></div>
+    </article>
+  </section>
+
+  <div class="card source-note">
+    데이터: 이 실행의 <code>live.json</code> · daemon Prometheus metrics와 Docker container stats를 결합합니다.
+    ProcessBuilder 구간에는 daemon metric이 없으며, 짧은 작업의 표본 peak보다 terminal result의 Task 사용량을 우선 해석합니다.
+    <a class="report-link" id="report-link" href="report.html">완료 보고서 열기</a>
+  </div>
+
+  <details class="card">
+    <summary>원시 최신 표본 보기</summary>
+    <pre id="raw">수집 대기 중</pre>
+  </details>
+</main>
+
+<script>
+  const palette = { blue: '#2563eb', orange: '#d97706', slate: '#475569', grid: '#e2e8f0', muted: '#64748b' };
+  const $ = id => document.getElementById(id);
+  const phases = { preparing: '준비 중', building: '이미지 빌드', running: '실행 중', completed: '완료' };
+  const labels = {
+    normal: '정상 FFmpeg', timeout_child: 'Timeout + 자식 프로세스', memory_limit: '메모리 제한',
+    mixed_failure: '혼합 실패',
+    processbuilder: 'ProcessBuilder', taskcage: 'TaskCage'
+  };
+
+  function number(value) {
+    if (value == null || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function percent(value) {
+    if (typeof value !== 'string') return null;
+    return number(value.replace('%', ''));
+  }
+
+  function mebibytes(value) {
+    if (typeof value !== 'string') return null;
+    const raw = value.split('/')[0].trim();
+    const match = raw.match(/^([\d.]+)\s*([KMGT]?i?B)$/i);
+    if (!match) return null;
+    const n = Number(match[1]);
+    const unit = match[2].toUpperCase();
+    const factors = { B: 1 / 1048576, KB: 1000 / 1048576, MB: 1000000 / 1048576, GB: 1000000000 / 1048576, KIB: 1 / 1024, MIB: 1, GIB: 1024, TIB: 1048576 };
+    return n * (factors[unit] ?? 0);
+  }
+
+  function fmt(value, digits = 1) {
+    return value == null ? '—' : value.toFixed(digits);
+  }
+
+  function pathFor(values, max, width, height, pad) {
+    const innerW = width - pad * 2;
+    const innerH = height - pad * 2;
+    let path = '';
+    let drawing = false;
+    values.forEach((value, index) => {
+      if (value == null) { drawing = false; return; }
+      const x = pad + (values.length === 1 ? innerW : index * innerW / (values.length - 1));
+      const y = pad + innerH - Math.min(value / max, 1) * innerH;
+      path += `${drawing ? ' L' : ' M'} ${x.toFixed(1)} ${y.toFixed(1)}`;
+      drawing = true;
+    });
+    return path;
+  }
+
+  function chart(id, series, unit, fixedMax = null) {
+    const svg = $(id);
+    const width = 720, height = 190, pad = 32;
+    const finite = series.flatMap(item => item.values.filter(value => value != null));
+    const observed = finite.length ? Math.max(...finite) : 0;
+    const max = Math.max(fixedMax ?? observed * 1.15, 1);
+    const guides = [0, .25, .5, .75, 1].map(ratio => {
+      const y = pad + (height - pad * 2) * (1 - ratio);
+      const label = ratio === 0 || ratio === 1 ? `${(max * ratio).toFixed(max < 10 ? 1 : 0)}${unit}` : '';
+      return `<line x1="${pad}" y1="${y}" x2="${width - pad}" y2="${y}" stroke="${palette.grid}"/><text x="${pad - 7}" y="${y + 4}" text-anchor="end" fill="${palette.muted}" font-size="10">${label}</text>`;
+    }).join('');
+    const paths = series.map(item => `<path d="${pathFor(item.values, max, width, height, pad)}" fill="none" stroke="${item.color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`).join('');
+    const empty = finite.length ? '' : `<text x="${width / 2}" y="${height / 2}" text-anchor="middle" fill="${palette.muted}" font-size="13">표본 수집 대기 중</text>`;
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.innerHTML = `${guides}<line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" stroke="${palette.slate}"/>${paths}${empty}`;
+  }
+
+  function update(state) {
+    const samples = Array.isArray(state.samples) ? state.samples : [];
+    const latest = samples.at(-1) || {};
+    const metrics = latest.daemonMetrics || {};
+    const worker = latest.workerContainer || {};
+    const daemon = latest.daemonContainer || {};
+    const phase = state.phase || 'preparing';
+    const running = number(metrics.taskcage_running_tasks);
+    const capacity = number(metrics.taskcage_capacity_slots);
+    const started = number(metrics.taskcage_tasks_started_total);
+    const durationCount = number(metrics.taskcage_task_duration_seconds_count);
+    const durationSum = number(metrics.taskcage_task_duration_seconds_sum);
+    const finishedByOutcome = Object.entries(metrics)
+      .filter(([key]) => key.startsWith('taskcage_tasks_finished_total{outcome='))
+      .reduce((sum, [, value]) => sum + (number(value) ?? 0), 0);
+    const memoryFinished = number(metrics['taskcage_tasks_finished_total{outcome="memory_limit_exceeded"}']) ?? 0;
+    const timedOut = number(metrics['taskcage_tasks_finished_total{outcome="timed_out"}']) ?? 0;
+    const workerMem = mebibytes(worker.MemUsage);
+    const daemonMem = mebibytes(daemon.MemUsage);
+    const workerCpu = percent(worker.CPUPerc);
+    const daemonCpu = percent(daemon.CPUPerc);
+
+    const validationFailed = phase === 'completed' && state.validation?.passed === false;
+    $('phase').textContent = validationFailed ? '완료 · 검증 실패' : phases[phase] || phase;
+    $('status-dot').className = `dot ${validationFailed ? 'failed' : phase}`;
+    $('detail').textContent = [labels[state.scenario] || state.scenario, labels[state.mode] || state.mode].filter(Boolean).join(' · ') || '환경 준비 중';
+    $('mode').textContent = labels[state.mode] || '—';
+    $('scenario').textContent = labels[state.scenario] || '시나리오 대기';
+    $('running').textContent = state.completed ? '0' : running == null ? '—' : running.toFixed(0);
+    $('capacity').textContent = `capacity ${capacity == null ? '—' : capacity.toFixed(0)}`;
+    $('started').textContent = started == null ? '—' : started.toFixed(0);
+    $('terminations').textContent = finishedByOutcome
+      ? `완료 ${finishedByOutcome.toFixed(0)} · memory ${memoryFinished.toFixed(0)} · timeout ${timedOut.toFixed(0)}`
+      : '완료 원인 대기';
+    $('duration').textContent = durationCount > 0 ? `${(durationSum / durationCount).toFixed(2)}s` : '—';
+    $('worker-memory').textContent = workerMem == null ? '—' : `${workerMem.toFixed(1)} MiB`;
+    $('daemon-memory').textContent = daemonMem == null ? '—' : `${daemonMem.toFixed(1)} MiB`;
+    $('worker-pids').textContent = `PIDs ${worker.PIDs ?? '—'}`;
+    $('daemon-pids').textContent = `PIDs ${daemon.PIDs ?? '—'}`;
+    $('raw').textContent = samples.length ? JSON.stringify(latest, null, 2) : '수집 대기 중';
+    $('report-link').classList.toggle('visible', Boolean(state.completed && state.report));
+
+    const runningValues = samples.map(sample => number(sample.daemonMetrics?.taskcage_running_tasks));
+    const capacityValues = samples.map(sample => number(sample.daemonMetrics?.taskcage_capacity_slots));
+    const workerMemory = samples.map(sample => mebibytes(sample.workerContainer?.MemUsage));
+    const daemonMemory = samples.map(sample => mebibytes(sample.daemonContainer?.MemUsage));
+    const workerCpuValues = samples.map(sample => percent(sample.workerContainer?.CPUPerc));
+    const daemonCpuValues = samples.map(sample => percent(sample.daemonContainer?.CPUPerc));
+
+    chart('task-chart', [{ values: runningValues, color: palette.blue }, { values: capacityValues, color: palette.slate }], '', capacity || null);
+    chart('memory-chart', [{ values: workerMemory, color: palette.orange }, { values: daemonMemory, color: palette.blue }], ' MiB');
+    chart('cpu-chart', [{ values: workerCpuValues, color: palette.orange }, { values: daemonCpuValues, color: palette.blue }], '%');
+    $('task-latest').textContent = `${samples.length} / 120 표본`;
+    $('memory-latest').textContent = `Worker ${fmt(workerMem)} · Daemon ${fmt(daemonMem)} MiB`;
+    $('cpu-latest').textContent = `Worker ${fmt(workerCpu)} · Daemon ${fmt(daemonCpu)}%`;
+  }
+
+  async function refresh() {
+    try {
+      const response = await fetch(`live.json?${Date.now()}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      update(await response.json());
+    } catch (_) {
+      $('phase').textContent = '연결 대기 중';
+      $('status-dot').className = 'dot';
+    }
+  }
+
+  setInterval(refresh, 500);
+  refresh();
+</script>
+</body>
+</html>
