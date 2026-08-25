@@ -4,7 +4,7 @@
 
 Java Worker가 FFmpeg, OCR, PDF 변환기, 이미지 도구처럼 무거운 외부 프로그램을 호출할 때, TaskCage는 작업 하나를 Linux cgroup v2 경계에서 실행하고 제한·관찰·정리한다.
 
-> **Public Alpha:** 현재 설치 가능한 최신 버전은 daemon `0.7.0`, Java SDK `0.5.0`이다. `0.x`에서는 공개 API와 운영 계약이 minor 버전에서 변경될 수 있다.
+> **Public Alpha:** 다음 daemon 릴리스는 `0.8.0`이며, Java SDK 최신 버전은 `0.5.0`이다. `0.x`에서는 공개 API와 운영 계약이 minor 버전에서 변경될 수 있다.
 
 ## 왜 TaskCage인가?
 

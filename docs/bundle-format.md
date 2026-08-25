@@ -59,8 +59,9 @@ archive를 처리하고, 검증이 끝난 Bundle만 immutable cache로 활성화
 Each digest is calculated from the exact archive file bytes; trailing whitespace, an extra line, a different filename, or a
 mismatch is invalid. `signature.sig` is the unpadded base64 encoding of a 64-byte Ed25519 signature over the exact
 `checksums.txt` bytes. `bundle.json.signingKeyId` selects one configured trust anchor. Signature verification is a
-future hardened mode. The current basic Capsule Pack flow permits a missing signature, but never skips archive safety,
-checksum, manifest/profile schema, Runtime Package digest, or platform verification.
+future hardened mode. The current basic Capsule Pack flow permits a missing signature and does not require a trust
+anchor for a legacy Pack that still contains one. It never skips archive safety, checksum, manifest/profile schema,
+Runtime Package digest, or platform verification.
 
 The service operator supplies the trust anchors outside the Bundle archive. A key file contains a single unpadded base64
 Ed25519 public key, and the daemon configuration maps a stable key id to that file. Rotating a signing key means adding a
