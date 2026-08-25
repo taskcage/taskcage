@@ -5,6 +5,7 @@ pub(crate) mod capsule;
 pub(crate) mod capsule_build;
 pub(crate) mod package;
 pub(crate) mod run_once;
+pub(crate) mod runtime_build;
 pub(crate) mod secret;
 pub(crate) mod serve;
 pub(crate) mod status;
@@ -24,6 +25,7 @@ pub(crate) enum Command {
     Bundle(bundle::Command),
     Capsule(capsule::Command),
     CapsuleBuild(capsule_build::Config),
+    RuntimeBuild(runtime_build::Config),
     HashRemoteSecret,
 }
 
@@ -68,12 +70,26 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> taskcaged::Resu
                 capsule::parse(capsule_args).map(Command::Capsule)
             }
         }
+        Some(command) if command == OsStr::new("runtime") => {
+            let runtime_args = args.collect::<Vec<_>>();
+            if runtime_args
+                .first()
+                .is_some_and(|argument| argument == "build")
+            {
+                runtime_build::parse(runtime_args.into_iter().skip(1).collect())
+                    .map(Command::RuntimeBuild)
+            } else {
+                Err(Error::InvalidArgument(
+                    "runtime 뒤에는 build를 사용하세요".to_owned(),
+                ))
+            }
+        }
         Some(command) if command == OsStr::new("hash-remote-secret") => {
             secret::parse(args.collect())?;
             Ok(Command::HashRemoteSecret)
         }
         Some(other) => Err(Error::InvalidArgument(format!(
-            "알 수 없는 명령입니다: {other:?}; serve, check-environment, status, run-once, import-package, bundle, capsule 또는 hash-remote-secret을 사용하세요"
+            "알 수 없는 명령입니다: {other:?}; serve, check-environment, status, run-once, import-package, bundle, capsule, runtime 또는 hash-remote-secret을 사용하세요"
         ))),
     }
 }

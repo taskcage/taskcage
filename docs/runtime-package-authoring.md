@@ -15,9 +15,10 @@ Runtime Package (target-specific)
 Capsule Pack (.tccapsule)
 ```
 
-v1에서 Package 작성자는 target별 Runtime Package directory를 준비한다. `taskcage capsule build`는 이
-directory를 다시 해석하거나 host에서 실행하지 않고, manifest·file digest·platform 조건을 확인한 뒤 Pack에
-포함한다.
+`taskcage runtime build`는 준비한 target rootfs에서 Runtime Package directory와 manifest를 만든다. 작성자는
+실행 파일·target·entrypoint·glibc 최소 버전·license/SBOM 위치를 선언하고, CLI가 file digest·size·안전한 mode를
+생성한다. `taskcage capsule build`는 완성된 Package를 다시 해석하거나 host에서 실행하지 않고,
+manifest·file digest·platform 조건을 확인한 뒤 Pack에 포함한다.
 
 ## 지원 target
 
@@ -51,6 +52,25 @@ library path, license, SBOM과 target platform을 선언한다.
 
 daemon은 import 때 이 선언과 실제 file set을 다시 확인하고, digest로 Runtime Package cache를 공유한다.
 같은 digest를 참조하는 여러 Capsule은 Runtime 파일을 중복 저장하지 않는다.
+
+## 생성 명령
+
+```bash
+taskcage runtime build \
+  --source-rootfs ./ffmpeg-rootfs \
+  --output ./ffmpeg-runtime-linux-arm64 \
+  --id org.example.ffmpeg \
+  --version 7.1.0 \
+  --platform linux/arm64 \
+  --glibc-minimum 2.35 \
+  --entrypoint bin/ffmpeg \
+  --library-path lib \
+  --sbom share/sbom.spdx.json
+```
+
+`--source-rootfs`에는 target용 binary, shared library, license와 SPDX JSON이 준비돼 있어야 한다.
+`--license Apache-2.0:share/licenses/ffmpeg.txt`는 필요할 때 반복 지정한다. 생성 결과는 다음 단계에서
+`taskcage capsule build Capsulefile --runtime-package ./ffmpeg-runtime-linux-arm64 ...`에 전달한다.
 
 ## 작성자 책임과 TaskCage 책임
 
