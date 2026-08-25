@@ -127,7 +127,7 @@ pub(crate) fn execute(config: Config) -> taskcaged::Result<()> {
                 sbom_path: runtime.sbom_path.clone(),
             };
             runtime_oci::build_from_oci(&spec.runtime_source, &package)?;
-            temporary
+            temporary.clone()
         }
         (Some(_), true) => {
             return Err(Error::InvalidArgument(

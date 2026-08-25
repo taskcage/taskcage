@@ -152,7 +152,7 @@ pub fn parse(source: &str) -> Result<CapsulefileSpec, Error> {
 }
 
 fn parse_runtime(arguments: &[&str], line_number: usize) -> Result<RuntimeMetadata, Error> {
-    if arguments.len() < 10 || arguments.len() % 2 != 0 {
+    if arguments.len() < 10 || !arguments.len().is_multiple_of(2) {
         return invalid(
             line_number,
             "RUNTIME은 ID, VERSION, ENTRYPOINT, GLIBC, SBOM metadata pair가 필요합니다",
@@ -164,7 +164,7 @@ fn parse_runtime(arguments: &[&str], line_number: usize) -> Result<RuntimeMetada
     let mut glibc_minimum = None;
     let mut sbom_path = None;
     let mut library_paths = Vec::new();
-    for pair in arguments.chunks_exact(2) {
+    for pair in arguments.as_chunks::<2>().0 {
         match pair[0] {
             "ID" if id.is_none() => id = Some(pair[1].to_owned()),
             "VERSION" if version.is_none() => version = Some(pair[1].to_owned()),
