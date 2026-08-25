@@ -43,8 +43,8 @@ FROM runtime://example.org/ffmpeg-runtime:7.1.0
 CAPSULE ffmpeg-audio-to-wav@1.0.0
 
 INPUT source ARTIFACT
-OPTION sampleRateHz INT DEFAULT 16000 ALLOWED 8000,16000,22050,44100,48000
-OPTION channels INT DEFAULT 1 ALLOWED 1,2
+OPTION sampleRateHz INT ALLOWED 8000,16000,22050,44100,48000
+OPTION channels INT ALLOWED 1,2
 OUTPUT audio FILE result.wav MEDIA_TYPE audio/wav MAX_BYTES 1073741824
 
 COMMAND -hide_banner -loglevel error -nostdin \
@@ -68,7 +68,9 @@ ALLOW OVERRIDE MEMORY,TIMEOUT
 | `COMMAND` | 검증된 Runtime entrypoint에 전달할 안전한 argv template을 선언한다. |
 | `LIMIT`, `ALLOW OVERRIDE` | Capsule 기본 resource budget과 caller가 더 제한적으로 바꿀 수 있는 범위를 선언한다. |
 
-v1은 한 Runtime Package, 한 Profile, 한 input Artifact, scalar option, 한 output Artifact를 지원한다.
+v1은 한 Runtime Package, 한 Profile, 한 input Artifact, caller가 명시한 scalar option, 한 output Artifact를 지원한다.
+현재 Profile contract는 모든 option을 필수로 검증한다. Capsule-level option default는 이후 Profile schema 확장으로
+추가하며, Builder v1은 default를 조용히 무시하지 않는다.
 결과 파일의 도메인 의미(예: 오디오 내용이 업무적으로 올바른가)는 Capsule의 책임이 아니다. 성공은
 exit code 0, 선언 output의 존재·상한, atomic artifact publish, whole-process cleanup 확인으로 고정한다.
 

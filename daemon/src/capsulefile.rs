@@ -157,28 +157,20 @@ fn logical_lines(source: &str) -> Result<Vec<(usize, String)>, Error> {
 }
 
 fn parse_int_option(arguments: &[&str], line: usize) -> Result<Value, Error> {
-    if arguments.len() != 6
-        || arguments[1] != "INT"
-        || arguments[2] != "DEFAULT"
-        || arguments[4] != "ALLOWED"
-    {
+    if arguments.len() != 4 || arguments[1] != "INT" || arguments[2] != "ALLOWED" {
         return invalid(
             line,
-            "OPTION은 <name> INT DEFAULT <value> ALLOWED <comma-values> 형식이어야 합니다",
+            "OPTION은 <name> INT ALLOWED <comma-values> 형식이어야 합니다",
         );
     }
-    let default = parse_i64(arguments[3], line, "OPTION default")?;
-    let allowed = arguments[5]
+    let allowed = arguments[3]
         .split(',')
         .map(|value| parse_i64(value, line, "OPTION allowed value"))
         .collect::<Result<Vec<_>, _>>()?;
-    if allowed.is_empty()
-        || !allowed.windows(2).all(|values| values[0] < values[1])
-        || !allowed.contains(&default)
-    {
+    if allowed.is_empty() || !allowed.windows(2).all(|values| values[0] < values[1]) {
         return invalid(
             line,
-            "OPTION allowed values는 오름차순 unique 값이며 default를 포함해야 합니다",
+            "OPTION allowed values는 오름차순 unique 값이어야 합니다",
         );
     }
     Ok(json!({"name":arguments[0], "kind":"INT64", "required":true, "allowedValues":allowed}))
@@ -359,7 +351,7 @@ fn invalid<T>(line: usize, message: &str) -> Result<T, Error> {
 mod tests {
     use super::*;
 
-    const FFMPEG: &str = "FROM runtime://example.org/ffmpeg-runtime:7.1.0\nCAPSULE ffmpeg-audio-to-wav@1.0.0\nINPUT source ARTIFACT\nOPTION sampleRateHz INT DEFAULT 16000 ALLOWED 8000,16000,22050\nOUTPUT audio FILE result.wav MEDIA_TYPE audio/wav MAX_BYTES 1024\nCOMMAND -i ${source} -ar ${sampleRateHz} ${audio}\nLIMIT CPU 1 MEMORY 512MiB PIDS 32 TIMEOUT 2m\nALLOW OVERRIDE MEMORY,TIMEOUT\n";
+    const FFMPEG: &str = "FROM runtime://example.org/ffmpeg-runtime:7.1.0\nCAPSULE ffmpeg-audio-to-wav@1.0.0\nINPUT source ARTIFACT\nOPTION sampleRateHz INT ALLOWED 8000,16000,22050\nOUTPUT audio FILE result.wav MEDIA_TYPE audio/wav MAX_BYTES 1024\nCOMMAND -i ${source} -ar ${sampleRateHz} ${audio}\nLIMIT CPU 1 MEMORY 512MiB PIDS 32 TIMEOUT 2m\nALLOW OVERRIDE MEMORY,TIMEOUT\n";
 
     #[test]
     fn parses_a_single_shell_free_capsule_contract() {
