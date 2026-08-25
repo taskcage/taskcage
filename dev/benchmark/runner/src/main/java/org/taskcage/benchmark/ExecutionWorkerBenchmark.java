@@ -1,10 +1,15 @@
 package org.taskcage.benchmark;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -15,14 +20,18 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import org.taskcage.sdk.CpuQuota;
+import org.taskcage.sdk.ArtifactPath;
+import org.taskcage.sdk.CapsuleExecutionResult;
+import org.taskcage.sdk.CapsuleIdentity;
+import org.taskcage.sdk.CapsuleRequest;
+import org.taskcage.sdk.CapsuleRunner;
 import org.taskcage.sdk.ExecutionResult;
-import org.taskcage.sdk.ExternalCommand;
-import org.taskcage.sdk.FinishedTaskSnapshot;
-import org.taskcage.sdk.ResourceBudget;
+import org.taskcage.sdk.LocalInputArtifact;
+import org.taskcage.sdk.ProfileResourceOverrides;
+import org.taskcage.sdk.PublishedArtifact;
+import org.taskcage.sdk.Sha256Digest;
 import org.taskcage.sdk.TaskCageClient;
 import org.taskcage.sdk.TaskCageClientConfig;
-import org.taskcage.sdk.TaskSpec;
 
 /**
  * Manual, local-only comparison of a Java ProcessBuilder execution worker and taskcaged.
@@ -33,6 +42,12 @@ public final class ExecutionWorkerBenchmark {
     private static final Path FFMPEG = Path.of("/usr/bin/ffmpeg");
     private static final Path GHOST_TREE = Path.of("/usr/local/libexec/taskcage/ghost-tree");
     private static final Path MEMORY_HOG = Path.of("/usr/local/libexec/taskcage/memory-hog");
+    private static final CapsuleIdentity FFMPEG_CAPSULE =
+            new CapsuleIdentity("ffmpeg-audio-to-wav", "1.0.0");
+    private static final CapsuleIdentity GHOST_TREE_CAPSULE =
+            new CapsuleIdentity("ghost-tree-timeout", "1.0.0");
+    private static final CapsuleIdentity MEMORY_HOG_CAPSULE =
+            new CapsuleIdentity("memory-hog-limit", "1.0.0");
 
     private ExecutionWorkerBenchmark() {}
 
@@ -47,9 +62,14 @@ public final class ExecutionWorkerBenchmark {
         for (int batch = 0; batch < warmupBatches + measuredBatches; batch++) {
             Path workDirectory = WORK_ROOT.resolve(mode.jsonName + "-" + scenario.jsonName + "-" + UUID.randomUUID());
             Files.createDirectories(workDirectory);
-            long startedNanos = System.nanoTime();
-            List<TaskMetric> tasks = run(mode, scenario, batch, concurrency, workDirectory);
-            if (batch >= warmupBatches) measured.add(new BatchMetric(elapsedMillis(startedNanos), tasks));
+            InputArtifact source = createInputArtifact();
+            try {
+                long startedNanos = System.nanoTime();
+                List<TaskMetric> tasks = run(mode, scenario, batch, concurrency, workDirectory, source);
+                if (batch >= warmupBatches) measured.add(new BatchMetric(elapsedMillis(startedNanos), tasks));
+            } finally {
+                source.delete();
+            }
         }
         List<TaskMetric> measuredTasks = measured.stream().flatMap(batch -> batch.tasks.stream()).toList();
         List<String> validationErrors = validate(mode, scenario, measuredTasks);
@@ -60,7 +80,8 @@ public final class ExecutionWorkerBenchmark {
         }
     }
 
-    private static List<TaskMetric> run(Mode mode, Scenario scenario, int batch, int concurrency, Path workDirectory)
+    private static List<TaskMetric> run(Mode mode, Scenario scenario, int batch, int concurrency, Path workDirectory,
+                                        InputArtifact source)
             throws InterruptedException, ExecutionException {
         ExecutorService pool = Executors.newFixedThreadPool(concurrency);
         try {
@@ -68,8 +89,9 @@ public final class ExecutionWorkerBenchmark {
             for (int index = 0; index < concurrency; index++) {
                 int taskIndex = index;
                 Callable<TaskMetric> task = switch (mode) {
-                    case PROCESS_BUILDER -> () -> runProcessBuilder(scenario, batch, taskIndex, concurrency, workDirectory);
-                    case TASK_CAGE -> () -> runTaskCage(scenario, batch, taskIndex, concurrency, workDirectory);
+                    case PROCESS_BUILDER -> () -> runProcessBuilder(
+                            scenario, batch, taskIndex, concurrency, workDirectory, source);
+                    case TASK_CAGE -> () -> runTaskCage(scenario, batch, taskIndex, concurrency, workDirectory, source);
                 };
                 futures.add(pool.submit(task));
             }
@@ -83,9 +105,9 @@ public final class ExecutionWorkerBenchmark {
     }
 
     private static TaskMetric runProcessBuilder(Scenario scenario, int batch, int index, int concurrency,
-                                                Path workDirectory) throws Exception {
+                                                Path workDirectory, InputArtifact source) throws Exception {
         Scenario taskScenario = taskScenario(scenario, batch, index, concurrency);
-        Command command = commandFor(taskScenario, index, workDirectory);
+        Command command = commandFor(taskScenario, index, workDirectory, source.file());
         long startedNanos = System.nanoTime();
         List<String> processArguments = new ArrayList<>();
         processArguments.add(command.program.toString());
@@ -123,34 +145,49 @@ public final class ExecutionWorkerBenchmark {
     }
 
     private static TaskMetric runTaskCage(Scenario scenario, int batch, int index, int concurrency,
-                                          Path workDirectory) throws Exception {
+                                          Path workDirectory, InputArtifact source) throws Exception {
         Scenario taskScenario = taskScenario(scenario, batch, index, concurrency);
-        Command command = commandFor(taskScenario, index, workDirectory);
         long startedNanos = System.nanoTime();
-        ResourceBudget budget = budgetFor(taskScenario);
         try (TaskCageClient client = TaskCageClient.connect(TaskCageClientConfig.builder()
                 .socketPath(Path.of(requiredEnv("TASKCAGE_SOCKET")))
                 .connectTimeout(Duration.ofSeconds(2))
                 .requestTimeout(Duration.ofSeconds(5))
-                .build())) {
-            FinishedTaskSnapshot finished = client.run(UUID.randomUUID(), new TaskSpec(
-                    new ExternalCommand(command.program, command.arguments, workDirectory, Map.of()), budget),
-                    Duration.ofSeconds(25));
-            ExecutionResult result = finished.result();
+                .build());
+             CapsuleRunner runner = CapsuleRunner.external(client)) {
+            CapsuleExecutionResult finished = runner.execute(
+                    UUID.randomUUID(), requestFor(taskScenario, source.reference()), Duration.ofSeconds(25));
+            ExecutionResult result = finished.execution();
+            boolean outputVerified = taskScenario != Scenario.NORMAL || verifiedCapsuleOutput(finished);
             return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName, result.terminationReason().name(),
                     result.usage().cpuTimeMicros(), result.usage().memoryPeakBytes(), 0, true,
-                    taskScenario != Scenario.NORMAL || verifiedOutput(command));
+                    outputVerified);
         }
     }
 
-    private static ResourceBudget budgetFor(Scenario scenario) {
-        long memory = scenario == Scenario.MEMORY_LIMIT ? 16L * 1024 * 1024 : 128L * 1024 * 1024;
-        Duration wallTime = scenario == Scenario.TIMEOUT_CHILD ? Duration.ofSeconds(1)
-                : scenario == Scenario.MEMORY_LIMIT ? Duration.ofSeconds(3) : Duration.ofSeconds(15);
-        return new ResourceBudget(new CpuQuota(100_000, 100_000), memory, 32, wallTime, 4_096, 4_096);
+    private static CapsuleRequest requestFor(Scenario scenario, LocalInputArtifact source) {
+        return switch (scenario) {
+            case NORMAL -> CapsuleRequest.builder(FFMPEG_CAPSULE)
+                    .artifact("source", source)
+                    .int64("sample_rate_hz", 16_000)
+                    .int64("channels", 1)
+                    .build();
+            case TIMEOUT_CHILD -> CapsuleRequest.builder(GHOST_TREE_CAPSULE)
+                    .artifact("source", source)
+                    .int64("marker", 1)
+                    .resourceOverrides(ProfileResourceOverrides.builder()
+                            .wallTimeLimit(Duration.ofSeconds(1))
+                            .build())
+                    .build();
+            case MEMORY_LIMIT -> CapsuleRequest.builder(MEMORY_HOG_CAPSULE)
+                    .artifact("source", source)
+                    .int64("bytes", 67_108_864)
+                    .int64("seconds", 30)
+                    .build();
+            case MIXED_FAILURE -> throw new IllegalArgumentException("mixed_failure is not a task workload");
+        };
     }
 
-    private static Command commandFor(Scenario scenario, int index, Path workDirectory) {
+    private static Command commandFor(Scenario scenario, int index, Path workDirectory, Path source) {
         if (scenario == Scenario.TIMEOUT_CHILD) {
             Path ready = workDirectory.resolve("ghost-" + index + ".ready");
             return new Command(GHOST_TREE, List.of("--hold-parent", ready.toString()), ready);
@@ -161,8 +198,56 @@ public final class ExecutionWorkerBenchmark {
         Path output = workDirectory.resolve("normal-" + index + ".wav");
         return new Command(FFMPEG, List.of(
                 "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-                "-re", "-f", "lavfi", "-i", "sine=frequency=1000:duration=2",
-                "-c:a", "pcm_s16le", output.toString()), null, output);
+                "-i", source.toString(), "-map", "0:a:0", "-vn", "-c:a", "pcm_s16le",
+                "-ar", "16000", "-ac", "1", output.toString()), null, output);
+    }
+
+    private static InputArtifact createInputArtifact() throws Exception {
+        String directory = "benchmark-inputs/" + UUID.randomUUID();
+        ArtifactPath path = new ArtifactPath(directory + "/source.wav");
+        byte[] bytes = wave();
+        Path file = artifactRoot().resolve(path.value());
+        Files.createDirectories(file.getParent());
+        Files.write(file, bytes);
+        return new InputArtifact(file, new LocalInputArtifact(path, digest(bytes), bytes.length));
+    }
+
+    private static byte[] wave() {
+        int samples = 8_000 * 2;
+        ByteBuffer buffer = ByteBuffer.allocate(44 + samples * 2).order(ByteOrder.LITTLE_ENDIAN);
+        buffer.put("RIFF".getBytes(StandardCharsets.US_ASCII));
+        buffer.putInt(36 + samples * 2);
+        buffer.put("WAVEfmt ".getBytes(StandardCharsets.US_ASCII));
+        buffer.putInt(16).putShort((short) 1).putShort((short) 1).putInt(8_000);
+        buffer.putInt(16_000).putShort((short) 2).putShort((short) 16);
+        buffer.put("data".getBytes(StandardCharsets.US_ASCII)).putInt(samples * 2);
+        for (int index = 0; index < samples; index++) {
+            buffer.putShort((short) (Math.sin(2 * Math.PI * 440 * index / 8_000) * 8_000));
+        }
+        return buffer.array();
+    }
+
+    private static Sha256Digest digest(byte[] bytes) throws Exception {
+        return new Sha256Digest("sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(bytes)));
+    }
+
+    private static Path artifactRoot() {
+        return Path.of(System.getenv().getOrDefault("TASKCAGE_ARTIFACT_ROOT", "/taskcage-work/artifacts"));
+    }
+
+    private static boolean verifiedCapsuleOutput(CapsuleExecutionResult result) {
+        PublishedArtifact output = result.profileTask().artifacts().get("audio");
+        if (output == null) return false;
+        Path file = artifactRoot().resolve(output.path().value());
+        try {
+            boolean valid = Files.size(file) > 44;
+            Files.deleteIfExists(file);
+            Files.deleteIfExists(file.getParent());
+            return valid;
+        } catch (IOException exception) {
+            return false;
+        }
     }
 
     private static Scenario taskScenario(Scenario requested, int batch, int index, int concurrency) {
@@ -401,6 +486,12 @@ public final class ExecutionWorkerBenchmark {
     private record Command(Path program, List<String> arguments, Path readyPath, Path outputPath) {
         private Command(Path program, List<String> arguments, Path readyPath) {
             this(program, arguments, readyPath, null);
+        }
+    }
+    private record InputArtifact(Path file, LocalInputArtifact reference) {
+        private void delete() throws IOException {
+            Files.deleteIfExists(file);
+            Files.deleteIfExists(file.getParent());
         }
     }
     private record BatchMetric(long latencyMillis, List<TaskMetric> tasks) {}

@@ -54,7 +54,7 @@ Worker는 정상 output, 시나리오별 terminal reason, TaskCage 사용량과 
 
 ## 측정 경계
 
-작업 지연시간은 Worker가 실행 요청을 제출하기 직전부터 정상 출력 검증 또는 terminal result 수신까지다. 따라서 TaskCage의 SDK/UDS 요청과 daemon 처리 비용은 포함한다. 이미지 build/pull, JVM·container·daemon 시작, warm-up은 제외한다.
+작업 지연시간은 Worker가 실행 요청을 제출하기 직전부터 정상 출력 검증 또는 terminal result 수신까지다. 따라서 TaskCage의 SDK/UDS 요청, daemon, 사전 설치된 Capsule과 cgroup 처리 비용은 포함한다. 이미지 build/pull, JVM·container·daemon 시작, warm-up은 제외한다. `normal`은 `ffmpeg-audio-to-wav@1.0.0` Capsule을, 실패 시나리오는 이미지에만 포함된 검증용 Capsule을 실행하므로 benchmark runner는 Raw Command API를 사용하지 않는다.
 
 실시간 수집은 TaskCage daemon의 opt-in Prometheus `/metrics`와 Docker container 사용량을 결합한다.
 종료 원인처럼 label이 있는 Prometheus metric도 label set을 포함한 이름으로 보존한다. ProcessBuilder 측에는
