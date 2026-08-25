@@ -2,6 +2,7 @@ use std::ffi::{OsStr, OsString};
 
 pub(crate) mod bundle;
 pub(crate) mod capsule;
+pub(crate) mod capsule_build;
 pub(crate) mod package;
 pub(crate) mod run_once;
 pub(crate) mod secret;
@@ -22,6 +23,7 @@ pub(crate) enum Command {
     ImportPackage(package::Config),
     Bundle(bundle::Command),
     Capsule(capsule::Command),
+    CapsuleBuild(capsule_build::Config),
     HashRemoteSecret,
 }
 
@@ -55,7 +57,16 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> taskcaged::Resu
             bundle::parse(args.collect()).map(Command::Bundle)
         }
         Some(command) if command == OsStr::new("capsule") => {
-            capsule::parse(args.collect()).map(Command::Capsule)
+            let capsule_args = args.collect::<Vec<_>>();
+            if capsule_args
+                .first()
+                .is_some_and(|argument| argument == "build")
+            {
+                capsule_build::parse(capsule_args.into_iter().skip(1).collect())
+                    .map(Command::CapsuleBuild)
+            } else {
+                capsule::parse(capsule_args).map(Command::Capsule)
+            }
         }
         Some(command) if command == OsStr::new("hash-remote-secret") => {
             secret::parse(args.collect())?;
