@@ -26,7 +26,10 @@ COPY --chmod=0755 dev/container/entrypoint.sh /usr/local/bin/taskcage-container-
 COPY --chmod=0755 dev/container/remote-entrypoint.sh /usr/local/bin/taskcage-container-remote-entrypoint
 COPY --chmod=0755 dev/container/prepare-ffmpeg-package.sh /usr/local/bin/taskcage-container-prepare-ffmpeg-package
 COPY --chmod=0755 dev/container/prepare-ffmpeg-capsule.sh /usr/local/bin/taskcage-container-prepare-ffmpeg-capsule
+COPY --chmod=0755 dev/container/prepare-benchmark-capsules.sh /usr/local/bin/taskcage-container-prepare-benchmark-capsules
 COPY dev/container/ffmpeg-audio-to-wav.Capsulefile /usr/local/share/taskcage/ffmpeg-audio-to-wav.Capsulefile
+COPY dev/container/ghost-tree-timeout.Capsulefile /usr/local/share/taskcage/ghost-tree-timeout.Capsulefile
+COPY dev/container/memory-hog-limit.Capsulefile /usr/local/share/taskcage/memory-hog-limit.Capsulefile
 COPY --chmod=0755 dev/container/verify-cleanup.sh /usr/local/bin/taskcage-container-verify-cleanup
 
 ENV RUST_LOG=taskcaged=info \

@@ -10,6 +10,8 @@ services:
     privileged: true
     cgroup: private
     pid: host
+    environment:
+      TASKCAGE_INSTALL_BENCHMARK_CAPSULES: "true"
     ports:
       - "127.0.0.1:19098:9098"
     stop_grace_period: 15s
@@ -69,6 +71,7 @@ services:
         condition: service_healthy
     environment:
       TASKCAGE_SOCKET: /run/taskcage/taskcaged.sock
+      TASKCAGE_ARTIFACT_ROOT: /taskcage-work/artifacts
     volumes:
       - taskcage-runtime:/run/taskcage
       - taskcage-work:/taskcage-work
