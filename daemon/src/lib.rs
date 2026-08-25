@@ -19,6 +19,7 @@ pub mod capability;
 mod capacity;
 #[cfg(target_os = "linux")]
 pub mod capsule;
+pub mod capsulefile;
 pub use taskcage_linux_runtime::cgroup;
 pub mod codec {
     //! Local Protocol frame codec의 기존 공개 경로다.
