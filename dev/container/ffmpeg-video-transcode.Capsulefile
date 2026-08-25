@@ -1,0 +1,15 @@
+FROM runtime://org.taskcage/ffmpeg:0.0.0-container.1
+CAPSULE ffmpeg-video-transcode@1.0.0
+
+INPUT source ARTIFACT
+OUTPUT video FILE result.mp4 MEDIA_TYPE video/mp4 MAX_BYTES 104857600
+
+COMMAND -hide_banner -loglevel error -nostdin -y \
+  -i ${source} \
+  -map 0:v:0 -map 0:a? \
+  -vf scale=-2:480 \
+  -c:v libx264 -preset ultrafast -crf 28 -threads 1 \
+  -c:a aac \
+  ${video}
+
+LIMIT CPU 1 MEMORY 1024MiB PIDS 32 TIMEOUT 10m

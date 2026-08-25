@@ -38,6 +38,29 @@ Linux cgroup v2를 제공하는 신뢰된 Docker 환경에서 저장소 루트 �
 python3 dev/benchmark/lab.py run
 ```
 
+대표 미디어 파일을 사용해 정상 FFmpeg 변환만 반복 측정하려면 다음처럼 실행한다. 입력 파일의
+복사와 digest 계산은 측정 시작 전에 끝나므로, 지연시간에는 포함되지 않는다.
+
+```bash
+python3 dev/benchmark/lab.py run \
+  --input /absolute/path/to/input.mp4 \
+  --scenarios normal \
+  --concurrency 1 --warmup 1 --iterations 5
+```
+
+`audio_to_wav`가 너무 빨리 끝나 고정 관리 비용의 비중이 과도하게 보이면, 같은 입력을 H.264로
+재인코딩하는 benchmark 전용 Capsule을 사용한다.
+
+```bash
+python3 dev/benchmark/lab.py run \
+  --input /absolute/path/to/input.mp4 \
+  --scenarios normal --normal-workload video_transcode \
+  --concurrency 1 --warmup 1 --iterations 3
+```
+
+기본적으로 두 비교 Worker container에 `CPU 1.0`을 적용한다. 이는 Capsule의 기본 `CPU 1` 예산과
+동일한 조건에서 비교하기 위한 설정이며, 필요하면 `--comparator-cpus`로 변경할 수 있다.
+
 기본값은 `normal`, `timeout_child`, `memory_limit`을 각각 `processbuilder`, `taskcage`로 한 번씩 측정하며
 warm-up은 수행하지 않는다(`warmup=0`, `iterations=1`). 실행 중 표시되는
 `http://127.0.0.1:8765`에서 현재 단계, 종료 원인별 TaskCage metric과 컨테이너 자원 그래프를 확인할 수 있다.

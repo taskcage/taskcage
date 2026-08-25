@@ -44,6 +44,8 @@ public final class ExecutionWorkerBenchmark {
     private static final Path MEMORY_HOG = Path.of("/usr/local/libexec/taskcage/memory-hog");
     private static final CapsuleIdentity FFMPEG_CAPSULE =
             new CapsuleIdentity("ffmpeg-audio-to-wav", "1.0.0");
+    private static final CapsuleIdentity FFMPEG_VIDEO_CAPSULE =
+            new CapsuleIdentity("ffmpeg-video-transcode", "1.0.0");
     private static final CapsuleIdentity GHOST_TREE_CAPSULE =
             new CapsuleIdentity("ghost-tree-timeout", "1.0.0");
     private static final CapsuleIdentity MEMORY_HOG_CAPSULE =
@@ -54,6 +56,8 @@ public final class ExecutionWorkerBenchmark {
     public static void main(String[] args) throws Exception {
         Mode mode = Mode.parse(requiredEnv("BENCHMARK_MODE"));
         Scenario scenario = Scenario.parse(requiredEnv("BENCHMARK_SCENARIO"));
+        NormalWorkload normalWorkload = NormalWorkload.parse(
+                System.getenv().getOrDefault("BENCHMARK_NORMAL_WORKLOAD", "audio_to_wav"));
         int concurrency = positiveInt(System.getenv().getOrDefault("BENCHMARK_CONCURRENCY", "2"));
         int warmupBatches = nonNegativeInt(System.getenv().getOrDefault("BENCHMARK_WARMUP", "0"));
         int measuredBatches = positiveInt(System.getenv().getOrDefault("BENCHMARK_ITERATIONS", "1"));
@@ -65,7 +69,8 @@ public final class ExecutionWorkerBenchmark {
             InputArtifact source = createInputArtifact();
             try {
                 long startedNanos = System.nanoTime();
-                List<TaskMetric> tasks = run(mode, scenario, batch, concurrency, workDirectory, source);
+                List<TaskMetric> tasks = run(
+                        mode, scenario, batch, concurrency, workDirectory, source, normalWorkload);
                 if (batch >= warmupBatches) measured.add(new BatchMetric(elapsedMillis(startedNanos), tasks));
             } finally {
                 source.delete();
@@ -81,7 +86,7 @@ public final class ExecutionWorkerBenchmark {
     }
 
     private static List<TaskMetric> run(Mode mode, Scenario scenario, int batch, int concurrency, Path workDirectory,
-                                        InputArtifact source)
+                                        InputArtifact source, NormalWorkload normalWorkload)
             throws InterruptedException, ExecutionException {
         ExecutorService pool = Executors.newFixedThreadPool(concurrency);
         try {
@@ -90,8 +95,9 @@ public final class ExecutionWorkerBenchmark {
                 int taskIndex = index;
                 Callable<TaskMetric> task = switch (mode) {
                     case PROCESS_BUILDER -> () -> runProcessBuilder(
-                            scenario, batch, taskIndex, concurrency, workDirectory, source);
-                    case TASK_CAGE -> () -> runTaskCage(scenario, batch, taskIndex, concurrency, workDirectory, source);
+                            scenario, batch, taskIndex, concurrency, workDirectory, source, normalWorkload);
+                    case TASK_CAGE -> () -> runTaskCage(
+                            scenario, batch, taskIndex, concurrency, workDirectory, source, normalWorkload);
                 };
                 futures.add(pool.submit(task));
             }
@@ -105,9 +111,10 @@ public final class ExecutionWorkerBenchmark {
     }
 
     private static TaskMetric runProcessBuilder(Scenario scenario, int batch, int index, int concurrency,
-                                                Path workDirectory, InputArtifact source) throws Exception {
+                                                Path workDirectory, InputArtifact source,
+                                                NormalWorkload normalWorkload) throws Exception {
         Scenario taskScenario = taskScenario(scenario, batch, index, concurrency);
-        Command command = commandFor(taskScenario, index, workDirectory, source.file());
+        Command command = commandFor(taskScenario, index, workDirectory, source.file(), normalWorkload);
         long startedNanos = System.nanoTime();
         List<String> processArguments = new ArrayList<>();
         processArguments.add(command.program.toString());
@@ -132,8 +139,13 @@ public final class ExecutionWorkerBenchmark {
             process.waitFor(5, TimeUnit.SECONDS);
             termination = "CANCELLED_BY_BENCHMARK";
         } else {
-            process.waitFor(20, TimeUnit.SECONDS);
-            termination = process.exitValue() == 0 ? "EXITED" : "EXITED_NON_ZERO";
+            if (process.waitFor(normalWorkload.waitTimeout().toMillis(), TimeUnit.MILLISECONDS)) {
+                termination = process.exitValue() == 0 ? "EXITED" : "EXITED_NON_ZERO";
+            } else {
+                process.destroyForcibly();
+                process.waitFor(5, TimeUnit.SECONDS);
+                termination = "TIMED_OUT_BY_BENCHMARK";
+            }
         }
 
         int residual = alive(descendants);
@@ -145,7 +157,8 @@ public final class ExecutionWorkerBenchmark {
     }
 
     private static TaskMetric runTaskCage(Scenario scenario, int batch, int index, int concurrency,
-                                          Path workDirectory, InputArtifact source) throws Exception {
+                                          Path workDirectory, InputArtifact source,
+                                          NormalWorkload normalWorkload) throws Exception {
         Scenario taskScenario = taskScenario(scenario, batch, index, concurrency);
         long startedNanos = System.nanoTime();
         try (TaskCageClient client = TaskCageClient.connect(TaskCageClientConfig.builder()
@@ -155,22 +168,21 @@ public final class ExecutionWorkerBenchmark {
                 .build());
              CapsuleRunner runner = CapsuleRunner.external(client)) {
             CapsuleExecutionResult finished = runner.execute(
-                    UUID.randomUUID(), requestFor(taskScenario, source.reference()), Duration.ofSeconds(25));
+                    UUID.randomUUID(), requestFor(taskScenario, source.reference(), normalWorkload),
+                    normalWorkload.waitTimeout());
             ExecutionResult result = finished.execution();
-            boolean outputVerified = taskScenario != Scenario.NORMAL || verifiedCapsuleOutput(finished);
+            boolean outputVerified = taskScenario != Scenario.NORMAL
+                    || verifiedCapsuleOutput(finished, normalWorkload);
             return new TaskMetric(elapsedMillis(startedNanos), taskScenario.jsonName, result.terminationReason().name(),
                     result.usage().cpuTimeMicros(), result.usage().memoryPeakBytes(), 0, true,
                     outputVerified);
         }
     }
 
-    private static CapsuleRequest requestFor(Scenario scenario, LocalInputArtifact source) {
+    private static CapsuleRequest requestFor(
+            Scenario scenario, LocalInputArtifact source, NormalWorkload normalWorkload) {
         return switch (scenario) {
-            case NORMAL -> CapsuleRequest.builder(FFMPEG_CAPSULE)
-                    .artifact("source", source)
-                    .int64("sample_rate_hz", 16_000)
-                    .int64("channels", 1)
-                    .build();
+            case NORMAL -> normalWorkload.request(source);
             case TIMEOUT_CHILD -> CapsuleRequest.builder(GHOST_TREE_CAPSULE)
                     .artifact("source", source)
                     .int64("marker", 1)
@@ -187,7 +199,8 @@ public final class ExecutionWorkerBenchmark {
         };
     }
 
-    private static Command commandFor(Scenario scenario, int index, Path workDirectory, Path source) {
+    private static Command commandFor(
+            Scenario scenario, int index, Path workDirectory, Path source, NormalWorkload normalWorkload) {
         if (scenario == Scenario.TIMEOUT_CHILD) {
             Path ready = workDirectory.resolve("ghost-" + index + ".ready");
             return new Command(GHOST_TREE, List.of("--hold-parent", ready.toString()), ready);
@@ -195,21 +208,39 @@ public final class ExecutionWorkerBenchmark {
         if (scenario == Scenario.MEMORY_LIMIT) {
             return new Command(MEMORY_HOG, List.of("67108864", "30"), null);
         }
-        Path output = workDirectory.resolve("normal-" + index + ".wav");
-        return new Command(FFMPEG, List.of(
-                "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-                "-i", source.toString(), "-map", "0:a:0", "-vn", "-c:a", "pcm_s16le",
-                "-ar", "16000", "-ac", "1", output.toString()), null, output);
+        return normalWorkload.command(source, workDirectory.resolve("normal-" + index + normalWorkload.extension()));
     }
 
     private static InputArtifact createInputArtifact() throws Exception {
         String directory = "benchmark-inputs/" + UUID.randomUUID();
-        ArtifactPath path = new ArtifactPath(directory + "/source.wav");
-        byte[] bytes = wave();
+        Path supplied = optionalInputFile();
+        ArtifactPath path = new ArtifactPath(directory + "/source" + extension(supplied));
         Path file = artifactRoot().resolve(path.value());
         Files.createDirectories(file.getParent());
-        Files.write(file, bytes);
-        return new InputArtifact(file, new LocalInputArtifact(path, digest(bytes), bytes.length));
+        if (supplied == null) {
+            Files.write(file, wave());
+        } else {
+            Files.copy(supplied, file);
+        }
+        long size = Files.size(file);
+        return new InputArtifact(file, new LocalInputArtifact(path, digest(file), size));
+    }
+
+    private static Path optionalInputFile() {
+        String value = System.getenv("BENCHMARK_INPUT_FILE");
+        if (value == null || value.isBlank()) return null;
+        Path file = Path.of(value);
+        if (!Files.isRegularFile(file)) {
+            throw new IllegalArgumentException("BENCHMARK_INPUT_FILE must point to a regular file");
+        }
+        return file;
+    }
+
+    private static String extension(Path input) {
+        if (input == null) return ".wav";
+        String name = input.getFileName().toString();
+        int dot = name.lastIndexOf('.');
+        return dot > 0 ? name.substring(dot) : ".bin";
     }
 
     private static byte[] wave() {
@@ -227,17 +258,24 @@ public final class ExecutionWorkerBenchmark {
         return buffer.array();
     }
 
-    private static Sha256Digest digest(byte[] bytes) throws Exception {
-        return new Sha256Digest("sha256:" + HexFormat.of().formatHex(
-                MessageDigest.getInstance("SHA-256").digest(bytes)));
+    private static Sha256Digest digest(Path file) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (var input = Files.newInputStream(file)) {
+            byte[] buffer = new byte[16 * 1024];
+            for (int read; (read = input.read(buffer)) >= 0; ) {
+                digest.update(buffer, 0, read);
+            }
+        }
+        return new Sha256Digest("sha256:" + HexFormat.of().formatHex(digest.digest()));
     }
 
     private static Path artifactRoot() {
         return Path.of(System.getenv().getOrDefault("TASKCAGE_ARTIFACT_ROOT", "/taskcage-work/artifacts"));
     }
 
-    private static boolean verifiedCapsuleOutput(CapsuleExecutionResult result) {
-        PublishedArtifact output = result.profileTask().artifacts().get("audio");
+    private static boolean verifiedCapsuleOutput(
+            CapsuleExecutionResult result, NormalWorkload normalWorkload) {
+        PublishedArtifact output = result.profileTask().artifacts().get(normalWorkload.outputName());
         if (output == null) return false;
         Path file = artifactRoot().resolve(output.path().value());
         try {
@@ -481,6 +519,70 @@ public final class ExecutionWorkerBenchmark {
             case "mixed_failure" -> MIXED_FAILURE;
             default -> throw new IllegalArgumentException("unknown BENCHMARK_SCENARIO: " + value);
         }; }
+    }
+
+    enum NormalWorkload {
+        AUDIO_TO_WAV("audio_to_wav", ".wav", "audio", FFMPEG_CAPSULE),
+        VIDEO_TRANSCODE("video_transcode", ".mp4", "video", FFMPEG_VIDEO_CAPSULE);
+
+        private final String value;
+        private final String extension;
+        private final String outputName;
+        private final CapsuleIdentity capsule;
+
+        NormalWorkload(String value, String extension, String outputName, CapsuleIdentity capsule) {
+            this.value = value;
+            this.extension = extension;
+            this.outputName = outputName;
+            this.capsule = capsule;
+        }
+
+        static NormalWorkload parse(String value) {
+            return switch (value) {
+                case "audio_to_wav" -> AUDIO_TO_WAV;
+                case "video_transcode" -> VIDEO_TRANSCODE;
+                default -> throw new IllegalArgumentException(
+                        "BENCHMARK_NORMAL_WORKLOAD must be audio_to_wav or video_transcode");
+            };
+        }
+
+        private CapsuleRequest request(LocalInputArtifact source) {
+            if (this == AUDIO_TO_WAV) {
+                return CapsuleRequest.builder(capsule)
+                        .artifact("source", source)
+                        .int64("sample_rate_hz", 16_000)
+                        .int64("channels", 1)
+                        .build();
+            }
+            return CapsuleRequest.builder(capsule).artifact("source", source).build();
+        }
+
+        private Command command(Path source, Path output) {
+            if (this == AUDIO_TO_WAV) {
+                return new Command(FFMPEG, List.of(
+                        "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                        "-i", source.toString(), "-map", "0:a:0", "-vn", "-c:a", "pcm_s16le",
+                        "-ar", "16000", "-ac", "1", output.toString()), null, output);
+            }
+            return new Command(FFMPEG, List.of(
+                    "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                    "-i", source.toString(), "-map", "0:v:0", "-map", "0:a?",
+                    "-vf", "scale=-2:480",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-threads", "1",
+                    "-c:a", "aac", output.toString()), null, output);
+        }
+
+        private String extension() {
+            return extension;
+        }
+
+        private String outputName() {
+            return outputName;
+        }
+
+        private Duration waitTimeout() {
+            return this == VIDEO_TRANSCODE ? Duration.ofMinutes(10) : Duration.ofSeconds(25);
+        }
     }
 
     private record Command(Path program, List<String> arguments, Path readyPath, Path outputPath) {

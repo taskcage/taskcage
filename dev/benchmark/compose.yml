@@ -62,6 +62,7 @@ services:
   benchmark-worker:
     image: taskcage-benchmark/worker:local
     profiles: [benchmark]
+    cpus: ${BENCHMARK_WORKER_CPUS:-1.0}
     build:
       context: ../..
       dockerfile: dev/container/Dockerfile
@@ -75,6 +76,7 @@ services:
     volumes:
       - taskcage-runtime:/run/taskcage
       - taskcage-work:/taskcage-work
+      - ${BENCHMARK_INPUT_HOST_PATH:-/dev/null}:/benchmark-input/input:ro
 
 volumes:
   taskcage-runtime:

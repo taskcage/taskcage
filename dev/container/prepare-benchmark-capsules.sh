@@ -67,6 +67,16 @@ install_capsule() {
   taskcage capsule install "${pack}" --cache-root "${cache_root}" >/dev/null
 }
 
+install_ffmpeg_capsule() {
+  pack=${work_root}/ffmpeg-video-transcode-1.0.0.tccapsule
+  rm -f -- "${pack}"
+  taskcage capsule build /usr/local/share/taskcage/ffmpeg-video-transcode.Capsulefile \
+    --runtime-package "${work_root}/runtime-package-source" \
+    --platform "${platform}" \
+    --output "${pack}" >/dev/null
+  taskcage capsule install "${pack}" --cache-root "${cache_root}" >/dev/null
+}
+
 mkdir -p "${cache_root}"
 chmod 0700 "${cache_root}"
 
@@ -75,3 +85,5 @@ install_capsule ghost-tree /usr/local/share/taskcage/ghost-tree-timeout.Capsulef
 
 build_runtime memory-hog /usr/local/libexec/taskcage/memory-hog
 install_capsule memory-hog /usr/local/share/taskcage/memory-hog-limit.Capsulefile
+
+install_ffmpeg_capsule
