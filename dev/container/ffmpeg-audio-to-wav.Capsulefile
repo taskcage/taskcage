@@ -1,0 +1,16 @@
+# Development-only source contract for the Compose FFmpeg Capsule.
+FROM runtime://org.taskcage/ffmpeg:0.0.0-container.1
+CAPSULE ffmpeg-audio-to-wav@1.0.0
+
+INPUT source ARTIFACT
+OPTION sample_rate_hz INT ALLOWED 8000,16000,22050,44100,48000
+OPTION channels INT ALLOWED 1,2
+
+OUTPUT audio FILE result.wav MEDIA_TYPE audio/wav MAX_BYTES 104857600
+
+COMMAND -hide_banner -loglevel error -nostdin -i ${source} \
+  -map 0:a:0 -vn -c:a pcm_s16le -ar ${sample_rate_hz} \
+  -ac ${channels} ${audio}
+
+LIMIT CPU 1 MEMORY 512MiB PIDS 32 TIMEOUT 2m
+ALLOW OVERRIDE MEMORY,PIDS,TIMEOUT

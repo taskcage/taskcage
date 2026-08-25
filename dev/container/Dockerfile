@@ -17,6 +17,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=rust-builder /workspace/target/release/taskcaged /usr/local/bin/taskcaged
+COPY --from=rust-builder /workspace/target/release/taskcage /usr/local/bin/taskcage
 COPY --from=rust-builder /workspace/target/release/ghost-tree /usr/local/libexec/taskcage/ghost-tree
 COPY --from=rust-builder /workspace/target/release/output-flood /usr/local/libexec/taskcage/output-flood
 COPY --from=rust-builder /workspace/target/release/memory-hog /usr/local/libexec/taskcage/memory-hog
@@ -24,7 +25,8 @@ COPY daemon/tests/data/remote-chain.pem daemon/tests/data/remote-end.key daemon/
 COPY --chmod=0755 dev/container/entrypoint.sh /usr/local/bin/taskcage-container-entrypoint
 COPY --chmod=0755 dev/container/remote-entrypoint.sh /usr/local/bin/taskcage-container-remote-entrypoint
 COPY --chmod=0755 dev/container/prepare-ffmpeg-package.sh /usr/local/bin/taskcage-container-prepare-ffmpeg-package
-COPY --chmod=0755 dev/container/prepare-ffmpeg-bundle.sh /usr/local/bin/taskcage-container-prepare-ffmpeg-bundle
+COPY --chmod=0755 dev/container/prepare-ffmpeg-capsule.sh /usr/local/bin/taskcage-container-prepare-ffmpeg-capsule
+COPY dev/container/ffmpeg-audio-to-wav.Capsulefile /usr/local/share/taskcage/ffmpeg-audio-to-wav.Capsulefile
 COPY --chmod=0755 dev/container/verify-cleanup.sh /usr/local/bin/taskcage-container-verify-cleanup
 
 ENV RUST_LOG=taskcaged=info \

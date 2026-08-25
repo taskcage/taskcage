@@ -77,8 +77,9 @@ exit code 0, 선언 output의 존재·상한, atomic artifact publish, whole-pro
 ## Runtime source와 platform
 
 Runtime Package는 실제 실행 binary와 필요한 shared library·설정 파일을 가진 검증 가능한 Linux file set이다.
-builder는 `FROM`의 Runtime source에서 요청한 target platform의 Package를 가져와 Pack에 포함한다.
-daemon은 install 또는 실행 중에 network에서 Runtime을 내려받지 않는다.
+`FROM`은 Capsule이 요구하는 Runtime identity를 선언하고, builder에는 선택한 target platform의 검증 가능한
+Runtime Package directory를 명시적으로 전달한다. builder는 이를 Pack에 포함하며 daemon은 install 또는 실행 중에
+network에서 Runtime을 내려받지 않는다.
 
 첫 지원 대상은 다음 두 개다.
 
@@ -105,7 +106,10 @@ Pack은 gzip POSIX tar이며 Capsule archive와 Runtime Package를 함께 가진
 daemon은 Runtime Package를 digest cache에 한 번만 저장하므로 여러 Capsule이 같은 Runtime을 재사용한다.
 
 ```bash
-taskcage capsule build --file Capsulefile --platform linux/arm64
+taskcage capsule build Capsulefile \
+  --runtime-package ./ffmpeg-runtime-linux-arm64 \
+  --platform linux/arm64 \
+  --output ./ffmpeg-audio-to-wav-1.0.0-linux-arm64.tccapsule
 taskcage capsule install ./ffmpeg-audio-to-wav-1.0.0-linux-arm64.tccapsule
 taskcaged serve ...
 ```

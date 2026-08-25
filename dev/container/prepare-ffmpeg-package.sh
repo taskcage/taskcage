@@ -2,12 +2,11 @@
 set -eu
 
 source_root=/taskcage-work/runtime-package-source
-cache_root=/taskcage-work/runtime-package-cache
 entrypoint=${source_root}/rootfs/bin/ffmpeg
 library_root=${source_root}/rootfs/lib
 sbom=${source_root}/rootfs/share/sbom.spdx.json
 manifest=${source_root}/runtime-package.json
-file_entries=${cache_root}/ffmpeg-files.json
+file_entries=/taskcage-work/ffmpeg-files.json
 
 case "$(uname -m)" in
   x86_64|aarch64) package_architecture="$(uname -m)" ;;
@@ -19,8 +18,7 @@ esac
 
 rm -rf -- "${source_root}"
 mkdir -p "${source_root}/rootfs/bin" "${library_root}" "${source_root}/rootfs/share"
-mkdir -p "${cache_root}"
-chmod 0700 "${source_root}" "${cache_root}"
+chmod 0700 "${source_root}"
 
 cp /usr/bin/ffmpeg "${entrypoint}"
 chmod 0555 "${entrypoint}"
@@ -85,15 +83,3 @@ printf '%s\n' \
   '  "sbom": { "format": "SPDX-JSON-2.3", "path": "share/sbom.spdx.json" }' \
   '}' >"${manifest}"
 chmod 0444 "${manifest}"
-
-report="$(taskcaged import-package --source "${source_root}" --cache-root "${cache_root}")"
-digest="$(printf '%s\n' "${report}" | sed -n 's/.*"digest":"\([^"]*\)".*/\1/p')"
-case "${digest}" in
-  sha256:????????????????????????????????????????????????????????????????) ;;
-  *)
-    echo "FAIL: Runtime Package import did not return a canonical digest" >&2
-    exit 1
-    ;;
-esac
-
-printf '%s\n' "${digest}"
