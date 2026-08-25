@@ -87,6 +87,7 @@ pub mod remote_server {
     pub use crate::adapters::inbound::remote_tls::server::*;
 }
 pub mod resource_budget;
+pub mod runtime_oci;
 pub mod runtime_package;
 pub mod runtime_package_builder;
 #[cfg(target_os = "linux")]

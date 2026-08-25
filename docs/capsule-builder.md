@@ -59,9 +59,18 @@ LIMIT CPU 1 MEMORY 512MiB PIDS 32 TIMEOUT 2m
 ALLOW OVERRIDE MEMORY,TIMEOUT
 ```
 
+OCI Runtime을 Capsulefile에서 직접 가져올 때는 `FROM`과 함께 Runtime Package metadata를 선언한다.
+
+```text
+FROM oci://registry.example/ffmpeg-runtime@sha256:<64-hex-digest>
+RUNTIME ID org.example.ffmpeg VERSION 7.1.0 ENTRYPOINT bin/ffmpeg GLIBC 2.35 \
+  LIBRARY_PATH lib SBOM share/sbom.spdx.json
+```
+
 | Directive | 책임 |
 | --- | --- |
-| `FROM` | target Linux platform에 맞는 immutable Runtime Package를 가리킨다. |
+| `FROM` | 설치된 Runtime Package identity 또는 digest 고정 OCI Runtime source를 가리킨다. |
+| `RUNTIME` | OCI source를 Package로 만들 때 필요한 immutable Runtime metadata를 선언한다. |
 | `CAPSULE` | immutable `name@version` identity를 선언한다. |
 | `INPUT`, `OPTION` | Artifact 또는 typed scalar 입력과 허용값을 선언한다. |
 | `OUTPUT` | daemon이 publish할 파일 결과 하나를 선언한다. |
@@ -80,6 +89,9 @@ Runtime Package는 실제 실행 binary와 필요한 shared library·설정 파�
 `FROM`은 Capsule이 요구하는 Runtime identity를 선언하고, builder에는 선택한 target platform의 검증 가능한
 Runtime Package directory를 명시적으로 전달한다. builder는 이를 Pack에 포함하며 daemon은 install 또는 실행 중에
 network에서 Runtime을 내려받지 않는다.
+
+`FROM oci://...`의 경우 `taskcage capsule build`가 선택한 platform을 Docker OCI client로 내려받아 Runtime
+Package를 먼저 만든다. 이 경로에서는 `--runtime-package`를 지정하지 않는다.
 
 첫 지원 대상은 다음 두 개다.
 

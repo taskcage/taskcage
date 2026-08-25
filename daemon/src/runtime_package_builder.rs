@@ -17,7 +17,7 @@ use crate::{
     },
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BuildConfig {
     pub source_rootfs: PathBuf,
     pub output: PathBuf,

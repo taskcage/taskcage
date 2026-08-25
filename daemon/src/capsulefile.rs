@@ -13,15 +13,27 @@ use crate::Error;
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapsulefileSpec {
     pub runtime_source: String,
+    pub runtime: Option<RuntimeMetadata>,
     pub name: String,
     pub version: String,
     pub profile: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeMetadata {
+    pub id: String,
+    pub version: String,
+    pub entrypoint: String,
+    pub glibc_minimum: String,
+    pub library_paths: Vec<String>,
+    pub sbom_path: String,
 }
 
 pub fn parse(source: &str) -> Result<CapsulefileSpec, Error> {
     let lines = logical_lines(source)?;
     let mut runtime_source = None;
     let mut identity = None;
+    let mut runtime = None;
     let mut inputs = Vec::new();
     let mut input_names = BTreeSet::new();
     let mut output = None;
@@ -37,13 +49,20 @@ pub fn parse(source: &str) -> Result<CapsulefileSpec, Error> {
         match *directive {
             "FROM" => {
                 require_once(&runtime_source, "FROM", line_number)?;
-                if arguments.len() != 1 || !arguments[0].starts_with("runtime://") {
+                if arguments.len() != 1
+                    || !(arguments[0].starts_with("runtime://")
+                        || arguments[0].starts_with("oci://"))
+                {
                     return invalid(
                         line_number,
-                        "FROM은 runtime://<publisher>/<package>:<version> 하나여야 합니다",
+                        "FROM은 runtime:// identity 또는 digest 고정 oci:// source 하나여야 합니다",
                     );
                 }
                 runtime_source = Some(arguments[0].to_owned());
+            }
+            "RUNTIME" => {
+                require_once(&runtime, "RUNTIME", line_number)?;
+                runtime = Some(parse_runtime(arguments, line_number)?);
             }
             "CAPSULE" => {
                 require_once(&identity, "CAPSULE", line_number)?;
@@ -102,6 +121,11 @@ pub fn parse(source: &str) -> Result<CapsulefileSpec, Error> {
     }
 
     let runtime_source = required(runtime_source, "FROM")?;
+    if runtime_source.starts_with("oci://") && runtime.is_none() {
+        return Err(Error::InvalidArgument(
+            "Capsulefile: OCI FROM에는 RUNTIME metadata가 필요합니다".to_owned(),
+        ));
+    }
     let (name, version) = required(identity, "CAPSULE")?;
     let output = required(output, "OUTPUT")?;
     let raw_argv = required(argv, "COMMAND")?;
@@ -111,6 +135,7 @@ pub fn parse(source: &str) -> Result<CapsulefileSpec, Error> {
 
     Ok(CapsulefileSpec {
         runtime_source,
+        runtime,
         name: name.clone(),
         version: version.clone(),
         profile: json!({
@@ -123,6 +148,45 @@ pub fn parse(source: &str) -> Result<CapsulefileSpec, Error> {
             "policy":{"limits":limits, "output":{"stdoutTailMaxBytes":65536, "stderrTailMaxBytes":65536}},
             "allowedOverrides":allowed_overrides
         }),
+    })
+}
+
+fn parse_runtime(arguments: &[&str], line_number: usize) -> Result<RuntimeMetadata, Error> {
+    if arguments.len() < 10 || !arguments.len().is_multiple_of(2) {
+        return invalid(
+            line_number,
+            "RUNTIME은 ID, VERSION, ENTRYPOINT, GLIBC, SBOM metadata pair가 필요합니다",
+        );
+    }
+    let mut id = None;
+    let mut version = None;
+    let mut entrypoint = None;
+    let mut glibc_minimum = None;
+    let mut sbom_path = None;
+    let mut library_paths = Vec::new();
+    for pair in arguments.as_chunks::<2>().0 {
+        match pair[0] {
+            "ID" if id.is_none() => id = Some(pair[1].to_owned()),
+            "VERSION" if version.is_none() => version = Some(pair[1].to_owned()),
+            "ENTRYPOINT" if entrypoint.is_none() => entrypoint = Some(pair[1].to_owned()),
+            "GLIBC" if glibc_minimum.is_none() => glibc_minimum = Some(pair[1].to_owned()),
+            "SBOM" if sbom_path.is_none() => sbom_path = Some(pair[1].to_owned()),
+            "LIBRARY_PATH" => library_paths.push(pair[1].to_owned()),
+            _ => {
+                return invalid(
+                    line_number,
+                    "RUNTIME metadata가 중복되었거나 지원되지 않습니다",
+                );
+            }
+        }
+    }
+    Ok(RuntimeMetadata {
+        id: required(id, "RUNTIME ID")?,
+        version: required(version, "RUNTIME VERSION")?,
+        entrypoint: required(entrypoint, "RUNTIME ENTRYPOINT")?,
+        glibc_minimum: required(glibc_minimum, "RUNTIME GLIBC")?,
+        library_paths,
+        sbom_path: required(sbom_path, "RUNTIME SBOM")?,
     })
 }
 
@@ -376,5 +440,12 @@ mod tests {
         assert!(parse(&FFMPEG.replace("-i ${source}", "-i ${missing}")).is_err());
         assert!(parse(&FFMPEG.replace("-i ${source}", "-i ${source} | tee x")).is_err());
         assert!(parse(&format!("{FFMPEG}INPUT source ARTIFACT")).is_err());
+    }
+
+    #[test]
+    fn accepts_an_oci_runtime_declared_in_the_capsulefile() {
+        let source = "FROM oci://registry.example/tool@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nRUNTIME ID org.example.tool VERSION 1.0.0 ENTRYPOINT bin/tool GLIBC 2.35 SBOM share/sbom.json\nCAPSULE example.tool@1.0.0\nINPUT source ARTIFACT\nOUTPUT result FILE result.bin MEDIA_TYPE application/octet-stream MAX_BYTES 100\nCOMMAND -i ${source} ${result}\nLIMIT CPU 1 MEMORY 1MiB PIDS 1 TIMEOUT 1m\n";
+        let spec = parse(source).unwrap();
+        assert_eq!(spec.runtime.as_ref().unwrap().entrypoint, "bin/tool");
     }
 }

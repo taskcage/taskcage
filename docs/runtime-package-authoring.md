@@ -72,6 +72,27 @@ taskcage runtime build \
 `--license Apache-2.0:share/licenses/ffmpeg.txt`는 필요할 때 반복 지정한다. 생성 결과는 다음 단계에서
 `taskcage capsule build Capsulefile --runtime-package ./ffmpeg-runtime-linux-arm64 ...`에 전달한다.
 
+## OCI Runtime source
+
+Docker를 OCI client로 사용할 수 있는 환경에서는 rootfs를 먼저 만들지 않아도 된다.
+
+```bash
+taskcage runtime build \
+  --from oci://ghcr.io/example/ffmpeg-runtime@sha256:<64-hex-digest> \
+  --output ./ffmpeg-runtime-linux-amd64 \
+  --id org.example.ffmpeg \
+  --version 7.1.0 \
+  --platform linux/amd64 \
+  --glibc-minimum 2.35 \
+  --entrypoint usr/bin/ffmpeg \
+  --library-path usr/lib \
+  --sbom usr/share/doc/ffmpeg/sbom.spdx.json
+```
+
+`--from`은 digest가 고정된 `oci://` reference만 허용한다. Docker는 지정한 platform variant를 pull·export하고,
+TaskCage는 regular file/directory만 rootfs에 추출한 뒤 동일한 Package 검증을 적용한다. private registry는
+기존 `docker login` 자격 증명을 사용한다. tag나 임의 URL은 재현 가능한 Runtime source가 아니므로 지원하지 않는다.
+
 ## 작성자 책임과 TaskCage 책임
 
 | 구분 | 책임 |
