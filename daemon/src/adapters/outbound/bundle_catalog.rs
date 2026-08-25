@@ -773,9 +773,8 @@ impl VerifiedArchive {
         let profile: BundleProfile = decode_manifest(&profile_raw, PROFILE_JSON)?;
         validate_bundle(&bundle, &profile, &profile_raw)?;
         if !allow_unsigned {
-            let signature = signature.ok_or_else(|| {
-                BundleError::Signature("signature.sig가 필요합니다".to_owned())
-            })?;
+            let signature = signature
+                .ok_or_else(|| BundleError::Signature("signature.sig가 필요합니다".to_owned()))?;
             verify_signature(&bundle, &checksums, &signature, keys)?;
         }
         let bundle_canonical = canonical_json(&bundle)?;
