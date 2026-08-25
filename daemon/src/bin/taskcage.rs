@@ -1,5 +1,6 @@
-//! TaskCage daemon 프로그램 진입점과 command dispatch를 제공한다.
+//! Capsule Pack authoring CLI entrypoint.
 
+#[path = "../cli/mod.rs"]
 mod cli;
 
 use std::env;

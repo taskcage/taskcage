@@ -119,6 +119,7 @@ fn principal(client_id: &str) -> PrincipalPolicy {
         client_id: client_id.to_owned(),
         secret_verifier: "redacted-test-verifier".to_owned(),
         allowed_profiles: BTreeSet::new(),
+        allow_all_installed_capsules: false,
         maximum_resource_overrides: None,
         artifact_upload_allowed: true,
         max_principal_artifact_bytes: NonZeroU64::new(1_000_000).expect("positive"),

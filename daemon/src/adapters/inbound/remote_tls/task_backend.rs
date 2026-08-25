@@ -674,6 +674,7 @@ mod tests {
                 name: FILE_COPY_PROFILE_NAME.to_owned(),
                 version: FILE_COPY_PROFILE_VERSION.to_owned(),
             }]),
+            allow_all_installed_capsules: false,
             maximum_resource_overrides: None,
             artifact_upload_allowed: true,
             max_principal_artifact_bytes: NonZeroU64::new(1_000_000).unwrap(),

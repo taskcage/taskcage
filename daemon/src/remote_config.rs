@@ -92,6 +92,7 @@ pub struct PrincipalPolicy {
     pub client_id: String,
     pub secret_verifier: String,
     pub allowed_profiles: BTreeSet<ProfileIdentityKey>,
+    pub allow_all_installed_capsules: bool,
     pub maximum_resource_overrides: Option<ProfileEffectiveResources>,
     pub artifact_upload_allowed: bool,
     pub max_principal_artifact_bytes: NonZeroU64,
@@ -105,6 +106,10 @@ impl fmt::Debug for PrincipalPolicy {
             .field("client_id", &self.client_id)
             .field("secret_verifier", &"[REDACTED]")
             .field("allowed_profiles", &self.allowed_profiles)
+            .field(
+                "allow_all_installed_capsules",
+                &self.allow_all_installed_capsules,
+            )
             .field(
                 "maximum_resource_overrides",
                 &self.maximum_resource_overrides,
@@ -121,10 +126,11 @@ impl fmt::Debug for PrincipalPolicy {
 
 impl PrincipalPolicy {
     pub fn allows_profile(&self, profile: &ProfileIdentity) -> bool {
-        self.allowed_profiles.contains(&ProfileIdentityKey {
-            name: profile.name.clone(),
-            version: profile.version.clone(),
-        })
+        self.allow_all_installed_capsules
+            || self.allowed_profiles.contains(&ProfileIdentityKey {
+                name: profile.name.clone(),
+                version: profile.version.clone(),
+            })
     }
 
     pub fn allows_resource_overrides(&self, overrides: Option<&ProfileResourceOverrides>) -> bool {
@@ -209,6 +215,8 @@ struct PrincipalPolicyFile {
     secret_verifier: String,
     allowed_profiles: Vec<ProfileIdentity>,
     #[serde(default)]
+    allow_all_installed_capsules: bool,
+    #[serde(default)]
     maximum_resource_overrides: Option<ProfileEffectiveResources>,
     artifact_upload_allowed: bool,
     max_principal_artifact_bytes: u64,
@@ -222,6 +230,10 @@ impl fmt::Debug for PrincipalPolicyFile {
             .field("client_id", &self.client_id)
             .field("secret_verifier", &"[REDACTED]")
             .field("allowed_profiles", &self.allowed_profiles)
+            .field(
+                "allow_all_installed_capsules",
+                &self.allow_all_installed_capsules,
+            )
             .field(
                 "maximum_resource_overrides",
                 &self.maximum_resource_overrides,
@@ -316,6 +328,7 @@ impl RemoteDaemonConfigFile {
                 client_id: client_id.clone(),
                 secret_verifier: principal.secret_verifier,
                 allowed_profiles,
+                allow_all_installed_capsules: principal.allow_all_installed_capsules,
                 maximum_resource_overrides: principal.maximum_resource_overrides,
                 artifact_upload_allowed: principal.artifact_upload_allowed,
                 max_principal_artifact_bytes,

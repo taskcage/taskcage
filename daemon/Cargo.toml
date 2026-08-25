@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "taskcage"
+path = "src/bin/taskcage.rs"
+
 [dependencies]
 argon2 = "0.5"
 base64 = "0.22"

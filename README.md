@@ -77,7 +77,7 @@ bash dev/container/run-remote-e2e.sh
 - timeout·취소·오류 시 루트 PID가 아니라 해당 Task가 만든 프로세스 트리 전체를 정리한다.
 - cleanup 완료를 확인한 뒤에만 최종 결과를 공개한다.
 - exit code만으로 추측하지 않고 cgroup 이벤트와 프로세스 상태를 함께 사용해 종료 이유와 사용량을 반환한다.
-- Capsule의 signature, Runtime Package digest, 플랫폼 조건, 입력 schema와 허용된 정책을 실행 전에 검증한다.
+- Capsule의 archive safety, checksum, Runtime Package digest, 플랫폼 조건, 입력 schema와 허용된 정책을 실행 전에 검증한다.
 
 TaskCage는 제한을 확인할 수 없으면 제한 없는 실행으로 fallback하지 않는다.
 
@@ -114,6 +114,7 @@ Docker가 프로그램의 실행 환경을 재현 가능하게 만든다면, Tas
 - [FFmpeg Audio-to-WAV Capsule](docs/ffmpeg-capsule.md)
 - [Capsule 실행 계약](docs/capsule-execution-contract.md)
 - [Capsule archive 형식](docs/bundle-format.md)
+- [Capsulefile과 Capsule Pack](docs/capsule-builder.md)
 - [Capsule 도입과 ProcessBuilder 호환성](docs/capsule-adoption.md)
 - [제품 철학과 용어](docs/product-philosophy.md)
 

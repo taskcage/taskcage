@@ -32,6 +32,7 @@ fn policy(client_id: &str, secret: &str) -> PrincipalPolicy {
             name: "ffmpeg-audio-to-wav".to_owned(),
             version: "1.0.0".to_owned(),
         }]),
+        allow_all_installed_capsules: false,
         maximum_resource_overrides: None,
         artifact_upload_allowed: true,
         max_principal_artifact_bytes: NonZeroU64::new(10_000).expect("positive"),

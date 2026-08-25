@@ -18,6 +18,7 @@ fn policy(max_bytes: u64, max_count: usize) -> PrincipalPolicy {
         client_id: "document-worker".to_owned(),
         secret_verifier: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdC1mb3ItdGVzdA$QWERTY".to_owned(),
         allowed_profiles: BTreeSet::new(),
+        allow_all_installed_capsules: false,
         maximum_resource_overrides: None,
         artifact_upload_allowed: true,
         max_principal_artifact_bytes: NonZeroU64::new(max_bytes).expect("positive"),
