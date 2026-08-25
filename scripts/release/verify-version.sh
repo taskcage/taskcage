@@ -25,7 +25,7 @@ readonly semantic_version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0
 
 cd "${repository_root}"
 case "${release_component}" in
-  taskcaged)
+  taskcaged|taskcage)
     manifest_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' daemon/Cargo.toml | head -n 1)"
     ;;
   java-sdk)

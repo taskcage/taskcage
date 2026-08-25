@@ -109,6 +109,7 @@ Docker가 프로그램의 실행 환경을 재현 가능하게 만든다면, Tas
 ## 설치와 사용
 
 - [Ubuntu daemon 설치](docs/install-ubuntu.md)
+- [Capsule authoring CLI 설치](docs/install-taskcage-cli.md)
 - [Java SDK](java-sdk/README.md) — Maven Central 좌표와 Local/Remote 사용법
 - [Java FFmpeg 예제](examples/ffmpeg-java/README.md)
 - [FFmpeg Audio-to-WAV Capsule](docs/ffmpeg-capsule.md)

@@ -38,16 +38,20 @@ prerelease로 표시한다.
 | 컴포넌트 | tag 예시 | 내부 버전 위치 | 배포처 |
 |---|---|---|---|
 | TaskCage daemon | `taskcaged-v0.5.0` | `daemon/Cargo.toml` | GitHub Release |
+| TaskCage CLI | `taskcage-v0.5.0` | `daemon/Cargo.toml` (daemon과 공유) | GitHub Release |
 | Java SDK | `java-sdk-v0.4.0` | `java-sdk/build.gradle.kts` | Maven Central, GitHub Release |
 | Python SDK | `python-sdk-v0.1.0` | 해당 package manifest | PyPI, GitHub Release |
 | JavaScript SDK | `javascript-sdk-v0.1.0` | 해당 package manifest | npm, GitHub Release |
 | Go SDK | `go-sdk-v0.1.0` | Go module release metadata | Go Modules, GitHub Release |
 
-아직 구현되지 않은 SDK의 tag와 배포 workflow는 생성하지 않는다. tag의 버전은 해당 컴포넌트 내부
-버전과 정확히 일치해야 하며 CI가 불일치를 거부한다.
+`taskcage` CLI와 `taskcaged` daemon은 같은 Rust package에서 빌드되므로 source version은 공유한다. 다만
+Capsule 작성자는 daemon installer가 필요하지 않으므로 CLI는 별도 tag·Release archive로 배포한다. 아직 구현되지
+않은 SDK의 tag와 배포 workflow는 생성하지 않는다. tag의 버전은 해당 컴포넌트 내부 버전과 정확히 일치해야 하며
+CI가 불일치를 거부한다.
 
 tag는 maintainer가 검증한 `main` 커밋에 서명해 생성한다. 컴포넌트 tag가 해당 컴포넌트의 build, test와
-배포 workflow를 시작하며, 다른 컴포넌트를 함께 배포하지 않는다.
+배포 workflow를 시작한다. `taskcage` CLI는 shared Rust package의 version만 daemon과 공유하며, daemon archive나
+installer를 함께 배포하지 않는다.
 
 ## 개발 빌드
 

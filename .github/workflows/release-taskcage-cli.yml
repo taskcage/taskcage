@@ -1,0 +1,182 @@
+name: Release taskcage CLI
+
+on:
+  push:
+    tags:
+      - "taskcage-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing CLI release tag, for example taskcage-v0.7.0.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: taskcage-cli-release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate CLI tag and version
+    runs-on: ubuntu-24.04
+    outputs:
+      mode: ${{ steps.context.outputs.mode }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      release_version: ${{ steps.version.outputs.release_version }}
+    steps:
+      - id: context
+        name: Resolve release context
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_TAG: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            echo "mode=prepare" >>"${GITHUB_OUTPUT}"
+            echo "release_tag=${PUSH_TAG}" >>"${GITHUB_OUTPUT}"
+          else
+            echo "mode=publish" >>"${GITHUB_OUTPUT}"
+            echo "release_tag=${INPUT_TAG}" >>"${GITHUB_OUTPUT}"
+          fi
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ steps.context.outputs.release_tag }}
+          fetch-depth: 0
+      - id: version
+        name: Match the tag, manifest, and main history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.context.outputs.release_tag }}
+        run: |
+          [[ "${RELEASE_TAG}" =~ ^taskcage-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          release_version="${RELEASE_TAG#taskcage-v}"
+          bash scripts/release/verify-version.sh taskcage "${release_version}" "${RELEASE_TAG}"
+          git tag --points-at HEAD --list "${RELEASE_TAG}" | grep -Fx "${RELEASE_TAG}"
+          tag_object_sha="$(git rev-parse "${RELEASE_TAG}^{tag}")"
+          [[ "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object_sha}" --jq '.verification.verified')" == "true" ]]
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main
+          echo "release_tag=${RELEASE_TAG}" >>"${GITHUB_OUTPUT}"
+          echo "release_version=${release_version}" >>"${GITHUB_OUTPUT}"
+
+  rust-gate:
+    name: CLI Rust release gate
+    if: needs.validate.outputs.mode == 'prepare'
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  package:
+    name: Package CLI archive (${{ matrix.target }})
+    if: needs.validate.outputs.mode == 'prepare'
+    needs: [validate, rust-gate]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: stable
+      - name: Build CLI archive and checksum
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+        run: bash scripts/release/build-taskcage-cli-archive.sh "${RELEASE_VERSION}" dist
+      - name: Verify CLI archive
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+        run: |
+          archive="dist/taskcage-cli-v${RELEASE_VERSION}-${{ matrix.target }}.tar.gz"
+          bash integration-tests/taskcage-cli-artifact-smoke.sh \
+            "${RELEASE_VERSION}" \
+            "${archive}" \
+            "${archive}.sha256"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: taskcage-cli-${{ needs.validate.outputs.release_version }}-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  draft:
+    name: Create draft CLI release
+    if: needs.validate.outputs.mode == 'prepare'
+    needs: [validate, package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: taskcage-cli-${{ needs.validate.outputs.release_version }}-*
+          path: dist
+          merge-multiple: true
+      - name: Create the draft GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+        run: |
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "ERROR: a GitHub release already exists for ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          release_notes="$(printf 'TaskCage CLI %s\n\nBuild digest-pinned Capsule Packs for Linux amd64 and arm64.\n\nSupported authoring platforms: Linux x86-64/ARM64, macOS Intel/Apple Silicon.\nA Linux taskcaged host installs and runs the resulting Pack.\n\nReview and complete these notes before approving publication.' "${RELEASE_VERSION}")"
+          gh release create "${RELEASE_TAG}" \
+            dist/taskcage-cli-v*-x86_64-unknown-linux-gnu.tar.gz \
+            dist/taskcage-cli-v*-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+            dist/taskcage-cli-v*-aarch64-unknown-linux-gnu.tar.gz \
+            dist/taskcage-cli-v*-aarch64-unknown-linux-gnu.tar.gz.sha256 \
+            dist/taskcage-cli-v*-x86_64-apple-darwin.tar.gz \
+            dist/taskcage-cli-v*-x86_64-apple-darwin.tar.gz.sha256 \
+            dist/taskcage-cli-v*-aarch64-apple-darwin.tar.gz \
+            dist/taskcage-cli-v*-aarch64-apple-darwin.tar.gz.sha256 \
+            --draft \
+            --prerelease \
+            --verify-tag \
+            --title "TaskCage CLI ${RELEASE_VERSION}" \
+            --notes "${release_notes}"
+
+  publish:
+    name: Publish CLI prerelease
+    if: needs.validate.outputs.mode == 'publish'
+    needs: validate
+    runs-on: ubuntu-24.04
+    environment: taskcage-cli-release
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the reviewed draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+        run: |
+          release_json="$(gh release view "${RELEASE_TAG}" --json isDraft,isPrerelease)"
+          release_is_draft="$(python3 -c 'import json,sys; print(str(json.load(sys.stdin)["isDraft"]).lower())' <<<"${release_json}")"
+          release_is_prerelease="$(python3 -c 'import json,sys; print(str(json.load(sys.stdin)["isPrerelease"]).lower())' <<<"${release_json}")"
+          [[ "${release_is_draft}" == "true" ]]
+          [[ "${release_is_prerelease}" == "true" ]]
+          gh release edit "${RELEASE_TAG}" --draft=false --prerelease

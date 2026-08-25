@@ -12,9 +12,11 @@ manifest를 새 patch 또는 minor 버전으로 변경하고 모든 예시의 �
 | 컴포넌트 | tag | 배포 workflow | 공개 위치 |
 |---|---|---|---|
 | daemon | `taskcaged-v0.5.0` | `Release taskcaged` | GitHub Release |
+| Capsule authoring CLI | `taskcage-v0.5.0` | `Release taskcage CLI` | GitHub Release |
 | Java Core SDK | `java-sdk-v0.4.0` | `Release Java SDK` | Maven Central, GitHub Release |
 
-컴포넌트는 독립적으로 배포하며 제품 버전이 같을 필요가 없다. Core SDK `0.4.0`은 Local Protocol v1·v2와
+컴포넌트는 독립적으로 배포하며 제품 버전이 같을 필요가 없다. 단, `taskcage` CLI는 `taskcaged`와 같은 Rust
+package에서 빌드되므로 source version은 daemon과 공유하고 Release archive만 분리한다. Core SDK `0.4.0`은 Local Protocol v1·v2와
 Remote Protocol v1을 지원하며 Capsule 실행에는 daemon `0.5.0` 이상이 필요하다.
 연결 호환성은 제품 버전 문자열이 아니라 공통 Protocol version으로 판단한다.
 
@@ -33,6 +35,22 @@ install-taskcaged.sh
 archive는 `bin/taskcaged`, Ubuntu installer·uninstaller, systemd unit, 기본 설정, README와 LICENSE를
 versioned top-level directory 아래에 포함한다.
 
+Capsule authoring CLI GitHub prerelease에는 daemon installer 없이 다음 파일을 게시한다.
+
+```text
+taskcage-cli-v0.5.0-x86_64-unknown-linux-gnu.tar.gz
+taskcage-cli-v0.5.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+taskcage-cli-v0.5.0-aarch64-unknown-linux-gnu.tar.gz
+taskcage-cli-v0.5.0-aarch64-unknown-linux-gnu.tar.gz.sha256
+taskcage-cli-v0.5.0-x86_64-apple-darwin.tar.gz
+taskcage-cli-v0.5.0-x86_64-apple-darwin.tar.gz.sha256
+taskcage-cli-v0.5.0-aarch64-apple-darwin.tar.gz
+taskcage-cli-v0.5.0-aarch64-apple-darwin.tar.gz.sha256
+```
+
+각 archive에는 `bin/taskcage`, Capsulefile reference와 CLI 설치 문서·LICENSE만 포함한다. Linux daemon host에서
+CLI의 `capsule install`을 사용해 Pack을 catalog에 등록하며, macOS CLI는 Pack authoring만 지원한다.
+
 Java SDK는 Maven Central에 다음 좌표로 main JAR, sources JAR, Javadoc JAR와 POM을 게시한다. 각 파일에는
 PGP signature와 Maven Central이 요구하는 checksum을 포함한다.
 
@@ -48,13 +66,16 @@ Central upload zip은 Portal 입력과 복구용 CI artifact이며 사용자 설
 ### 공통
 
 1. `main` branch protection과 필수 CI를 설정한다.
-2. `taskcaged-release`와 `java-sdk-release` environment를 만든다.
-3. 두 environment에 required reviewer를 지정한다.
+2. `taskcaged-release`, `taskcage-cli-release`, `java-sdk-release` environment를 만든다.
+3. 세 environment에 required reviewer를 지정한다.
 4. Actions가 tag의 GitHub signature verification 결과와 `main` history 포함 여부를 확인할 수 있도록 기본
    `GITHUB_TOKEN`의 contents read 권한을 유지한다.
 
 `taskcaged-release` environment에는 별도 secret이 필요하지 않다. maintainer가 daemon Draft Release와
 checksum을 검토한 뒤 수동 publish workflow를 실행하면 이 environment의 승인에서 대기한다.
+
+`taskcage-cli-release` environment에도 별도 secret이 필요하지 않다. maintainer가 CLI Draft Release의
+platform별 archive와 checksum을 검토한 뒤 수동 publish workflow를 실행하면 이 environment의 승인에서 대기한다.
 
 ### Java SDK
 
@@ -128,6 +149,25 @@ tag push는 `.github/workflows/release-daemon.yml`을 시작한다. workflow는 
 검토가 끝나면 GitHub Actions의 `Release taskcaged` workflow를 `tag=taskcaged-v0.5.0`으로 수동
 실행한다. `taskcaged-release` environment를 승인하면 workflow는 기존 Draft가 prerelease인지
 확인하고 공개한다. Draft 생성 뒤 workflow가 중단돼도 같은 tag로 공개 단계만 다시 실행할 수 있다.
+
+## Capsule authoring CLI 릴리스
+
+CLI는 daemon과 같은 Rust source version을 공유하지만, daemon installer 없이 Capsule author에게 필요한
+archive만 별도 Release로 제공한다.
+
+```bash
+git switch main
+git pull --ff-only
+bash scripts/release/verify-version.sh taskcage 0.5.0
+git tag --sign taskcage-v0.5.0 -m "TaskCage CLI 0.5.0"
+git push origin taskcage-v0.5.0
+```
+
+tag push는 `Release taskcage CLI` workflow를 시작한다. workflow는 tag signature와 `main` history 포함 여부,
+format·clippy·전체 Rust test를 확인한 뒤 Linux x86-64/ARM64, macOS Intel/Apple Silicon native runner에서
+CLI archive·checksum과 archive smoke test를 만든다. 검토가 끝나면 `Release taskcage CLI` workflow를
+`tag=taskcage-v0.5.0`으로 수동 실행하고 `taskcage-cli-release` environment를 승인해 Draft prerelease를
+공개한다.
 
 ## Java SDK 릴리스
 
