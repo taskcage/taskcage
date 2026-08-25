@@ -2,7 +2,7 @@
 
 > 제품 용어는 **Capsule**이다. 이 문서와 현재 구현의 `bundle.json`, `profile.json`,
 > `taskcage.bundle/v0alpha1` schema 값은 기존 archive·wire 호환성을 위해 Bundle 명칭을 유지한다.
-> 새 사용자 문서에서는 이 archive를 Capsule로 부른다.
+> 새 작성·배포 흐름은 [Capsulefile과 Capsule Pack v1](capsule-builder.md)을 따른다.
 
 > **릴리스 상태:** 이 계약과 `taskcaged bundle import`, immutable local catalog, `--bundle-cache-root` 기반
 > Profile 실행은 daemon `0.5.0`에서 공개된다.
@@ -58,9 +58,9 @@ archive를 처리하고, 검증이 끝난 Bundle만 immutable cache로 활성화
 
 Each digest is calculated from the exact archive file bytes; trailing whitespace, an extra line, a different filename, or a
 mismatch is invalid. `signature.sig` is the unpadded base64 encoding of a 64-byte Ed25519 signature over the exact
-`checksums.txt` bytes. `bundle.json.signingKeyId` selects one configured trust anchor. The daemon accepts a Bundle only
-when that key id is configured and its 32-byte Ed25519 public key validates the signature. There is no unsigned or
-"accept any key" import mode.
+`checksums.txt` bytes. `bundle.json.signingKeyId` selects one configured trust anchor. Signature verification is a
+future hardened mode. The current basic Capsule Pack flow permits a missing signature, but never skips archive safety,
+checksum, manifest/profile schema, Runtime Package digest, or platform verification.
 
 The service operator supplies the trust anchors outside the Bundle archive. A key file contains a single unpadded base64
 Ed25519 public key, and the daemon configuration maps a stable key id to that file. Rotating a signing key means adding a
@@ -179,11 +179,11 @@ Bundle과 분리된 digest cache entry로 검증·저장한다. 큰 Package는 l
 
 ### Capsule Pack
 
-Hub 없이 Capsule을 공유하는 초기 배포 단위는 `.tccapsule.tar.gz` **Capsule Pack**이다. Pack은 아래 구조의
+Hub 없이 Capsule을 공유하는 초기 배포 단위는 `.tccapsule` **Capsule Pack**이다. Pack은 아래 구조의
 regular file과 directory만 포함하며 symlink·hard link·device file·중복 경로를 포함할 수 없다.
 
 ```text
-ffmpeg-audio-to-wav-1.0.0.tccapsule.tar.gz
+ffmpeg-audio-to-wav-1.0.0-linux-arm64.tccapsule
 ├── capsule.tcbundle.tar.gz
 └── runtime-package/
     ├── runtime-package.json
@@ -191,17 +191,17 @@ ffmpeg-audio-to-wav-1.0.0.tccapsule.tar.gz
         └── ... Runtime Package files ...
 ```
 
-Pack 안에는 trust anchor를 넣지 않는다. daemon은 기본적으로 `/etc/taskcage/trusted-capsules.d/`의
-`<key-id>.pub` 공개키를 사용한다. 공식 Release는 공식 키를 이 trust store에 배치하며, 조직 Capsule은
-운영자가 같은 위치에 공개키를 추가한다.
+Pack 안에는 trust anchor를 넣지 않는다. 기본 모드에서 local operator는 unsigned Pack을 설치할 수 있다.
+향후 hardened mode에서는 daemon이 `/etc/taskcage/trusted-capsules.d/`의 `<key-id>.pub` 공개키로 서명을
+검증한다.
 
 ```bash
-taskcaged capsule install ./ffmpeg-audio-to-wav-1.0.0.tccapsule.tar.gz
+taskcage capsule install ./ffmpeg-audio-to-wav-1.0.0-linux-arm64.tccapsule
 ```
 
-기본 cache root와 trust store는 daemon 설치 경로를 사용한다. `--cache-root /absolute/path`와
-`--trust-store /absolute/path`는 별도 저장 위치를 쓰는 조직 환경에,
-`--trusted-key <key-id>=<absolute-path>`는 개발·긴급 복구에만 사용한다.
+기본 cache root는 daemon 설치 경로를 사용한다. trust store와 `--trusted-key`는 hardened mode에서만
+필요하다. 새 Pack 작성 형식, Runtime source와 platform 선택은 [Capsulefile과 Capsule Pack v1](capsule-builder.md)을
+따른다.
 
 `capsule install`은 Pack을 cache root 아래의 private staging 경로에 안전하게 풀고, 기존 Runtime Package
 검증·digest cache import를 수행한 뒤 기존 Capsule signature/catalog import를 수행한다. 결과는 두 import의
