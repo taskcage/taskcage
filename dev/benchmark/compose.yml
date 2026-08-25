@@ -75,6 +75,7 @@ services:
     volumes:
       - taskcage-runtime:/run/taskcage
       - taskcage-work:/taskcage-work
+      - ${BENCHMARK_INPUT_HOST_PATH:-/dev/null}:/benchmark-input/input:ro
 
 volumes:
   taskcage-runtime:
