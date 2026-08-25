@@ -94,6 +94,9 @@ macOS·Windows·Linux host와 무관하게 target platform을 명시적으로 �
 이미 TaskCage Runtime Package 형태라면 Docker는 build의 필수 의존성이 아니다. 일반 OCI/Docker image를
 Runtime Package로 변환하는 기능은 이후 범위다.
 
+Runtime Package directory의 target·file layout·작성자 책임은 [Runtime Package 작성 계약](runtime-package-authoring.md)에서
+정의한다.
+
 ## Pack 형식과 install
 
 사용자가 주고받는 확장자는 `.tccapsule`이다.
