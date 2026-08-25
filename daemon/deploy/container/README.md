@@ -101,22 +101,21 @@ try (RemoteTaskCageClient client = RemoteTaskCageClient.localDefault(credentials
 
 ## Prepare a Capsule
 
-Before starting the daemon, install a verified Capsule Pack into the same data volume. The Pack and
-public key below are supplied by your organization or a future Capsule registry; they are intentionally
-not baked into the daemon image.
+Before starting the daemon, install a Capsule Pack into the same data volume. The Pack is supplied by your
+organization or shared directly by its author; it is intentionally not baked into the daemon image. Basic mode
+accepts an unsigned Pack but still verifies archive safety, manifests, checksums, Runtime Package digest and platform.
 
 ```bash
 docker run --rm \
   -v taskcage-data:/var/lib/taskcage \
   -v "$PWD/import:/import:ro" \
   "${TASKCAGE_IMAGE}:${TASKCAGE_VERSION}" \
-  taskcaged capsule install \
-    /import/ffmpeg-audio-to-wav-1.0.0.tccapsule.tar.gz
+  taskcage capsule install \
+    /import/ffmpeg-audio-to-wav-1.0.0-linux-amd64.tccapsule
 ```
 
-The Pack's Runtime Package must be compatible with the container's Linux CPU architecture. The image looks up the
-Pack signing key from `/etc/taskcage/trusted-capsules.d`; an official image Release will place its official key there.
-For an organization key, mount that directory read-only or pass an explicit `--trust-store` during install.
+The Pack's Runtime Package must be compatible with the container's Linux CPU architecture. Signed Pack verification
+and a trust store are future hardened-mode features; they are not required for the basic local-operator flow.
 
 ## Publishing
 

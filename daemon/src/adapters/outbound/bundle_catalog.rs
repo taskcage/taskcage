@@ -385,6 +385,15 @@ impl BundleCatalog {
         self.import_with_identity_hook(source, keys, |_| Ok(()))
     }
 
+    /// Imports a local operator-provided Capsule archive in basic mode.
+    ///
+    /// The archive, checksums, manifest, profile, Runtime Package digest and
+    /// platform checks remain mandatory.  Only the detached signature is
+    /// optional; a remote caller can never select this import path.
+    pub fn import_unsigned(&self, source: &Path) -> BundleResult<BundleImportReport> {
+        self.import_with_policy(source, &[], true, |_| Ok(()))
+    }
+
     fn import_with_identity_hook<F>(
         &self,
         source: &Path,
@@ -399,12 +408,30 @@ impl BundleCatalog {
                 "source는 absolute path여야 합니다".to_owned(),
             ));
         }
-        if keys.is_empty() {
+        self.import_with_policy(source, keys, false, identity_hook)
+    }
+
+    fn import_with_policy<F>(
+        &self,
+        source: &Path,
+        keys: &[TrustedBundleKey],
+        allow_unsigned: bool,
+        identity_hook: F,
+    ) -> BundleResult<BundleImportReport>
+    where
+        F: FnMut(IdentityActivationPoint) -> BundleResult<()>,
+    {
+        if !source.is_absolute() {
+            return Err(BundleError::Archive(
+                "source는 absolute path여야 합니다".to_owned(),
+            ));
+        }
+        if !allow_unsigned && keys.is_empty() {
             return Err(BundleError::Signature(
                 "적어도 하나의 trusted key가 필요합니다".to_owned(),
             ));
         }
-        let verified = VerifiedArchive::read(source, keys)?;
+        let verified = VerifiedArchive::read(source, keys, allow_unsigned)?;
         let packages = RuntimePackageCache::open(&self.root)?;
         let package = packages.resolve(verified.bundle.runtime.digest)?;
         if package.manifest().id != verified.bundle.runtime.package_id {
@@ -675,7 +702,7 @@ struct VerifiedArchive {
 }
 
 impl VerifiedArchive {
-    fn read(source: &Path, keys: &[TrustedBundleKey]) -> BundleResult<Self> {
+    fn read(source: &Path, keys: &[TrustedBundleKey], allow_unsigned: bool) -> BundleResult<Self> {
         let bytes = fs::read(source)
             .map_err(|e| io_error("Bundle archive 읽기", source.to_path_buf(), e))?;
         if bytes.is_empty() || bytes.len() > MAX_ARCHIVE_BYTES {
@@ -731,21 +758,32 @@ impl VerifiedArchive {
             }
             files.insert(path, content);
         }
-        if files.len() != 4 {
+        let allowed_count = if allow_unsigned { 3..=4 } else { 4..=4 };
+        if !allowed_count.contains(&files.len()) {
             return Err(BundleError::Archive(
-                "archive는 bundle.json, profile.json, checksums.txt, signature.sig만 가져야 합니다"
-                    .to_owned(),
+                if allow_unsigned {
+                    "basic archive는 bundle.json, profile.json, checksums.txt와 선택적인 signature.sig만 가져야 합니다"
+                } else {
+                    "archive는 bundle.json, profile.json, checksums.txt, signature.sig만 가져야 합니다"
+                }
+                .to_owned(),
             ));
         }
         let bundle_raw = files.remove(BUNDLE_JSON).expect("checked");
         let profile_raw = files.remove(PROFILE_JSON).expect("checked");
         let checksums = files.remove(CHECKSUMS).expect("checked");
-        let signature = files.remove(SIGNATURE).expect("checked");
+        let signature = files.remove(SIGNATURE);
         verify_checksums(&checksums, &bundle_raw, &profile_raw)?;
         let bundle: BundleManifest = decode_manifest(&bundle_raw, BUNDLE_JSON)?;
         let profile: BundleProfile = decode_manifest(&profile_raw, PROFILE_JSON)?;
         validate_bundle(&bundle, &profile, &profile_raw)?;
-        verify_signature(&bundle, &checksums, &signature, keys)?;
+        if let Some(signature) = signature {
+            verify_signature(&bundle, &checksums, &signature, keys)?;
+        } else if !allow_unsigned {
+            return Err(BundleError::Signature(
+                "signature.sig가 필요합니다".to_owned(),
+            ));
+        }
         let bundle_canonical = canonical_json(&bundle)?;
         let profile_canonical = canonical_json(&profile)?;
         Ok(Self {
@@ -1525,9 +1563,35 @@ pub(crate) mod test_support {
         );
         let (entries, keys) = signed_entries(bundle, profile);
         let file = write_archive(entries);
-        let verified = VerifiedArchive::read(file.path(), &keys).unwrap();
+        let verified = VerifiedArchive::read(file.path(), &keys, false).unwrap();
         assert_eq!(verified.bundle.name, "ffmpeg-audio-to-wav");
         assert_eq!(verified.bundle.version, "1.0.0");
+    }
+
+    #[test]
+    fn basic_mode_accepts_a_checksum_verified_unsigned_bundle() {
+        let profile = profile_bytes();
+        let bundle = bundle_bytes(
+            &profile,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let checksums = format!(
+            "{:x}  {BUNDLE_JSON}\n{:x}  {PROFILE_JSON}\n",
+            Sha256::digest(&bundle),
+            Sha256::digest(&profile)
+        )
+        .into_bytes();
+        let archive = write_archive(vec![
+            (BUNDLE_JSON, bundle),
+            (PROFILE_JSON, profile),
+            (CHECKSUMS, checksums),
+        ]);
+
+        assert!(VerifiedArchive::read(archive.path(), &[], true).is_ok());
+        assert!(matches!(
+            VerifiedArchive::read(archive.path(), &[], false),
+            Err(BundleError::Archive(_))
+        ));
     }
 
     #[test]
@@ -1664,7 +1728,7 @@ pub(crate) mod test_support {
         entries.push(("unexpected", b"nope".to_vec()));
         let file = write_archive(entries);
         assert!(matches!(
-            VerifiedArchive::read(file.path(), &keys),
+            VerifiedArchive::read(file.path(), &keys, false),
             Err(BundleError::Archive(_))
         ));
     }
@@ -1688,7 +1752,7 @@ pub(crate) mod test_support {
             .unwrap(),
         ];
         assert!(matches!(
-            VerifiedArchive::read(file.path(), &keys),
+            VerifiedArchive::read(file.path(), &keys, false),
             Err(BundleError::Signature(_))
         ));
     }
@@ -1700,7 +1764,7 @@ pub(crate) mod test_support {
         let (entries, keys) = signed_entries(bundle, profile);
         let file = write_archive(entries);
         assert!(matches!(
-            VerifiedArchive::read(file.path(), &keys),
+            VerifiedArchive::read(file.path(), &keys, false),
             Err(BundleError::Manifest(_))
         ));
     }
@@ -1869,7 +1933,9 @@ pub(crate) mod test_support {
         let (_root, catalog, package_digest) = catalog_with_runtime_package();
         let profile = profile_bytes();
         let (archive, keys) = signed_bundle_archive(&profile, package_digest);
-        let expected_digest = VerifiedArchive::read(archive.path(), &keys).unwrap().digest;
+        let expected_digest = VerifiedArchive::read(archive.path(), &keys, false)
+            .unwrap()
+            .digest;
         let error = catalog
             .import_with_identity_hook(archive.path(), &keys, |point| {
                 if point == IdentityActivationPoint::AfterRename {

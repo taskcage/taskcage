@@ -48,7 +48,8 @@ bootstrap_default_remote() {
     '  "principals": [{' \
     '    "clientId": "taskcage",' \
     "    \"secretVerifier\": \"${secret_verifier}\"," \
-    '    "allowedProfiles": [{"name": "ffmpeg-audio-to-wav", "version": "1.0.0"}],' \
+    '    "allowedProfiles": [],' \
+    '    "allowAllInstalledCapsules": true,' \
     '    "artifactUploadAllowed": true,' \
     '    "maxPrincipalArtifactBytes": 104857600,' \
     '    "maxPrincipalArtifacts": 8' \

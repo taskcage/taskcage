@@ -8,7 +8,7 @@ COPY core ./core
 COPY linux-runtime ./linux-runtime
 COPY daemon ./daemon
 COPY test-fixtures ./test-fixtures
-RUN cargo build --package taskcaged --release --locked
+RUN cargo build --package taskcaged --bins --release --locked
 
 FROM ubuntu:24.04
 
@@ -20,6 +20,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /workspace/target/release/taskcaged /usr/local/bin/taskcaged
+COPY --from=builder /workspace/target/release/taskcage /usr/local/bin/taskcage
 COPY --chmod=0755 daemon/deploy/container/entrypoint.sh /usr/local/bin/taskcaged-container-entrypoint
 
 LABEL org.opencontainers.image.title="TaskCage daemon" \

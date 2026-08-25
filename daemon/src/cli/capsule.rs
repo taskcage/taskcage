@@ -34,8 +34,6 @@ const RUNTIME_ROOTFS: &str = "runtime-package/rootfs";
 #[cfg(target_os = "linux")]
 const MAX_UNPACKED_BYTES: u64 = 1024 * 1024 * 1024;
 #[cfg(target_os = "linux")]
-const DEFAULT_TRUST_STORE: &str = "/etc/taskcage/trusted-capsules.d";
-#[cfg(target_os = "linux")]
 const DEFAULT_CACHE_ROOT: &str = "/var/lib/taskcage/runtime-package-cache";
 
 #[cfg(target_os = "linux")]
@@ -52,37 +50,6 @@ pub(crate) struct Command;
 pub(crate) struct InstallConfig {
     source: PathBuf,
     cache_root: PathBuf,
-    trust_store: PathBuf,
-    trusted_keys: Vec<(String, PathBuf)>,
-}
-
-#[cfg(target_os = "linux")]
-impl InstallConfig {
-    fn load_keys(&self) -> taskcaged::Result<Vec<taskcaged::bundle::TrustedBundleKey>> {
-        let mut keys = load_trust_store(
-            &self.trust_store,
-            !self.trusted_keys.is_empty() && self.trust_store == Path::new(DEFAULT_TRUST_STORE),
-        )?;
-        let mut ids = keys
-            .iter()
-            .map(|key| key.id().to_owned())
-            .collect::<BTreeSet<_>>();
-        for (id, path) in &self.trusted_keys {
-            if !ids.insert(id.clone()) {
-                return Err(Error::InvalidArgument(format!(
-                    "trusted key id가 중복되었습니다: {id}"
-                )));
-            }
-            keys.push(load_trusted_key(id, path)?);
-        }
-        if keys.is_empty() {
-            return Err(Error::InvalidArgument(format!(
-                "trusted key가 없습니다: {}에 <key-id>.pub 파일을 추가하세요",
-                self.trust_store.display()
-            )));
-        }
-        Ok(keys)
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -106,8 +73,6 @@ pub(crate) fn parse(args: Vec<OsString>) -> taskcaged::Result<Command> {
 
     let mut source = None;
     let mut cache_root = None;
-    let mut trust_store = None;
-    let mut trusted_keys = Vec::new();
     let mut index = 0;
     while index < options.len() {
         if !options[index].to_string_lossy().starts_with('-') && source.is_none() {
@@ -124,35 +89,7 @@ pub(crate) fn parse(args: Vec<OsString>) -> taskcaged::Result<Command> {
         match name {
             "--source" if source.is_none() => source = Some(PathBuf::from(value)),
             "--cache-root" if cache_root.is_none() => cache_root = Some(PathBuf::from(value)),
-            "--trust-store" if trust_store.is_none() => trust_store = Some(PathBuf::from(value)),
-            "--trusted-key" => {
-                let value = value.to_str().ok_or_else(|| {
-                    Error::InvalidArgument("trusted key value는 UTF-8이어야 합니다".to_owned())
-                })?;
-                let (id, path) = value.split_once('=').ok_or_else(|| {
-                    Error::InvalidArgument(
-                        "--trusted-key는 <key-id>=<absolute-path> 형식이어야 합니다".to_owned(),
-                    )
-                })?;
-                if id.is_empty() || path.is_empty() {
-                    return Err(Error::InvalidArgument(
-                        "--trusted-key는 비어 있지 않은 key id와 path가 필요합니다".to_owned(),
-                    ));
-                }
-                let path = PathBuf::from(path);
-                if !path.is_absolute() {
-                    return Err(Error::InvalidArgument(
-                        "--trusted-key path는 absolute path여야 합니다".to_owned(),
-                    ));
-                }
-                if trusted_keys.iter().any(|(existing, _)| existing == id) {
-                    return Err(Error::InvalidArgument(format!(
-                        "--trusted-key가 중복되었습니다: {id}"
-                    )));
-                }
-                trusted_keys.push((id.to_owned(), path));
-            }
-            "--source" | "--cache-root" | "--trust-store" => {
+            "--source" | "--cache-root" => {
                 return Err(Error::InvalidArgument(format!(
                     "capsule install option이 중복되었습니다: {name}"
                 )));
@@ -168,108 +105,12 @@ pub(crate) fn parse(args: Vec<OsString>) -> taskcaged::Result<Command> {
 
     let source = required_option("source", source)?;
     let cache_root = cache_root.unwrap_or_else(|| PathBuf::from(DEFAULT_CACHE_ROOT));
-    let trust_store = trust_store.unwrap_or_else(|| PathBuf::from(DEFAULT_TRUST_STORE));
-    if !cache_root.is_absolute() || !trust_store.is_absolute() {
+    if !cache_root.is_absolute() {
         return Err(Error::InvalidArgument(
-            "capsule install cache-root와 trust-store는 absolute path여야 합니다".to_owned(),
+            "capsule install cache-root는 absolute path여야 합니다".to_owned(),
         ));
     }
-    Ok(Command::Install(InstallConfig {
-        source,
-        cache_root,
-        trust_store,
-        trusted_keys,
-    }))
-}
-
-#[cfg(target_os = "linux")]
-fn load_trust_store(
-    path: &Path,
-    allow_missing: bool,
-) -> taskcaged::Result<Vec<taskcaged::bundle::TrustedBundleKey>> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if allow_missing && error.kind() == io::ErrorKind::NotFound => {
-            return Ok(Vec::new());
-        }
-        Err(error) => {
-            return Err(Error::InvalidArgument(format!(
-                "trust store를 읽지 못했습니다 {}: {error}",
-                path.display()
-            )));
-        }
-    };
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(Error::InvalidArgument(format!(
-            "trust store는 symlink가 아닌 directory여야 합니다: {}",
-            path.display()
-        )));
-    }
-
-    let mut key_files = fs::read_dir(path)
-        .map_err(|error| {
-            Error::InvalidArgument(format!(
-                "trust store를 읽지 못했습니다 {}: {error}",
-                path.display()
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
-            Error::InvalidArgument(format!(
-                "trust store entry를 읽지 못했습니다 {}: {error}",
-                path.display()
-            ))
-        })?;
-    key_files.sort_by_key(|entry| entry.file_name());
-
-    let mut keys = Vec::new();
-    for entry in key_files {
-        let name = entry.file_name();
-        let name = name.to_str().ok_or_else(|| {
-            Error::InvalidArgument(format!(
-                "trust store key file name은 UTF-8이어야 합니다: {}",
-                path.display()
-            ))
-        })?;
-        let Some(id) = name.strip_suffix(".pub") else {
-            continue;
-        };
-        if id.is_empty() {
-            return Err(Error::InvalidArgument(format!(
-                "trust store key file name은 <key-id>.pub 형식이어야 합니다: {}",
-                entry.path().display()
-            )));
-        }
-        keys.push(load_trusted_key(id, &entry.path())?);
-    }
-    Ok(keys)
-}
-
-#[cfg(target_os = "linux")]
-fn load_trusted_key(
-    id: &str,
-    path: &Path,
-) -> taskcaged::Result<taskcaged::bundle::TrustedBundleKey> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        Error::InvalidArgument(format!(
-            "trusted key를 읽지 못했습니다 {}: {error}",
-            path.display()
-        ))
-    })?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(Error::InvalidArgument(format!(
-            "trusted key는 symlink가 아닌 regular file이어야 합니다: {}",
-            path.display()
-        )));
-    }
-    let encoded = fs::read_to_string(path).map_err(|error| {
-        Error::InvalidArgument(format!(
-            "trusted key를 읽지 못했습니다 {}: {error}",
-            path.display()
-        ))
-    })?;
-    taskcaged::bundle::TrustedBundleKey::from_base64(id.to_owned(), &encoded)
-        .map_err(|error| Error::InvalidArgument(error.to_string()))
+    Ok(Command::Install(InstallConfig { source, cache_root }))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -291,14 +132,13 @@ pub(crate) fn execute(_command: Command) -> taskcaged::Result<()> {
 
 #[cfg(target_os = "linux")]
 fn install(config: InstallConfig) -> taskcaged::Result<()> {
-    let keys = config.load_keys()?;
     let staging = PackStaging::extract(&config.source, &config.cache_root)?;
     let runtime_package = taskcaged::runtime_package::import_for_service_uid(
         &config.cache_root,
         &staging.runtime_package,
     )?;
     let catalog = taskcaged::bundle::BundleCatalog::open(&config.cache_root)?;
-    let capsule = catalog.import(&staging.capsule, &keys)?;
+    let capsule = catalog.import_unsigned(&staging.capsule)?;
     println!(
         "{}",
         serde_json::to_string(&InstallReport {
@@ -599,8 +439,8 @@ mod tests {
     use tar::{Builder, Header};
 
     #[test]
-    fn install_uses_default_daemon_paths_and_accepts_a_positional_source() {
-        let source = std::env::temp_dir().join("capsule.tccapsule.tar.gz");
+    fn install_uses_default_cache_and_accepts_a_positional_source() {
+        let source = std::env::temp_dir().join("capsule.tccapsule");
         let command = parse(vec![
             OsString::from("install"),
             source.clone().into_os_string(),
@@ -609,32 +449,16 @@ mod tests {
         let Command::Install(config) = command;
         assert_eq!(config.source, source);
         assert_eq!(config.cache_root, PathBuf::from(DEFAULT_CACHE_ROOT));
-        assert_eq!(config.trust_store, PathBuf::from(DEFAULT_TRUST_STORE));
 
         let error = parse(vec![
             OsString::from("install"),
             OsString::from("--source"),
-            OsString::from("capsule.tccapsule.tar.gz"),
+            OsString::from("capsule.tccapsule"),
             OsString::from("--cache-root"),
             OsString::from("relative"),
         ])
         .unwrap_err();
         assert!(error.to_string().contains("absolute path"));
-    }
-
-    #[test]
-    fn trust_store_uses_file_stem_as_key_id() {
-        let directory = tempfile::tempdir().unwrap();
-        fs::write(
-            directory.path().join("official-release.pub"),
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        )
-        .unwrap();
-
-        let keys = load_trust_store(directory.path(), false).unwrap();
-
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0].id(), "official-release");
     }
 
     #[test]
