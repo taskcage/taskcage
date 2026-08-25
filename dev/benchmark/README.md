@@ -65,6 +65,11 @@ warm-up은 수행하지 않는다(`warmup=0`, `iterations=1`). 실행이 끝나�
 원시 JSON과 정적 HTML 보고서의 절대 경로를 출력한다. HTML 보고서는 정상 변환에서만 지연시간, 메모리 peak,
 CPU 사용 시간을 비교하고, timeout·memory 제한은 각각 전체 정리와 작업별 제한을 O/X로 표시한다.
 
+정상 변환의 자원 그래프는 실제 Worker 배포 비용을 기준으로 한다. `processbuilder`는 Java Worker와 그 자식
+프로세스를, `docker_per_task`는 Java Worker와 task container를, `taskcage`는 Java Worker·`taskcaged`
+프로세스·Task cgroup을 포함한다. privileged daemon container의 root cgroup은 호스트 범위까지 보일 수 있어
+사용하지 않는다. 메모리는 각 구성 요소 peak의 합계이므로 전체 시스템의 같은 시점 peak가 아니라 보수적인 상한이다.
+
 ```bash
 python3 dev/benchmark/lab.py run --concurrency 8 --warmup 2 --iterations 30
 python3 dev/benchmark/lab.py run --scenarios normal --concurrency 16
@@ -80,8 +85,8 @@ Worker는 정상 output, 시나리오별 terminal reason, TaskCage 사용량과 
 실시간 수집은 TaskCage daemon의 opt-in Prometheus `/metrics`와 Docker container 사용량을 결합한다.
 종료 원인처럼 label이 있는 Prometheus metric도 label set을 포함한 이름으로 보존한다. ProcessBuilder 측에는
 daemon metrics가 없으므로 Worker container 표본과 terminal result를 수집한다. 정상 FFmpeg 비교에서는
-Worker JVM을 제외하기 위해 ProcessBuilder가 시작한 FFmpeg 루트 프로세스의 CPU 시간과 `VmHWM` peak RSS를
-별도로 기록한다. 각 실행이 terminal result를
+Worker와 외부 작업을 함께 해석하기 위해 Worker cgroup 사용량을 기록한다. TaskCage 실행 후에는 daemon
+프로세스의 `VmHWM`·CPU time과 Task cgroup 결과를 각각 기록한다. 각 실행이 terminal result를
 반환한 직후 `running_tasks=0`인 마지막 daemon 표본을 한 번 더 기록한다. 짧은 작업의 메모리 peak은 표본
 주기에 따라 낮게 잡힐 수 있으므로, TaskCage Task가 반환하는 `memoryPeakBytes`를 우선 해석한다.
 
