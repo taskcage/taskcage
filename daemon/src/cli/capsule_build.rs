@@ -3,14 +3,14 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde::Serialize;
-use taskcaged::Error;
+use taskcaged::{Error, runtime_oci, runtime_package_builder};
 
 use super::required_option;
 
 #[derive(Debug)]
 pub(crate) struct Config {
     capsulefile: PathBuf,
-    runtime_package: PathBuf,
+    runtime_package: Option<PathBuf>,
     platform: String,
     output: PathBuf,
 }
@@ -79,7 +79,6 @@ pub(crate) fn parse(args: Vec<OsString>) -> taskcaged::Result<Config> {
     }
 
     let capsulefile = required_option("capsule build file", capsulefile)?;
-    let runtime_package = required_option("capsule build runtime-package", runtime_package)?;
     let platform = required_option("capsule build platform", platform)?;
     let output = required_option("capsule build output", output)?;
     if output.extension().and_then(|extension| extension.to_str()) != Some("tccapsule") {
@@ -104,12 +103,49 @@ pub(crate) fn execute(config: Config) -> taskcaged::Result<()> {
         ))
     })?;
     let spec = taskcaged::capsulefile::parse(&source)?;
-    let report = taskcaged::capsule_pack::build(
-        &spec,
+    let temporary = config.output.with_extension("runtime-package.staging");
+    let runtime_package = match (
         &config.runtime_package,
-        &config.platform,
-        &config.output,
-    )?;
+        spec.runtime_source.starts_with("oci://"),
+    ) {
+        (Some(path), false) => path.clone(),
+        (None, true) => {
+            let runtime = spec
+                .runtime
+                .as_ref()
+                .expect("OCI runtime metadata was required by parser");
+            let package = runtime_package_builder::BuildConfig {
+                source_rootfs: PathBuf::new(),
+                output: temporary.clone(),
+                id: runtime.id.clone(),
+                version: runtime.version.clone(),
+                platform: config.platform.clone(),
+                glibc_minimum: runtime.glibc_minimum.clone(),
+                entrypoint: runtime.entrypoint.clone(),
+                library_paths: runtime.library_paths.clone(),
+                licenses: Vec::new(),
+                sbom_path: runtime.sbom_path.clone(),
+            };
+            runtime_oci::build_from_oci(&spec.runtime_source, &package)?;
+            temporary
+        }
+        (Some(_), true) => {
+            return Err(Error::InvalidArgument(
+                "OCI FROM은 --runtime-package을 함께 지정할 수 없습니다".to_owned(),
+            ));
+        }
+        (None, false) => {
+            return Err(Error::InvalidArgument(
+                "runtime:// FROM에는 --runtime-package이 필요합니다".to_owned(),
+            ));
+        }
+    };
+    let result =
+        taskcaged::capsule_pack::build(&spec, &runtime_package, &config.platform, &config.output);
+    if runtime_package == temporary {
+        let _ = fs::remove_dir_all(&temporary);
+    }
+    let report = result?;
     println!(
         "{}",
         serde_json::to_string(&Report {
