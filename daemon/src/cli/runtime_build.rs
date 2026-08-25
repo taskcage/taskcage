@@ -1,13 +1,14 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use taskcaged::{Error, runtime_package::PackageLicense, runtime_package_builder};
+use taskcaged::{Error, runtime_oci, runtime_package::PackageLicense, runtime_package_builder};
 
 use super::required_option;
 
 #[derive(Debug)]
 pub(crate) struct Config {
     source_rootfs: PathBuf,
+    oci_reference: Option<String>,
     output: PathBuf,
     id: String,
     version: String,
@@ -21,6 +22,7 @@ pub(crate) struct Config {
 
 pub(crate) fn parse(args: Vec<OsString>) -> taskcaged::Result<Config> {
     let mut source_rootfs = None;
+    let mut oci_reference = None;
     let mut output = None;
     let mut id = None;
     let mut version = None;
@@ -47,6 +49,7 @@ pub(crate) fn parse(args: Vec<OsString>) -> taskcaged::Result<Config> {
             "--source-rootfs" if source_rootfs.is_none() => {
                 source_rootfs = Some(PathBuf::from(value))
             }
+            "--from" if oci_reference.is_none() => oci_reference = Some(value),
             "--output" if output.is_none() => output = Some(PathBuf::from(value)),
             "--id" if id.is_none() => id = Some(value),
             "--version" if version.is_none() => version = Some(value),
@@ -64,7 +67,7 @@ pub(crate) fn parse(args: Vec<OsString>) -> taskcaged::Result<Config> {
                     path: path.to_owned(),
                 });
             }
-            "--source-rootfs" | "--output" | "--id" | "--version" | "--platform"
+            "--source-rootfs" | "--from" | "--output" | "--id" | "--version" | "--platform"
             | "--glibc-minimum" | "--entrypoint" | "--sbom" => {
                 return Err(Error::InvalidArgument(format!(
                     "runtime build option이 중복되었습니다: {name}"
@@ -78,8 +81,14 @@ pub(crate) fn parse(args: Vec<OsString>) -> taskcaged::Result<Config> {
         };
         index += 2;
     }
+    if source_rootfs.is_some() == oci_reference.is_some() {
+        return Err(Error::InvalidArgument(
+            "runtime build에는 --source-rootfs 또는 --from 중 하나가 필요합니다".to_owned(),
+        ));
+    }
     Ok(Config {
-        source_rootfs: required_option("runtime build source-rootfs", source_rootfs)?,
+        source_rootfs: source_rootfs.unwrap_or_default(),
+        oci_reference,
         output: required_option("runtime build output", output)?,
         id: required_option("runtime build id", id)?,
         version: required_option("runtime build version", version)?,
@@ -92,7 +101,7 @@ pub(crate) fn parse(args: Vec<OsString>) -> taskcaged::Result<Config> {
     })
 }
 pub(crate) fn execute(config: Config) -> taskcaged::Result<()> {
-    let report = runtime_package_builder::build(&runtime_package_builder::BuildConfig {
+    let package = runtime_package_builder::BuildConfig {
         source_rootfs: config.source_rootfs,
         output: config.output,
         id: config.id,
@@ -103,7 +112,11 @@ pub(crate) fn execute(config: Config) -> taskcaged::Result<()> {
         library_paths: config.library_paths,
         licenses: config.licenses,
         sbom_path: config.sbom_path,
-    })?;
+    };
+    let report = match config.oci_reference {
+        Some(reference) => runtime_oci::build_from_oci(&reference, &package)?,
+        None => runtime_package_builder::build(&package)?,
+    };
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
 }
